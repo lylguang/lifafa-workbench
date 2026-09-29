@@ -1,0 +1,5 @@
+# LWB starts with a consistent light workbench palette. Users can change this
+# through the official DSH Appearance setting; the file is only a first-run
+# default and is never overwritten by the launcher after it exists.
+ui-theme:
+  preference: light

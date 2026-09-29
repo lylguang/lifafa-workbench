@@ -1,0 +1,30 @@
+{
+  "name": "@scitiger-ai/lwb-dsh-bundle",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lifafa Workbench product bundle for the DeepSeek Harness profile",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "workspace:*",
+    "@deepseek-ai/dsh-settings": "workspace:*",
+    "@deepseek-ai/dsh-llm": "workspace:*",
+    "@deepseek-ai/cordis": "workspace:*",
+    "@deepseek-ai/dsh-typert-protocol": "workspace:*"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "immediately": true
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

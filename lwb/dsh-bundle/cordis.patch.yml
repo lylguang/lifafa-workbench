@@ -1,0 +1,25 @@
+# LWB is a DSH bundle. It extends the official Web composition through the
+# same Cordis patch mechanism used by upstream bundles.
+
+- insert:
+    - id: lwb-profile
+      name: '@scitiger-ai/lwb-dsh-bundle'
+      config:
+        name: 老傅工作台
+        version: 0.1.0
+        remoteSettings:
+          mode: auto
+
+    # Browser half of the product shell. It is deliberately a normal DSH
+    # client package, so the module graph and the official runtime own loading.
+    - id: lwb-client
+      name: '@scitiger-ai/lwb-dsh-bundle'
+      config:
+        clientOnly: true
+
+# LWB owns the complete sidebar. Disable the unused upstream sidebar owner so
+# the two owners cannot compete for the same primary slot. The native Settings
+# seat and sidebar directory-flow seat are declared by the LWB overlay instead.
+# DSH activates its directory picker only when both workspace flow seats exist.
+- id: ui-sidebar
+  disabled: true

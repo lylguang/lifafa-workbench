@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "id": "spoken-video",
+  "packageName": "@scitiger-ai/lwb-spoken-video",
+  "name": "口播视频内容创作",
+  "version": "0.1.0",
+  "description": "从热点发现到视频制作，完成口播稿、配音字幕与发布资料，支持按账号定位创作和定时内容安排。",
+  "market": {
+    "category": "内容创作",
+    "tags": [
+      "口播创作",
+      "热点选题",
+      "智能配音",
+      "视频制作",
+      "定时创作"
+    ],
+    "workflow": [
+      "发现素材",
+      "确定选题",
+      "撰写口播稿",
+      "配音与字幕",
+      "视频制作",
+      "发布资料"
+    ],
+    "icon": "创",
+    "introduction": "从热点与灵感出发，完成选题、口播稿、配音字幕和视频制作，并整理封面、标题与发布文案。支持按账号定位创作，也可安排定时生产任务。",
+    "workflowHint": "账号定位贯穿创作过程；内容安排可按计划执行整条流程。",
+    "gettingStarted": [
+      "AI 创作使用「系统设置 → 模型」中的默认模型，请先完成模型配置。",
+      "配音、字幕需配置媒体服务；封面生图可按需单独启用和配置。",
+      "内置 17 个信号来源，默认启用，加载后按采集规则自动更新。",
+      "创作数据保存在专属工作区，卸载能力包会保留工作区和数据。",
+      "发布模块生成标题、文案、标签和封面等资料，平台发布由你完成。"
+    ],
+    "features": [
+      {
+        "menuId": "positioning",
+        "title": "账号定位",
+        "description": "明确受众、内容方向与表达边界。",
+        "icon": "target"
+      },
+      {
+        "menuId": "signals",
+        "title": "信号发现",
+        "description": "汇集热点、行业资讯与 AI 日报。",
+        "icon": "signal"
+      },
+      {
+        "menuId": "topics",
+        "title": "选题策划",
+        "description": "结合素材与账号定位生成选题。",
+        "icon": "idea"
+      },
+      {
+        "menuId": "scripts",
+        "title": "口播写稿",
+        "description": "生成、修改口播稿并检查质量。",
+        "icon": "write"
+      },
+      {
+        "menuId": "audio-captions",
+        "title": "配音与字幕",
+        "description": "生成配音、识别语音并制作字幕。",
+        "icon": "audio"
+      },
+      {
+        "menuId": "video-preview",
+        "title": "视频制作",
+        "description": "生成画面、合成视频并预览检查。",
+        "icon": "video"
+      },
+      {
+        "menuId": "publish",
+        "title": "发布资料",
+        "description": "整理标题、文案、标签与封面。",
+        "icon": "publish"
+      },
+      {
+        "menuId": "content-schedule",
+        "title": "内容安排",
+        "description": "按时间和频率执行创作任务。",
+        "icon": "calendar"
+      }
+    ]
+  },
+  "menus": [
+    {
+      "id": "positioning",
+      "label": "账号定位",
+      "glyph": "位",
+      "tone": "violet"
+    },
+    {
+      "id": "signals",
+      "label": "信号",
+      "glyph": "讯",
+      "tone": "blue"
+    },
+    {
+      "id": "topics",
+      "label": "选题",
+      "glyph": "题",
+      "tone": "orange"
+    },
+    {
+      "id": "scripts",
+      "label": "写稿",
+      "glyph": "稿",
+      "tone": "violet"
+    },
+    {
+      "id": "audio-captions",
+      "label": "配音 / 字幕",
+      "glyph": "声",
+      "tone": "pink"
+    },
+    {
+      "id": "video-preview",
+      "label": "视频 / 预览",
+      "glyph": "视",
+      "tone": "green"
+    },
+    {
+      "id": "publish",
+      "label": "发布",
+      "glyph": "发",
+      "tone": "red"
+    },
+    {
+      "id": "content-schedule",
+      "label": "内容安排",
+      "glyph": "排",
+      "tone": "blue"
+    }
+  ]
+}

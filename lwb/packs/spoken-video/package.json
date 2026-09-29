@@ -1,0 +1,30 @@
+{
+  "name": "@scitiger-ai/lwb-spoken-video",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone spoken-video content creation capability pack for Lifafa Workbench",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./lwb-pack.json": "./lwb-pack.json",
+    "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "workspace:*",
+    "@deepseek-ai/dsh-credentials": "workspace:*",
+    "@deepseek-ai/dsh-llm": "workspace:*",
+    "@deepseek-ai/dsh-settings": "workspace:*",
+    "@deepseek-ai/dsh-typert-protocol": "workspace:*",
+    "@deepseek-ai/dsh-tools": "workspace:*"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@scitiger-ai/lwb-dsh-bundle"
+      ]
+    }
+  }
+}

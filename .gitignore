@@ -1,0 +1,22 @@
+# 依赖与工具
+node_modules/
+vendor/
+.tooling/
+
+# Runtime state and local credentials
+.dsh/
+.env
+.env.*
+!.env.example
+lwb/local/
+.workbuddy/
+
+# 构建产物
+lwb/lib/
+
+# 系统与本地
+.DS_Store
+
+# 本地备份（开发过程产物，不发布）
+.backup-*/
+local

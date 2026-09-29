@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/deepseek-ai/deepseek-harness.git",
+  "tag": "dsh-v0.1.6-alpha.1",
+  "commit": "0a15e36e7f82b6ed45af6fa9759f29b40dcd965d",
+  "checkedAt": "2026-09-15",
+  "node": "^22.19.0 || >=24.0.0",
+  "packageManager": "pnpm@11.7.0"
+}

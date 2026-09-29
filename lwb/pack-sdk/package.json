@@ -1,0 +1,12 @@
+{
+  "name": "@scitiger-ai/lwb-pack-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Public manifest and host registration contract for Lifafa Workbench capability packs",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./package.json": "./package.json"
+  }
+}

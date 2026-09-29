@@ -1,0 +1,34 @@
+{
+  "name": "dsh-laofu-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lifafa Workbench product profile built on the pinned DeepSeek Harness composition.",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "dev": "node lwb/dsh-launcher.mjs",
+    "start": "node lwb/dsh-launcher.mjs",
+    "setup": "node scripts/setup-upstream.mjs",
+    "pack:list": "node lwb/pack-manager.mjs list",
+    "pack:install": "node lwb/pack-manager.mjs install",
+    "pack:remove": "node lwb/pack-manager.mjs remove",
+    "check": "node --check lwb/dsh-launcher.mjs && node --check lwb/pack-manager.mjs && node --check lwb/pack-runtime-links.mjs && node --check lwb/pack-sdk/index.mjs && node --check lwb/dsh-bundle/index.mjs && node --check lwb/dsh-bundle/archive-gateway.mjs && node --check lwb/dsh-bundle/remote-settings-gateway.mjs && node --check lwb/dsh-bundle/pack-registry.mjs && node --check lwb/dsh-bundle/pack-runtime.mjs && node --check lwb/dsh-bundle/pack-workspaces.mjs && node --check lwb/dsh-bundle/pack-services.mjs && node --check lwb/dsh-bundle/pack-task-scope.mjs && node --check lwb/dsh-bundle/pack-gateway.mjs && node --check lwb/dsh-bundle/client.js && node --check lwb/packs/spoken-video/index.mjs && node --check lwb/packs/spoken-video/gateway.mjs && node --check lwb/packs/spoken-video/spoken-video-store.mjs && node --check lwb/packs/spoken-video/spoken-video-subtitles.mjs && node --check lwb/packs/spoken-video/spoken-video-signal-adapters.mjs && node --check lwb/packs/spoken-video/spoken-video-content-store.mjs && node --check lwb/packs/spoken-video/spoken-video-account.mjs && node --check lwb/packs/spoken-video/spoken-video-execution.mjs && node --check lwb/packs/spoken-video/spoken-video-dsh-trace.mjs && node --check lwb/packs/spoken-video/spoken-video-topic.mjs && node --check lwb/packs/spoken-video/spoken-video-script.mjs && node --check lwb/packs/spoken-video/spoken-video-video-agent.mjs && node --check lwb/packs/spoken-video/spoken-video-preflight.mjs && node --check lwb/packs/spoken-video/spoken-video-remotion.mjs && node --check lwb/packs/spoken-video/spoken-video-media.mjs && node --check lwb/packs/spoken-video/spoken-video-media-host.mjs && node --check lwb/packs/spoken-video/spoken-video-media-tools.mjs && node --check lwb/packs/spoken-video/spoken-video-publish.mjs && node --check lwb/packs/spoken-video/spoken-video-publish-host.mjs && node --check lwb/packs/spoken-video/spoken-video-schedule.mjs && node --check lwb/packs/spoken-video/spoken-video-schedule-host.mjs && node --check lwb/packs/spoken-video/client.js && node --check lwb/packs/spoken-video/spoken-video-paths.mjs",
+    "dsh:dump": "node lwb/dsh-launcher.mjs --dump-config",
+    "profile:check": "node lwb/profile-smoke.mjs",
+    "pack:profile-check": "node lwb/pack-profile-smoke.mjs",
+    "test": "npm run check && npm run profile:check && npm run pack:profile-check && npm run unit:test",
+    "upstream:check": "sh lwb/upgrade/check-upstream.sh",
+    "unit:test": "node --test lwb/pack-sdk/test/*.test.mjs lwb/dsh-bundle/test/pack-*.test.mjs lwb/dsh-bundle/test/client-style-contract.test.mjs lwb/dsh-bundle/test/launcher-temp-redirect.test.mjs lwb/packs/spoken-video/test/*.test.mjs"
+  },
+  "packageManager": "pnpm@11.23.0+sha512.f00082e5b283a199b74e079da28d155c008fe232f44c8a06ea7ddfa014ecf719fc362f790ecc67b28106ddac2afb24c49a9a079159da560b2ce7d1e98efd11af",
+  "dependencies": {
+    "@babel/parser": "7.24.1",
+    "@remotion/cli": "4.0.522",
+    "postcss": "8.5.28",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.522",
+    "ws": "8.18.3"
+  }
+}

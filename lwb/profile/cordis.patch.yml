@@ -1,0 +1,3 @@
+# Local product overrides belong here. Keep this file as a patch layer so
+# Harness upgrades remain reviewable and user settings stay outside the repo.
+[]
