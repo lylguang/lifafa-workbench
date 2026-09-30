@@ -220,6 +220,17 @@ test('defaults voiceover requests to the packaged Tiffy reference voice', () => 
   assert.throws(() => normalizeVoiceoverRequest({ voiceSource: 'preset' }), /必须填写音色标识/u)
 })
 
+test('normalizes the bridge voiceover overrides and rejects unknown channels', () => {
+  const without = normalizeVoiceoverRequest({})
+  assert.equal(without.bridge, null)
+  const bridged = normalizeVoiceoverRequest({ voiceSource: 'preset', voiceId: '茉莉', bridge: { channel: 'cloud', style: '  清晰沉稳。 ' } })
+  assert.deepEqual(bridged.bridge, { channel: 'cloud', style: '清晰沉稳。' })
+  const styleOnly = normalizeVoiceoverRequest({ bridge: { style: '轻快一点' } })
+  assert.deepEqual(styleOnly.bridge, { channel: null, style: '轻快一点' })
+  assert.throws(() => normalizeVoiceoverRequest({ bridge: { channel: 'both' } }), /桥接配音方式不受支持/u)
+  assert.throws(() => normalizeVoiceoverRequest({ bridge: { style: 'x'.repeat(201) } }), /桥接预期风格/u)
+})
+
 test('allows an empty video brief and applies the protected default layout', () => {
   const request = normalizeRenderRequest({ visualBrief: '   ', subtitleEnabled: false })
   assert.equal(request.visualBrief, DEFAULT_VIDEO_VISUAL_BRIEF)
@@ -461,6 +472,55 @@ test('submits the packaged Tiffy reference audio to SciTiger before generating v
   const detail = await store.get(currentAgent, { projectId: project.id })
   assert.equal(detail.artifacts.voiceover.data.voiceName, DEFAULT_VOICE_PROFILE.name)
   assert.equal(detail.artifacts.voiceover.data.provider, 'scitiger')
+})
+
+test('passes bridge builtin voices and per-task overrides to SciTiger without a reference upload', async (t) => {
+  if (!mediaBinariesAvailable()) { t.skip('ffmpeg or ffprobe is unavailable in this environment'); return }
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await projectWithApprovedScript(currentAgent, store)
+  const outputFile = join(cwd, 'upstream.wav')
+  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.5', '-ac', '1', '-ar', '16000', outputFile], { stdio: 'ignore' })
+  const outputAudio = await readFile(outputFile)
+  const observed = { upload: false, submit: null }
+  const host = new SpokenVideoMediaHost({
+    projectsStore: store,
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: 'sk-bridge-builtin' }),
+    environment: { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'https://scitiger.test' },
+    fetch: async (url, init = {}) => {
+      const parsed = new URL(String(url))
+      if (parsed.pathname === '/api/v1/media/audio-uploads') { observed.upload = true; throw new Error('builtin voices must not upload a reference') }
+      if (parsed.pathname === '/api/v1/tts/jobs') {
+        observed.submit = JSON.parse(init.body)
+        return new Response(JSON.stringify({ success: true, data: { job_id: 'tts_bridge_builtin' } }))
+      }
+      if (parsed.pathname === '/api/v1/tts/jobs/tts_bridge_builtin') {
+        return new Response(JSON.stringify({ success: true, data: { status: 'completed', result: { audio_url: 'https://media.test/builtin.wav' } } }))
+      }
+      if (parsed.hostname === 'media.test') return new Response(outputAudio)
+      throw new Error(`unexpected request: ${url}`)
+    },
+  })
+  const started = await host.startVoiceover(currentAgent, {
+    projectId: project.id,
+    expectedRevision: project.revision,
+    provider: 'scitiger',
+    voiceSource: 'preset',
+    voiceId: '茉莉',
+    voiceName: '茉莉',
+    rate: 1.1,
+    bridge: { channel: 'cloud', style: '清晰沉稳，适合知识讲解。' },
+  })
+  const finished = await waitForOperation(host, currentAgent, project.id, started.id)
+  assert.equal(finished.status, 'succeeded', finished.error)
+  assert.equal(observed.upload, false)
+  assert.equal(observed.submit.voice_source, 'preset')
+  assert.equal(observed.submit.voice_id, '茉莉')
+  assert.equal(observed.submit.tts_provider, 'cloud')
+  assert.equal(observed.submit.style, '清晰沉稳，适合知识讲解。')
+  assert.equal(observed.submit.voice_settings.rate, 1.1)
+  assert.equal(Object.hasOwn(observed.submit, 'reference_audio_asset_id'), false)
 })
 
 test('maps SciTiger insufficient points to an actionable user-facing error', async (t) => {

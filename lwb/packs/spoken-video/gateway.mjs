@@ -87,6 +87,7 @@ export class SpokenVideoGateway extends TypertRemoteService {
   listAudioTasks(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.listAudioTasks(context, request)) }
   listVideoTasks(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.listVideoTasks(context, request)) }
   uploadVoiceReference(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.uploadVoiceReference(context, request)) }
+  bridgeVoiceoverInfo() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.bridgeVoiceoverInfo(context)) }
   uploadVideoBgm(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.uploadVideoBgm(context, request)) }
   audioTask(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.audioTask(context, request)) }
   startAudioTask(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startAudioTask(context, request)) }
@@ -164,6 +165,7 @@ decorateRemote(SpokenVideoGateway.prototype, 'listMediaTasks', 'listMediaTasks')
 decorateRemote(SpokenVideoGateway.prototype, 'listAudioTasks', 'listAudioTasks')
 decorateRemote(SpokenVideoGateway.prototype, 'listVideoTasks', 'listVideoTasks')
 decorateRemote(SpokenVideoGateway.prototype, 'uploadVoiceReference', 'uploadVoiceReference')
+decorateRemote(SpokenVideoGateway.prototype, 'bridgeVoiceoverInfo', 'bridgeVoiceoverInfo')
 decorateRemote(SpokenVideoGateway.prototype, 'uploadVideoBgm', 'uploadVideoBgm')
 decorateRemote(SpokenVideoGateway.prototype, 'audioTask', 'audioTask')
 decorateRemote(SpokenVideoGateway.prototype, 'startAudioTask', 'startAudioTask')

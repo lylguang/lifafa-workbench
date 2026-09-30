@@ -142,6 +142,9 @@ export function normalizeVoiceoverRequest(value) {
   if (voiceSource === 'upload' && (!referenceAudio?.id || !referenceAudio.file || !referenceAudio.name || !referenceAudio.mediaType)) {
     throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '使用自定义音色时请先上传参考音频。')
   }
+  // 桥接（SciTiger 端点）专属提示，仅当请求打到桥接时生效：channel 覆盖桥接的
+  // 云端/本地开关，style 覆盖其预期风格；其他渠道原样忽略。
+  const bridgeInput = input.bridge == null ? null : object(input.bridge, '桥接配音设置')
   return {
     provider: oneOf(input.provider, '生成方式', MEDIA_PROVIDERS, 'bailian'),
     voiceSource,
@@ -153,6 +156,10 @@ export function normalizeVoiceoverRequest(value) {
     rate: number(input.rate, '语速', 0.5, 2, 1),
     volume: number(input.volume, '音量', 0, 2, 1),
     pitch: number(input.pitch, '音高', -12, 12, 0),
+    bridge: bridgeInput ? {
+      channel: oneOf(bridgeInput.channel, '桥接配音方式', ['cloud', 'local'], null),
+      style: optionalText(bridgeInput.style, '桥接预期风格', 200),
+    } : null,
   }
 }
 

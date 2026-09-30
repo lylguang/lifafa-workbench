@@ -573,6 +573,25 @@ test('a stored voice preset rides the voiceover request and stages uploaded refe
   assert.equal(voiceover.request.provider, 'bailian', 'the round voices through the configured connection channel')
 })
 
+test('a builtin bridge voice preset reaches the voiceover request verbatim', async (t) => {
+  const { host, currentAgent, fake } = await setup(t, { depth: 'packaging' })
+  const created = await createTask(host, currentAgent, {
+    production: {
+      orientation: 'landscape', subtitleEnabled: true, scriptTier: 'medium', visualBrief: null,
+      voice: { provider: 'bailian', voiceSource: 'preset', voiceId: '茉莉', voiceName: '茉莉', referenceAudio: null, outputFormat: null, rate: 1, volume: 1, pitch: 0, bridge: { channel: 'cloud', style: '清晰沉稳。' } },
+    },
+  })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+
+  assert.equal(run.status, 'completed')
+  const voiceover = fake.calls.find((call) => call.name === 'startVoiceover')
+  assert.equal(voiceover.request.voiceSource, 'preset')
+  assert.equal(voiceover.request.voiceId, '茉莉')
+  assert.deepEqual(voiceover.request.bridge, { channel: 'cloud', style: '清晰沉稳。' })
+  assert.equal(fake.calls.some((call) => call.name === 'stageScheduleVoiceReference'), false, 'builtin voices need no staged reference')
+})
+
 test('media stages follow the configured connection channel instead of the bailian default', async (t) => {
   const { host, currentAgent, fake } = await setup(t, { depth: 'packaging' })
   fake.hosts.media.status = async () => ({

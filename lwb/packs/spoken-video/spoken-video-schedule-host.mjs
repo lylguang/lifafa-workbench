@@ -828,6 +828,7 @@ export class SpokenVideoScheduleHost {
       const preset = { provider: await this.#mediaProvider(), voiceSource: voice?.voiceSource || 'system', rate: voice?.rate ?? 1, volume: voice?.volume ?? 1, pitch: voice?.pitch ?? 0 }
       if (voice?.voiceId) preset.voiceId = voice.voiceId
       if (voice?.voiceName) preset.voiceName = voice.voiceName
+      if (voice?.bridge) preset.bridge = voice.bridge
       if (voice?.voiceSource === 'upload' && voice.referenceAudio) {
         preset.referenceAudio = await this.media.stageScheduleVoiceReference(agent, { projectId, reference: voice.referenceAudio })
       }

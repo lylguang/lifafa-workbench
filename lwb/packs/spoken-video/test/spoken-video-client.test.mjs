@@ -381,19 +381,27 @@ test('schedule form exposes a per-task voice preset that rides create, edit and 
   assert.ok(start >= 0 && end > start, 'ContentSchedulePage must remain a standalone component')
   const page = source.slice(start, end)
 
-  // The preset covers source, reference audio and rate/volume, and edit mode
-  // rehydrates it from the stored task. The defaults and rehydrate helpers
-  // live beside emptyScheduleForm, outside the page component.
-  assert.match(source, /voiceSource: 'system', voiceReference: null, voiceRate: '1', voiceVolume: '1'/u)
-  assert.match(source, /voiceSource: voice\?\.voiceSource === 'upload' \? 'upload' : 'system'/u)
-  assert.match(source, /voiceReference: voice\?\.voiceSource === 'upload' && voice\.referenceAudio \? voice\.referenceAudio : null/u)
+  // The preset covers source (system / upload / bridge builtin / bridge
+  // library), reference audio and rate/volume, and edit mode rehydrates it
+  // from the stored task. Defaults and rehydrate helpers live beside
+  // emptyScheduleForm, outside the page component.
+  assert.match(source, /voiceSource: 'system', voiceReference: null, voiceRate: '1', voiceVolume: '1', bridgeVoice: '冰糖', libraryVoice: '', bridgeChannel: '', bridgeStyle: ''/u)
+  assert.match(source, /voiceSource: voice\?\.voiceSource === 'upload' \? 'upload' : voice\?\.voiceSource === 'preset' \? \(presetIsBuiltin \? 'builtin' : 'library'\) : 'system'/u)
+  assert.match(source, /bridgeChannel: voice\?\.bridge\?\.channel \|\| ''/u)
   assert.match(page, /voice: voicePayloadOf\(\)/u)
-  // An upload preset without a reference cannot be saved silently.
-  assert.match(page, /const voiceReady = form\.voiceSource !== 'upload' \|\| Boolean\(form\.voiceReference\);/u)
-  assert.match(page, /&& selectedCount > 0 && voiceReady;/u)
+  // Bridge presets both ride voiceSource 'preset' and never pin a provider
+  // client-side; the runner follows the saved connection channel.
+  assert.match(page, /\{ voiceSource: 'preset', voiceId: form\.bridgeVoice, voiceName: form\.bridgeVoice, rate, volume, \.\.\.bridgeFields \}/u)
+  assert.match(page, /\{ voiceSource: 'preset', voiceId: form\.libraryVoice, voiceName: form\.libraryVoice, rate, volume, \.\.\.bridgeFields \}/u)
+  assert.doesNotMatch(page, /voicePayloadOf = \(\) => \{[\s\S]{0,600}?provider:/u)
+  // Broken preset combinations cannot be saved silently.
+  assert.match(page, /&& \(form\.voiceSource !== 'library' \|\| Boolean\(form\.libraryVoice\)\)/u)
+  assert.match(page, /&& !\(form\.voiceSource === 'builtin' && form\.bridgeChannel === 'local'\)/u)
   assert.match(page, /请先上传音频文件/u)
+  assert.match(page, /桥接内置音色只能搭配云端/u)
+  // The bridge settings snapshot rides the page load and feeds the info line.
+  assert.match(page, /remote\(packId, 'bridgeVoiceoverInfo'\)/u)
+  assert.match(page, /桥接当前：/u)
   // Upload flows through the same shared endpoint as the audio workbench.
   assert.match(page, /remote\(packId, 'uploadVoiceReference', \{ name: file\.name, mediaType: file\.type, data \}\)/u)
-  // The preset never pins a provider client-side; the runner follows the saved channel.
-  assert.doesNotMatch(page, /voicePayloadOf = \(\) => \(\{[\s\S]*?provider:/u)
 })

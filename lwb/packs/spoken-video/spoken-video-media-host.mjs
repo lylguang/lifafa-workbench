@@ -920,6 +920,39 @@ export class SpokenVideoMediaHost {
     }
   }
 
+  /**
+   * Snapshot of the bridge's voiceover settings for schedule forms: current
+   * channel, configured builtin voice/style, default-voice mapping and the
+   * local voice library. Safe fields only — never the MiMo API key. Fails
+   * soft (available:false) so the form still works without the bridge.
+   */
+  async bridgeVoiceoverInfo() {
+    const config = mediaServiceConfig(this.environment)
+    if (!config.scitigerConfigured) return { available: false, reason: '未配置桥接（SciTiger）服务地址。' }
+    try {
+      const [infoBody, voicesBody] = await Promise.all([
+        this.#externalJson(`${config.scitigerBaseUrl}/api/v1/tts/voiceover-info`, { signal: AbortSignal.timeout(4000) }, '桥接配音信息'),
+        this.#externalJson(`${config.scitigerBaseUrl}/admin/voices`, { signal: AbortSignal.timeout(4000) }, '桥接音色库'),
+      ])
+      const info = this.#scitigerData(infoBody, '桥接配音信息')
+      const voices = Array.isArray(voicesBody) ? voicesBody : []
+      return {
+        available: true,
+        ttsProvider: info.tts_provider === 'local' ? 'local' : 'cloud',
+        mimoVoice: typeof info.mimo_voice === 'string' && info.mimo_voice.trim() ? info.mimo_voice.trim() : null,
+        mimoStyle: typeof info.mimo_style === 'string' && info.mimo_style.trim() ? info.mimo_style.trim() : null,
+        mimoKeyConfigured: info.mimo_key_configured === true,
+        defaultVoice: typeof info.default_voice === 'string' && info.default_voice.trim() ? info.default_voice.trim() : null,
+        builtinVoices: Array.isArray(info.builtin_voices) ? info.builtin_voices.filter((voice) => typeof voice === 'string' && voice.trim()) : [],
+        voices: voices
+          .filter((voice) => voice && typeof voice.id === 'string' && voice.id.trim())
+          .map((voice) => ({ id: voice.id.trim(), hasTxt: voice.hasTxt === true })),
+      }
+    } catch (error) {
+      return { available: false, reason: mediaErrorMessage(error) }
+    }
+  }
+
   async configureConnection(request) {
     const input = object(request, '连接设置')
     const ref = mediaCredentialRef(input.provider)
@@ -1993,6 +2026,8 @@ export class SpokenVideoMediaHost {
         ...(reference ? { reference_audio_asset_id: await this.#scitigerUploadAudio(run, reference.audio, reference.path, reference.name) } : { voice_source: input.voiceSource, ...(input.voiceId ? { voice_id: input.voiceId } : {}) }),
         output_format: input.outputFormat || 'wav',
         voice_settings: { rate: input.rate, volume: input.volume, pitch: input.pitch },
+        ...(input.bridge?.channel ? { tts_provider: input.bridge.channel } : {}),
+        ...(input.bridge?.style ? { style: input.bridge.style } : {}),
       }),
     }, 'SciTiger TTS 提交'), 'SciTiger TTS 提交')
     const taskId = stringAt(submitted, ['job_id'], ['task_id'], ['id'])

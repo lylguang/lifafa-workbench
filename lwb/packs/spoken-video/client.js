@@ -2830,11 +2830,13 @@ window.__ModuleLoader__.load({
     const AS_APPROVING = new Set(['video', 'packaging']);
     const AS_STEPS = { topic: '选题', script: '写稿', approve: '确认稿件', voiceover: '配音', subtitles: '字幕', video: '成片质检', packaging: '发布资料' };
     const AS_TIERS = [{ id: 'short', label: '短（300-999 字）' }, { id: 'medium', label: '中（1000-2499 字）' }, { id: 'long', label: '长（2500 字以上）' }];
+    // 桥接（小米 MiMo 云端）的内置音色表；与桥接 /api/v1/tts/voiceover-info 的 builtin_voices 同源。
+    const SV_MIMO_BUILTIN_VOICES = ['冰糖', '茉莉', '苏打', '白桦', 'mimo_default'];
     const AS_RUN_STATUS = { running: '执行中', completed: '已完成', partial: '部分完成', failed: '失败', missed: '已错过', cancelled: '已停止' };
     const AS_ITEM_STATUS = { running: '进行中', completed: '已完成', failed: '失败', cancelled: '已停止' };
     const AS_STAGE_TONE = { done: 'sv-stage', failed: 'sv-status-error', running: '', skipped: 'sv-status-disabled' };
     function emptyScheduleForm() {
-      return { name: '', days: new Set([1, 2, 3, 4, 5]), time: '21:00', angle: '', offSources: new Set(), offPlatforms: new Set(), excluded: new Set(), depth: 'packaging', perRunLimit: 1, orientation: 'landscape', scriptTier: 'medium', subtitleEnabled: true, visualBrief: '', voiceSource: 'system', voiceReference: null, voiceRate: '1', voiceVolume: '1' };
+      return { name: '', days: new Set([1, 2, 3, 4, 5]), time: '21:00', angle: '', offSources: new Set(), offPlatforms: new Set(), excluded: new Set(), depth: 'packaging', perRunLimit: 1, orientation: 'landscape', scriptTier: 'medium', subtitleEnabled: true, visualBrief: '', voiceSource: 'system', voiceReference: null, voiceRate: '1', voiceVolume: '1', bridgeVoice: '冰糖', libraryVoice: '', bridgeChannel: '', bridgeStyle: '' };
     }
     /** Rehydrate a per-tab form from a stored task so editing reuses the create form. */
     function scheduleFormOf(schedule, board) {
@@ -2843,6 +2845,7 @@ window.__ModuleLoader__.load({
       const chosen = new Set(schedule.sources?.sourceIds || []);
       const chosenPlatforms = new Set(schedule.sources?.platforms || []);
       const voice = schedule.production?.voice || null;
+      const presetIsBuiltin = Boolean(voice?.voiceSource === 'preset' && SV_MIMO_BUILTIN_VOICES.includes(voice.voiceId));
       return {
         name: schedule.name || '',
         days: new Set(schedule.days?.length ? schedule.days : [1, 2, 3, 4, 5]),
@@ -2857,10 +2860,14 @@ window.__ModuleLoader__.load({
         scriptTier: schedule.production?.scriptTier || 'medium',
         subtitleEnabled: schedule.production?.subtitleEnabled !== false,
         visualBrief: schedule.production?.visualBrief || '',
-        voiceSource: voice?.voiceSource === 'upload' ? 'upload' : 'system',
+        voiceSource: voice?.voiceSource === 'upload' ? 'upload' : voice?.voiceSource === 'preset' ? (presetIsBuiltin ? 'builtin' : 'library') : 'system',
         voiceReference: voice?.voiceSource === 'upload' && voice.referenceAudio ? voice.referenceAudio : null,
         voiceRate: String(voice?.rate ?? 1),
         voiceVolume: String(voice?.volume ?? 1),
+        bridgeVoice: presetIsBuiltin ? voice.voiceId : '冰糖',
+        libraryVoice: voice?.voiceSource === 'preset' && !presetIsBuiltin ? voice.voiceId : '',
+        bridgeChannel: voice?.bridge?.channel || '',
+        bridgeStyle: voice?.bridge?.style || '',
       };
     }
     function ScheduleRunDetails({ packId, runId, onChanged }) {
@@ -2988,6 +2995,7 @@ window.__ModuleLoader__.load({
       const [historyRefresh, setHistoryRefresh] = React.useState(0);
       const [confirmNode, ask] = useSvConfirm();
       const [voiceUploading, setVoiceUploading] = React.useState(false);
+      const [bridgeInfo, setBridgeInfo] = React.useState(null);
       const scheduleVoiceFileInputRef = React.useRef(null);
       const fail = React.useCallback((message) => { setError(message); }, [setError]);
 
@@ -3007,8 +3015,9 @@ window.__ModuleLoader__.load({
           remote(packId, 'sources'),
           remote(packId, 'listAccounts'),
           remoteStatic('scheduleRuntimeStatus').catch(() => null),
-        ]).then(([nextBoard, nextSources, nextAccounts, nextRuntime]) => {
-          setBoard(nextBoard); setSources(nextSources); setAccountLibrary(nextAccounts); setRuntime(nextRuntime);
+          remote(packId, 'bridgeVoiceoverInfo').catch(() => null),
+        ]).then(([nextBoard, nextSources, nextAccounts, nextRuntime, nextBridgeInfo]) => {
+          setBoard(nextBoard); setSources(nextSources); setAccountLibrary(nextAccounts); setRuntime(nextRuntime); setBridgeInfo(nextBridgeInfo);
           setActiveTab((current) => current !== GENERAL_TAB && nextAccounts.accounts.some((item) => item.id === current && item.status === 'active') ? current : nextAccounts.defaultAccountId || GENERAL_TAB);
         }).catch((cause) => fail(cause.message));
         void loadSchedules();
@@ -3041,7 +3050,9 @@ window.__ModuleLoader__.load({
       const sortedDays = [...form.days].sort((a, b) => a - b);
       // A topic-only round needs no media chain, so only depth blockers apply.
       const blockersFor = (depth) => (runtime?.blockers || []).filter((item) => (depth === 'topic' || depth === 'script' ? item.depth === 'topic' : true));
-      const voiceReady = form.voiceSource !== 'upload' || Boolean(form.voiceReference);
+      const voiceReady = (form.voiceSource !== 'upload' || Boolean(form.voiceReference))
+        && (form.voiceSource !== 'library' || Boolean(form.libraryVoice))
+        && !(form.voiceSource === 'builtin' && form.bridgeChannel === 'local');
       const formValid = Boolean(form.name.trim()) && sortedDays.length > 0 && /^\d{2}:\d{2}$/u.test(form.time) && selectedCount > 0 && voiceReady;
 
       const payloadOf = () => ({
@@ -3073,8 +3084,12 @@ window.__ModuleLoader__.load({
         const label = activeAccount ? `账号「${activeAccount.name}」` : '通用（无账号定位）';
         const daysLabel = sortedDays.length === 7 ? '每天' : sortedDays.map((day) => AS_WEEKDAYS[day - 1].label).join('、');
         const depthLabel = AS_DEPTHS.find((item) => item.id === form.depth)?.label || form.depth;
-        const voiceLabel = form.voiceSource === 'upload' && form.voiceReference ? `音色「${form.voiceReference.name}」` : '系统默认音色';
-        const description = `${label}；${daysLabel} ${form.time}；深度「${depthLabel}」；每轮最多 ${form.perRunLimit} 条；${voiceLabel}；参与渠道 ${selectedCount} 个`;
+        const voiceLabel = form.voiceSource === 'upload' && form.voiceReference ? `音色「${form.voiceReference.name}」`
+          : form.voiceSource === 'builtin' ? `桥接内置音色「${form.bridgeVoice}」`
+          : form.voiceSource === 'library' ? `桥接音色库「${form.libraryVoice}」`
+          : '系统默认音色';
+        const bridgeChannelLabel = form.bridgeChannel === 'cloud' ? '，桥接配音方式固定为云端' : form.bridgeChannel === 'local' ? '，桥接配音方式固定为本地' : '';
+        const description = `${label}；${daysLabel} ${form.time}；深度「${depthLabel}」；每轮最多 ${form.perRunLimit} 条；${voiceLabel}${bridgeChannelLabel}；参与渠道 ${selectedCount} 个`;
         ask({
           title: editing ? '保存任务修改？' : '创建定时任务？',
           copy: `${description}。${AS_APPROVING.has(form.depth) ? '该深度将自动确认 AI 稿件，不再人工过稿；' : ''}到点后由主机侧调度器无人值守执行，切换页面不会中断。发布动作永远不会自动执行。`,
@@ -3168,16 +3183,26 @@ window.__ModuleLoader__.load({
 
       const runtimeBlockers = blockersFor(form.depth);
       const voiceReferenceMeta = form.voiceReference ? [form.voiceReference.bytes != null ? formatMediaBytes(form.voiceReference.bytes) : null, form.voiceReference.durationSeconds != null ? formatMediaDuration(form.voiceReference.durationSeconds) : null].filter(Boolean).join(' · ') : null;
+      const builtinVoiceOptions = Array.from(new Set([...(bridgeInfo?.available && Array.isArray(bridgeInfo.builtinVoices) && bridgeInfo.builtinVoices.length ? bridgeInfo.builtinVoices : SV_MIMO_BUILTIN_VOICES), form.bridgeVoice]));
+      const libraryVoiceOptions = bridgeInfo?.available && Array.isArray(bridgeInfo.voices) ? bridgeInfo.voices : [];
       const voicePayloadOf = () => {
         const numeric = (value, fallback) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : fallback; };
-        return form.voiceSource === 'upload'
-          ? {
-              voiceSource: 'upload',
-              referenceAudio: { id: form.voiceReference.id, file: form.voiceReference.file, name: form.voiceReference.name, mediaType: form.voiceReference.mediaType },
-              rate: numeric(form.voiceRate, 1),
-              volume: numeric(form.voiceVolume, 1),
-            }
-          : { voiceSource: 'system', rate: numeric(form.voiceRate, 1), volume: numeric(form.voiceVolume, 1) };
+        const rate = numeric(form.voiceRate, 1);
+        const volume = numeric(form.voiceVolume, 1);
+        const bridge = {};
+        if (form.bridgeChannel) bridge.channel = form.bridgeChannel;
+        if (form.bridgeStyle.trim()) bridge.style = form.bridgeStyle.trim();
+        const bridgeFields = Object.keys(bridge).length ? { bridge } : {};
+        if (form.voiceSource === 'upload') {
+          return form.voiceReference
+            ? { voiceSource: 'upload', referenceAudio: { id: form.voiceReference.id, file: form.voiceReference.file, name: form.voiceReference.name, mediaType: form.voiceReference.mediaType }, rate, volume, ...bridgeFields }
+            : null;
+        }
+        // 桥接两类音色都走 voiceSource 'preset'：内置音色名由桥接识别 MiMo 表，
+        // 音色库 ID 由桥接在 voices/ 目录查找。
+        if (form.voiceSource === 'builtin') return { voiceSource: 'preset', voiceId: form.bridgeVoice, voiceName: form.bridgeVoice, rate, volume, ...bridgeFields };
+        if (form.voiceSource === 'library') return form.libraryVoice ? { voiceSource: 'preset', voiceId: form.libraryVoice, voiceName: form.libraryVoice, rate, volume, ...bridgeFields } : null;
+        return { voiceSource: 'system', rate, volume, ...bridgeFields };
       };
       const configCard = h('section', { className: 'sv-form' },
         h('div', { className: 'sv-section-head' },
@@ -3245,7 +3270,12 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sv-as-grid2' },
             h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '语速'), h('input', { className: 'sv-input', type: 'number', min: '0.5', max: '2', step: '0.05', value: form.voiceRate, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceRate: event.target.value })) })),
             h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音量'), h('input', { className: 'sv-input', type: 'number', min: '0', max: '2', step: '0.05', value: form.voiceVolume, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceVolume: event.target.value })) })),
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音色'), h('select', { className: 'sv-select', value: form.voiceSource, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceSource: event.target.value })) }, h('option', { value: 'system' }, 'Tiffy - 自信（系统默认）'), h('option', { value: 'upload' }, '上传参考音频'))),
+            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音色'), h('select', { className: 'sv-select', value: form.voiceSource, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceSource: event.target.value })) },
+              h('option', { value: 'system' }, 'Tiffy - 自信（系统默认）'),
+              h('option', { value: 'upload' }, '上传参考音频'),
+              h('option', { value: 'builtin' }, '桥接内置音色（云端 · 小米 MiMo）'),
+              h('option', { value: 'library' }, '桥接音色库（本机参考音频）'),
+            )),
           ),
           form.voiceSource === 'upload' ? h('div', { className: 'sv-voice-upload' },
             h('input', { ref: scheduleVoiceFileInputRef, type: 'file', accept: 'audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/ogg,.mp3,.wav,.m4a,.ogg', tabIndex: -1, style: { display: 'none' }, onChange: (event) => { void uploadScheduleVoiceReference(event); } }),
@@ -3256,11 +3286,24 @@ window.__ModuleLoader__.load({
             ),
             h('p', { className: 'sv-note' }, '支持 MP3、WAV、M4A 和 OGG，最大 20 MiB。请上传只包含目标人声的清晰音频。'),
           ) : null,
+          form.voiceSource === 'builtin' ? h('div', { className: 'sv-as-grid2' },
+            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '内置音色'), h('select', { className: 'sv-select', value: form.bridgeVoice, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, bridgeVoice: event.target.value })) }, builtinVoiceOptions.map((voice) => h('option', { key: voice, value: voice }, voice)))),
+          ) : null,
+          form.voiceSource === 'library' ? h('div', { className: 'sv-as-grid2' },
+            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音色库音色'), libraryVoiceOptions.length
+              ? h('select', { className: 'sv-select', value: form.libraryVoice, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, libraryVoice: event.target.value })) }, h('option', { value: '' }, '选择音色'), libraryVoiceOptions.map((voice) => h('option', { key: voice.id, value: voice.id }, `${voice.id}${voice.hasTxt ? '' : '（首次使用自动转写）'}`)))
+              : h('select', { className: 'sv-select', value: '', disabled: true }, h('option', { value: '' }, bridgeInfo?.available ? '音色库为空：到桥接配置中心上传音色' : '桥接未响应，无法读取音色库'))),
+          ) : null,
+          h('div', { className: 'sv-as-grid2' },
+            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '桥接配音方式（按任务覆盖）'), h('select', { className: 'sv-select', value: form.bridgeChannel, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, bridgeChannel: event.target.value })) }, h('option', { value: '' }, '跟随桥接配置'), h('option', { value: 'cloud' }, '云端（小米 MiMo）'), h('option', { value: 'local' }, '本地（LongCat）'))),
+            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '桥接预期风格（选填）'), h('input', { className: 'sv-input', value: form.bridgeStyle, maxLength: 200, disabled: Boolean(busy), placeholder: '留空则跟随桥接配置；仅云端合成时生效', onChange: (event) => patchForm((current) => ({ ...current, bridgeStyle: event.target.value })) })),
+          ),
+          bridgeInfo?.available ? h('p', { className: 'sv-as-task-note' }, `桥接当前：${bridgeInfo.ttsProvider === 'local' ? '本地合成（LongCat）' : '云端合成（小米 MiMo）'}${bridgeInfo.mimoKeyConfigured ? '' : ' · 未配置小米 API Key'}${bridgeInfo.mimoVoice ? ` · 内置音色「${bridgeInfo.mimoVoice}」` : ''}${bridgeInfo.mimoStyle ? ` · 风格「${bridgeInfo.mimoStyle}」` : ''}${bridgeInfo.defaultVoice ? ` · 默认音色映射「${bridgeInfo.defaultVoice}」` : ' · 未设置默认音色映射'}。系统默认音色经桥接时会自动替换为映射的音色库音色；桥接设置只在使用桥接渠道时生效。`) : null,
           h('label', { className: 'sv-as-field' },
             h('span', { className: 'sv-as-label' }, '画面制作说明（选填）'),
             h('textarea', { className: 'sv-textarea', style: { minHeight: '58px' }, value: form.visualBrief, maxLength: 6000, disabled: Boolean(busy), placeholder: '留空则交给 AI 视觉导演按稿件语义自由发挥', onChange: (event) => patchForm((current) => ({ ...current, visualBrief: event.target.value })) }),
           ),
-          h('p', { className: 'sv-as-task-note' }, '音色预设对本任务的每一轮生效：每轮配音都使用这里设定的音色与语速、音量，执行渠道跟随当前配音服务配置。更换参考音频后建议先「立即执行」一轮试听效果。'),
+          h('p', { className: 'sv-as-task-note' }, '音色预设对本任务的每一轮生效；「桥接配音方式 / 预期风格」仅在使用桥接渠道时按任务覆盖桥接的全局配置，其他渠道忽略。配置好后建议先「立即执行」一轮试听效果。'),
         ),
         h('div', { className: 'sv-actions' },
           h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(busy) || !formValid, onClick: submit }, busy === 'save' ? '正在保存…' : editing ? '保存修改' : '创建任务'),
@@ -3268,7 +3311,9 @@ window.__ModuleLoader__.load({
           !form.name.trim() ? h('span', { className: 'sv-meta' }, '请填写任务名称')
             : !sortedDays.length ? h('span', { className: 'sv-meta' }, '请至少选择一个执行日')
               : selectedCount === 0 ? h('span', { className: 'sv-meta' }, '至少选择一个参与渠道')
-                : !voiceReady ? h('span', { className: 'sv-meta' }, '音色选了「上传参考音频」，请先上传音频文件') : null,
+                : form.voiceSource === 'builtin' && form.bridgeChannel === 'local' ? h('span', { className: 'sv-meta' }, '桥接内置音色只能搭配云端（小米 MiMo）合成，请调整「桥接配音方式」')
+                  : form.voiceSource === 'library' && !form.libraryVoice ? h('span', { className: 'sv-meta' }, '请选择桥接音色库里的音色')
+                    : !voiceReady ? h('span', { className: 'sv-meta' }, '音色选了「上传参考音频」，请先上传音频文件') : null,
         ),
       );
 
