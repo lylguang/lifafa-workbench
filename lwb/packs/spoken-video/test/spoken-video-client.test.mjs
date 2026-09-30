@@ -373,3 +373,27 @@ test('video task card renders the progress surface instead of a bare phase label
   assert.match(page, /videoTaskProgress\(task, now\)/u)
   assert.match(page, /videoEtaFromHistory\(taskFeed\.items/u)
 })
+
+test('schedule form exposes a per-task voice preset that rides create, edit and upload', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function ContentSchedulePage(')
+  const end = source.indexOf('\n    function LegacyAudioCaptionsPageV2(', start)
+  assert.ok(start >= 0 && end > start, 'ContentSchedulePage must remain a standalone component')
+  const page = source.slice(start, end)
+
+  // The preset covers source, reference audio and rate/volume, and edit mode
+  // rehydrates it from the stored task. The defaults and rehydrate helpers
+  // live beside emptyScheduleForm, outside the page component.
+  assert.match(source, /voiceSource: 'system', voiceReference: null, voiceRate: '1', voiceVolume: '1'/u)
+  assert.match(source, /voiceSource: voice\?\.voiceSource === 'upload' \? 'upload' : 'system'/u)
+  assert.match(source, /voiceReference: voice\?\.voiceSource === 'upload' && voice\.referenceAudio \? voice\.referenceAudio : null/u)
+  assert.match(page, /voice: voicePayloadOf\(\)/u)
+  // An upload preset without a reference cannot be saved silently.
+  assert.match(page, /const voiceReady = form\.voiceSource !== 'upload' \|\| Boolean\(form\.voiceReference\);/u)
+  assert.match(page, /&& selectedCount > 0 && voiceReady;/u)
+  assert.match(page, /请先上传音频文件/u)
+  // Upload flows through the same shared endpoint as the audio workbench.
+  assert.match(page, /remote\(packId, 'uploadVoiceReference', \{ name: file\.name, mediaType: file\.type, data \}\)/u)
+  // The preset never pins a provider client-side; the runner follows the saved channel.
+  assert.doesNotMatch(page, /voicePayloadOf = \(\) => \(\{[\s\S]*?provider:/u)
+})
