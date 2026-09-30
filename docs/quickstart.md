@@ -7,7 +7,7 @@
 准备 Git、Node.js `^22.19.0 || >=24.0.0`、npm、Corepack 和本机 C/C++ 编译环境。建议使用 Node.js 22 LTS 最新补丁版本；macOS 编译工具可通过 `xcode-select --install` 安装。其他系统的完整安装和媒体制作兼容性需要在目标环境验证。
 
 ```bash
-git clone https://github.com/yuleDI/lifafa-workbench.git
+git clone https://github.com/lylguang/lifafa-workbench.git
 cd lifafa-workbench
 npm ci
 npm run setup

@@ -55,7 +55,7 @@
 ### 安装与启动
 
 ```bash
-git clone https://github.com/yuleDI/lifafa-workbench.git
+git clone https://github.com/lylguang/lifafa-workbench.git
 cd lifafa-workbench
 npm ci
 npm run setup
@@ -96,7 +96,7 @@ npm test
 
 完成依赖安装和 DSH 构建后，上述命令执行语法检查、基础/能力包 Profile 检查及单元测试。真实模型和媒体接口需要另外配置并验收，测试通过不代表所有外部服务均可用。
 
-欢迎提交问题、文档改进与场景能力包。请先阅读[贡献指南](CONTRIBUTING.md)，问题反馈入口为 [GitHub Issues](https://github.com/yuleDI/lifafa-workbench/issues)。
+欢迎提交问题、文档改进与场景能力包。请先阅读[贡献指南](CONTRIBUTING.md)，问题反馈入口为 [GitHub Issues](https://github.com/lylguang/lifafa-workbench/issues)。
 
 ## 文档
 
