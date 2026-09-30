@@ -17,7 +17,7 @@
 | 项目 | 默认行为与生效范围 | 来源 |
 |---|---|---|
 | 外观 | DSH 原生默认跟随系统，LWB 首次启动预填浅色主题；用户之后可在 DSH 原生外观设置中修改。启动器只在文件不存在时复制，不覆盖已有设置。 | `lwb/profile/settings.yaml`、`lwb/dsh-launcher.mjs` |
-| 产品组合 | 固定使用 `lwb` Profile，加载 DSH Base、Web App 和 LWB Bundle；产品名为“老傅工作台”。 | `lwb/profile/package.json`、`lwb/dsh-bundle/cordis.patch.yml` |
+| 产品组合 | 固定使用 `lwb` Profile，加载 DSH Base、Web App 和 LWB Bundle；产品名为“李发发工作台”。 | `lwb/profile/package.json`、`lwb/dsh-bundle/cordis.patch.yml` |
 | 导航与页面 | 替换 DSH 左侧栏；提供对话、场景能力包、设置三模块；没有历史页面状态时默认进入对话。系统设置仍复用 DSH。 | `lwb/dsh-bundle/client.js` |
 | 视觉样式 | 产品字体层级、间距、图标、侧栏和会话列表布局由 LWB CSS 提供；颜色响应 DSH 深浅色状态。 | `lwb/dsh-bundle/client.js` |
 | 数据位置 | 默认 DSH Home 为 `lwb/local/dsh-home/`，能力包登记文件为 `lwb/local/packs.json`；可通过专用环境变量指定其他位置。 | `lwb/dsh-launcher.mjs`、`lwb/pack-manager.mjs` |

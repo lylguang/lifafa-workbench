@@ -4,14 +4,14 @@
 
 ## 讨论与反馈
 
-- Bug 和功能建议请提交到 [Issues](https://github.com/ScarecrowFu/dsh-laofu-workbench/issues)。
+- Bug 和功能建议请提交到 [Issues](https://github.com/yuleDI/lifafa-workbench/issues)。
 - 较大的架构变化或新场景包，建议先说明目标用户、输入输出、外部依赖和工作台需要提供的接口。
 - Bug 报告请包含系统、Node 版本、Git commit、复现步骤、预期结果、实际结果及脱敏日志。
 - 不要在公开问题中提交密钥、访问令牌或私人业务数据。涉及敏感信息的问题，先去除敏感内容再报告；不要公开可直接使用的凭据。
 
 ## 开发环境
 
-Fork [项目仓库](https://github.com/ScarecrowFu/dsh-laofu-workbench)，克隆自己的 Fork，在根目录执行：
+Fork [项目仓库](https://github.com/yuleDI/lifafa-workbench)，克隆自己的 Fork，在根目录执行：
 
 ```bash
 npm ci

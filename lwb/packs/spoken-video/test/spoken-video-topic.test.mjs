@@ -169,11 +169,11 @@ test('generation steps expose the four audited phases', () => {
 })
 
 test('summarizeInput describes the account-scoped assembly', () => {
-  const account = { name: '老傅聊AI' }
+  const account = { name: '李发发聊AI' }
   const scoped = parseTopicInput({ sourceIds: ['baidu', AI_DAILY_SOURCE_ID], platforms: ['抖音', 'B站'] })
   assert.equal(
     summarizeInput(scoped, assembleMaterial(scoped, pool), account),
-    '账号「老傅聊AI」 + 1 个公开来源 + AI 内容日报（2 个平台） · 最新批次信号 3 条 · 实际覆盖 2 个采集来源',
+    '账号「李发发聊AI」 + 1 个公开来源 + AI 内容日报（2 个平台） · 最新批次信号 3 条 · 实际覆盖 2 个采集来源',
   )
   const general = parseTopicInput({ angle: '开放', excludeSignalIds: ['s1'] })
   assert.equal(

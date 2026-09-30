@@ -44,4 +44,4 @@
 
 卸载不会清除数据；清空会把原工作区移入可恢复副本。重新加载后，启用的信号源可能开始新采集，因此信号池再次出现内容不代表旧数据恢复。
 
-如需报告问题，请到 [GitHub Issues](https://github.com/ScarecrowFu/dsh-laofu-workbench/issues) 提供：系统与 Node 版本、当前 Git commit、执行命令或页面操作、预期和实际结果，以及脱敏后的最早错误。不要粘贴 API Key、鉴权 URL、完整运行目录或私人稿件。详细贡献流程见 [CONTRIBUTING.md](../CONTRIBUTING.md)。
+如需报告问题，请到 [GitHub Issues](https://github.com/yuleDI/lifafa-workbench/issues) 提供：系统与 Node 版本、当前 Git commit、执行命令或页面操作、预期和实际结果，以及脱敏后的最早错误。不要粘贴 API Key、鉴权 URL、完整运行目录或私人稿件。详细贡献流程见 [CONTRIBUTING.md](../CONTRIBUTING.md)。

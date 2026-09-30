@@ -7,8 +7,8 @@
 准备 Git、Node.js `^22.19.0 || >=24.0.0`、npm、Corepack 和本机 C/C++ 编译环境。建议使用 Node.js 22 LTS 最新补丁版本；macOS 编译工具可通过 `xcode-select --install` 安装。其他系统的完整安装和媒体制作兼容性需要在目标环境验证。
 
 ```bash
-git clone https://github.com/ScarecrowFu/dsh-laofu-workbench.git
-cd dsh-laofu-workbench
+git clone https://github.com/yuleDI/lifafa-workbench.git
+cd lifafa-workbench
 npm ci
 npm run setup
 npm run dev -- --port 4173
@@ -16,7 +16,7 @@ npm run dev -- --port 4173
 
 根目录依赖使用 npm 锁文件安装。`setup` 会克隆、检出并构建 [UPSTREAM.lock.json](../lwb/UPSTREAM.lock.json) 指定的 DSH，在上游目录使用其 pnpm 版本；不要在根目录另行初始化 pnpm 工作区。
 
-浏览器应打开老傅工作台，并显示“对话”“场景能力包”“设置”。首次启动没有预置业务账号、稿件或成片。若浏览器没有自动打开，用终端打印的完整带令牌 URL 访问；遇到错误先看[故障排查](troubleshooting.md)。
+浏览器应打开李发发工作台，并显示“对话”“场景能力包”“设置”。首次启动没有预置业务账号、稿件或成片。若浏览器没有自动打开，用终端打印的完整带令牌 URL 访问；遇到错误先看[故障排查](troubleshooting.md)。
 
 ## 2. 配置 AI 默认模型
 

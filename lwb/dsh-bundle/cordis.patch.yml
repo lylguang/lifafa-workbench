@@ -5,7 +5,7 @@
     - id: lwb-profile
       name: '@scitiger-ai/lwb-dsh-bundle'
       config:
-        name: 老傅工作台
+        name: 李发发工作台
         version: 0.1.0
         remoteSettings:
           mode: auto
