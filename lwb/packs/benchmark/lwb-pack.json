@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "id": "benchmark",
+  "packageName": "@scitiger-ai/lwb-benchmark",
+  "name": "对标拆解",
+  "version": "0.1.0",
+  "description": "追踪对标账号，拆解爆款内容的钩子、结构与节奏，沉淀可检索的方法论库并反哺选题。",
+  "market": {
+    "category": "内容情报",
+    "tags": [
+      "对标监控",
+      "爆款拆解",
+      "选题启发",
+      "方法论沉淀"
+    ],
+    "workflow": [
+      "登记对标账号",
+      "录入爆款内容",
+      "AI 拆解分析",
+      "沉淀方法论",
+      "生成选题启发"
+    ],
+    "icon": "拆",
+    "introduction": "把值得学习的对标账号和爆款内容变成自己的方法论：录入或追踪对标内容，AI 拆解钩子、结构、节奏与标题套路，打标签沉淀成可检索库，并可基于拆解结果生成选题启发。",
+    "workflowHint": "先登记对标账号，再录入它们的爆款内容做拆解；方法论库随拆解自动沉淀。",
+    "gettingStarted": [
+      "AI 拆解与选题启发使用「系统设置 → 模型」中的默认模型，请先完成模型配置。",
+      "当前版本通过粘贴标题与文案录入爆款内容；对标账号的自动更新追踪在后续版本提供。",
+      "拆解结果自动进入方法论库，可按平台、标签和关键词检索。",
+      "创作数据保存在专属工作区，卸载能力包会保留工作区和数据。"
+    ],
+    "features": [
+      {
+        "menuId": "accounts",
+        "title": "对标账号",
+        "description": "登记平台与博主主页，标注学习方向。",
+        "icon": "target"
+      },
+      {
+        "menuId": "teardowns",
+        "title": "爆款拆解",
+        "description": "录入爆款内容，AI 拆解钩子与结构。",
+        "icon": "signal"
+      },
+      {
+        "menuId": "patterns",
+        "title": "方法论库",
+        "description": "拆解结果打标签沉淀，随时检索复用。",
+        "icon": "pack"
+      },
+      {
+        "menuId": "insights",
+        "title": "选题启发",
+        "description": "基于拆解结果生成可执行的选题方向。",
+        "icon": "idea"
+      }
+    ]
+  },
+  "menus": [
+    { "id": "accounts", "label": "对标账号", "glyph": "对", "tone": "violet" },
+    { "id": "teardowns", "label": "爆款拆解", "glyph": "拆", "tone": "blue" },
+    { "id": "patterns", "label": "方法论库", "glyph": "法", "tone": "orange" },
+    { "id": "insights", "label": "选题启发", "glyph": "启", "tone": "green" }
+  ]
+}

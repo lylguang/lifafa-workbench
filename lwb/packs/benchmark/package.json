@@ -1,0 +1,28 @@
+{
+  "name": "@scitiger-ai/lwb-benchmark",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Benchmark account monitoring and viral-content teardown capability pack for Lifafa Workbench",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./lwb-pack.json": "./lwb-pack.json",
+    "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "workspace:*",
+    "@deepseek-ai/dsh-tools": "workspace:*",
+    "@deepseek-ai/dsh-typert-protocol": "workspace:*",
+    "@scitiger-ai/lwb-pack-sdk": "workspace:*"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@scitiger-ai/lwb-dsh-bundle"
+      ]
+    }
+  }
+}
