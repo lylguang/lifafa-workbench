@@ -977,11 +977,14 @@ export class SpokenVideoMediaHost {
    * reference into the project so startVoiceover can see it; overwrite (not
    * 'wx') keeps a retried stage idempotent.
    */
-  async stageScheduleVoiceReference(agent, projectId, reference) {
+  async stageScheduleVoiceReference(agent, request) {
+    const input = object(request, '任务音色参考请求')
+    const id = projectId(input.projectId)
+    const reference = object(input.reference, '任务音色参考音频')
     const uploaded = await this.#uploadedVoiceReference(await audioTasksRootFor(agent), reference, /^voice-references\/[a-f0-9]{32}\.(?:mp3|wav|m4a|ogg)$/u, '任务音色参考音频')
     const storedId = uploaded.file.slice('voice-references/'.length, uploaded.file.lastIndexOf('.'))
     if (uploaded.id !== storedId) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '任务音色参考音频标识与文件不匹配。')
-    const projectRoot = await projectRootFor(agent, projectId)
+    const projectRoot = await projectRootFor(agent, id)
     const extension = extname(uploaded.file).slice(1).toLowerCase()
     const file = `audio-media/references/${uploaded.id}.${extension}`
     const target = await safeMediaTarget(projectRoot, file, '任务音色参考音频', true)

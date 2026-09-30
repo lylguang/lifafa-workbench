@@ -331,6 +331,10 @@ function fakeHosts({ depth = 'packaging', perRunLimit = 1, failStep = null, neve
     async status() { return { ttsConfigured: true, connection: { provider: 'bailian', providers: { bailian: { configured: true, source: 'user', writable: true } } }, renderers: { remotion: true, 'local-ffmpeg': true }, providers: { legacy: { configured: false } } } },
     async startVoiceover(currentAgent, request) { record('startVoiceover', { request }); return { id: `voiceover:${request.projectId}` } },
     async startSubtitles(currentAgent, request) { record('startSubtitles', { request }); return { id: `subtitles:${request.projectId}` } },
+    async stageScheduleVoiceReference(currentAgent, request) {
+      record('stageScheduleVoiceReference', { request })
+      return { id: request.reference.id, file: `audio-media/references/${request.reference.id}.mp3`, name: request.reference.name, mediaType: request.reference.mediaType }
+    },
     async startVideoRender(currentAgent, request) { record('startVideoRender', { request }); return { id: `video:${request.projectId}` } },
     async operations(currentAgent, { projectId }) {
       return [mediaTask('video', projectId, 'video'), mediaTask('subtitles', projectId, 'subtitles'), mediaTask('voiceover', projectId, 'voiceover')]
@@ -542,6 +546,31 @@ test('depth packaging runs the whole chain and records a full lifeline', async (
   assert.equal(fake.created[0].meta.agentPreset, 'standard')
   assert.equal(fake.created[0].meta.cwd, currentAgent.session.header.cwd, 'the identity gets the task workspace, not process.cwd()')
   assert.deepEqual(fake.created[0].agentOptions, { provider: 'deepseek', model: 'deepseek-chat' })
+})
+
+test('a stored voice preset rides the voiceover request and stages uploaded references', async (t) => {
+  const { host, currentAgent, fake } = await setup(t, { depth: 'packaging' })
+  const referenceId = 'a'.repeat(32)
+  const created = await createTask(host, currentAgent, {
+    production: {
+      orientation: 'landscape', subtitleEnabled: true, scriptTier: 'medium', visualBrief: null,
+      voice: { provider: 'bailian', voiceSource: 'upload', voiceId: null, voiceName: '主播音色.mp3', referenceAudio: { id: referenceId, file: `voice-references/${referenceId}.mp3`, name: '主播音色.mp3', mediaType: 'audio/mpeg' }, outputFormat: null, rate: 1.2, volume: 0.9, pitch: 0 },
+    },
+  })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+
+  assert.equal(run.status, 'completed')
+  const staged = fake.calls.find((call) => call.name === 'stageScheduleVoiceReference')
+  assert.ok(staged, 'the uploaded reference is staged into the project before voicing')
+  assert.equal(staged.request.reference.id, referenceId)
+  assert.equal(staged.request.projectId, run.items[0].projectId)
+  const voiceover = fake.calls.find((call) => call.name === 'startVoiceover')
+  assert.equal(voiceover.request.voiceSource, 'upload')
+  assert.equal(voiceover.request.referenceAudio.file, `audio-media/references/${referenceId}.mp3`)
+  assert.equal(voiceover.request.rate, 1.2)
+  assert.equal(voiceover.request.volume, 0.9)
+  assert.equal(voiceover.request.provider, undefined, 'the preset must not pin the service channel')
 })
 
 test('depth script stops at the saved draft and never confirms it', async (t) => {

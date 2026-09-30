@@ -823,7 +823,7 @@ export class SpokenVideoScheduleHost {
       // channel as a preset-less round.
       const preset = { voiceSource: voice.voiceSource, voiceId: voice.voiceId, voiceName: voice.voiceName, rate: voice.rate, volume: voice.volume, pitch: voice.pitch }
       if (voice.voiceSource === 'upload' && voice.referenceAudio) {
-        preset.referenceAudio = await this.media.stageScheduleVoiceReference(agent, projectId, voice.referenceAudio)
+        preset.referenceAudio = await this.media.stageScheduleVoiceReference(agent, { projectId, reference: voice.referenceAudio })
       }
       Object.assign(request, preset)
     }
