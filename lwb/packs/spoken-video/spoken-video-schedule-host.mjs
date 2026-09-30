@@ -818,10 +818,14 @@ export class SpokenVideoScheduleHost {
     if (step === 'subtitles') {
       Object.assign(request, { language: 'zh', aiOptimize: true })
     } else if (voice) {
-      Object.assign(request, {
-        provider: voice.provider, voiceSource: voice.voiceSource, voiceId: voice.voiceId,
-        voiceName: voice.voiceName, rate: voice.rate, volume: voice.volume, pitch: voice.pitch,
-      })
+      // The provider is deliberately not frozen into the preset, so a stored
+      // voice never pins the service channel; the run keeps the same default
+      // channel as a preset-less round.
+      const preset = { voiceSource: voice.voiceSource, voiceId: voice.voiceId, voiceName: voice.voiceName, rate: voice.rate, volume: voice.volume, pitch: voice.pitch }
+      if (voice.voiceSource === 'upload' && voice.referenceAudio) {
+        preset.referenceAudio = await this.media.stageScheduleVoiceReference(agent, projectId, voice.referenceAudio)
+      }
+      Object.assign(request, preset)
     }
     const started = step === 'subtitles'
       ? await this.media.startSubtitles(agent, request)

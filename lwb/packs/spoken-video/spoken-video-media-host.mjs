@@ -970,6 +970,25 @@ export class SpokenVideoMediaHost {
     }
   }
 
+  /**
+   * Scheduled rounds voice brand-new projects, and media runs resolve
+   * reference audio relative to the project root, while uploads land in the
+   * shared audio-task workspace. Staging copies the preset's uploaded
+   * reference into the project so startVoiceover can see it; overwrite (not
+   * 'wx') keeps a retried stage idempotent.
+   */
+  async stageScheduleVoiceReference(agent, projectId, reference) {
+    const uploaded = await this.#uploadedVoiceReference(await audioTasksRootFor(agent), reference, /^voice-references\/[a-f0-9]{32}\.(?:mp3|wav|m4a|ogg)$/u, '任务音色参考音频')
+    const storedId = uploaded.file.slice('voice-references/'.length, uploaded.file.lastIndexOf('.'))
+    if (uploaded.id !== storedId) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '任务音色参考音频标识与文件不匹配。')
+    const projectRoot = await projectRootFor(agent, projectId)
+    const extension = extname(uploaded.file).slice(1).toLowerCase()
+    const file = `audio-media/references/${uploaded.id}.${extension}`
+    const target = await safeMediaTarget(projectRoot, file, '任务音色参考音频', true)
+    await writeFile(target, uploaded.audio, { mode: 0o600 })
+    return { id: uploaded.id, file, name: uploaded.name, mediaType: uploaded.mediaType }
+  }
+
   async uploadVideoBgm(agent, request) {
     const input = object(request, '背景音乐上传请求')
     const id = projectId(input.projectId)

@@ -2834,7 +2834,7 @@ window.__ModuleLoader__.load({
     const AS_ITEM_STATUS = { running: '进行中', completed: '已完成', failed: '失败', cancelled: '已停止' };
     const AS_STAGE_TONE = { done: 'sv-stage', failed: 'sv-status-error', running: '', skipped: 'sv-status-disabled' };
     function emptyScheduleForm() {
-      return { name: '', days: new Set([1, 2, 3, 4, 5]), time: '21:00', angle: '', offSources: new Set(), offPlatforms: new Set(), excluded: new Set(), depth: 'packaging', perRunLimit: 1, orientation: 'landscape', scriptTier: 'medium', subtitleEnabled: true, visualBrief: '' };
+      return { name: '', days: new Set([1, 2, 3, 4, 5]), time: '21:00', angle: '', offSources: new Set(), offPlatforms: new Set(), excluded: new Set(), depth: 'packaging', perRunLimit: 1, orientation: 'landscape', scriptTier: 'medium', subtitleEnabled: true, visualBrief: '', voiceSource: 'system', voiceReference: null, voiceRate: '1', voiceVolume: '1' };
     }
     /** Rehydrate a per-tab form from a stored task so editing reuses the create form. */
     function scheduleFormOf(schedule, board) {
@@ -2842,6 +2842,7 @@ window.__ModuleLoader__.load({
       const platformNames = (board?.aiDaily?.platforms || []).map((card) => card.platform);
       const chosen = new Set(schedule.sources?.sourceIds || []);
       const chosenPlatforms = new Set(schedule.sources?.platforms || []);
+      const voice = schedule.production?.voice || null;
       return {
         name: schedule.name || '',
         days: new Set(schedule.days?.length ? schedule.days : [1, 2, 3, 4, 5]),
@@ -2856,6 +2857,10 @@ window.__ModuleLoader__.load({
         scriptTier: schedule.production?.scriptTier || 'medium',
         subtitleEnabled: schedule.production?.subtitleEnabled !== false,
         visualBrief: schedule.production?.visualBrief || '',
+        voiceSource: voice?.voiceSource === 'upload' ? 'upload' : 'system',
+        voiceReference: voice?.voiceSource === 'upload' && voice.referenceAudio ? voice.referenceAudio : null,
+        voiceRate: String(voice?.rate ?? 1),
+        voiceVolume: String(voice?.volume ?? 1),
       };
     }
     function ScheduleRunDetails({ packId, runId, onChanged }) {
@@ -2982,6 +2987,8 @@ window.__ModuleLoader__.load({
       const [historySchedule, setHistorySchedule] = React.useState(null);
       const [historyRefresh, setHistoryRefresh] = React.useState(0);
       const [confirmNode, ask] = useSvConfirm();
+      const [voiceUploading, setVoiceUploading] = React.useState(false);
+      const scheduleVoiceFileInputRef = React.useRef(null);
       const fail = React.useCallback((message) => { setError(message); }, [setError]);
 
       const loadSchedules = React.useCallback(async () => {
@@ -3034,7 +3041,8 @@ window.__ModuleLoader__.load({
       const sortedDays = [...form.days].sort((a, b) => a - b);
       // A topic-only round needs no media chain, so only depth blockers apply.
       const blockersFor = (depth) => (runtime?.blockers || []).filter((item) => (depth === 'topic' || depth === 'script' ? item.depth === 'topic' : true));
-      const formValid = Boolean(form.name.trim()) && sortedDays.length > 0 && /^\d{2}:\d{2}$/u.test(form.time) && selectedCount > 0;
+      const voiceReady = form.voiceSource !== 'upload' || Boolean(form.voiceReference);
+      const formValid = Boolean(form.name.trim()) && sortedDays.length > 0 && /^\d{2}:\d{2}$/u.test(form.time) && selectedCount > 0 && voiceReady;
 
       const payloadOf = () => ({
         name: form.name.trim(),
@@ -3056,6 +3064,7 @@ window.__ModuleLoader__.load({
           subtitleEnabled: form.subtitleEnabled,
           scriptTier: form.scriptTier,
           visualBrief: form.visualBrief.trim() || null,
+          voice: voicePayloadOf(),
         },
       });
 
@@ -3064,7 +3073,8 @@ window.__ModuleLoader__.load({
         const label = activeAccount ? `账号「${activeAccount.name}」` : '通用（无账号定位）';
         const daysLabel = sortedDays.length === 7 ? '每天' : sortedDays.map((day) => AS_WEEKDAYS[day - 1].label).join('、');
         const depthLabel = AS_DEPTHS.find((item) => item.id === form.depth)?.label || form.depth;
-        const description = `${label}；${daysLabel} ${form.time}；深度「${depthLabel}」；每轮最多 ${form.perRunLimit} 条；参与渠道 ${selectedCount} 个`;
+        const voiceLabel = form.voiceSource === 'upload' && form.voiceReference ? `音色「${form.voiceReference.name}」` : '系统默认音色';
+        const description = `${label}；${daysLabel} ${form.time}；深度「${depthLabel}」；每轮最多 ${form.perRunLimit} 条；${voiceLabel}；参与渠道 ${selectedCount} 个`;
         ask({
           title: editing ? '保存任务修改？' : '创建定时任务？',
           copy: `${description}。${AS_APPROVING.has(form.depth) ? '该深度将自动确认 AI 稿件，不再人工过稿；' : ''}到点后由主机侧调度器无人值守执行，切换页面不会中断。发布动作永远不会自动执行。`,
@@ -3114,6 +3124,19 @@ window.__ModuleLoader__.load({
       const clearSources = () => { if (busy) return; patchForm((current) => ({ ...current, offSources: new Set(allPublicIds), offPlatforms: new Set(platformCards.map((card) => card.platform)) })); };
       const toggleExclude = (signalId) => patchForm((current) => { const excluded = new Set(current.excluded); if (excluded.has(signalId)) excluded.delete(signalId); else excluded.add(signalId); return { ...current, excluded }; });
       const clearExcluded = () => patchForm((current) => ({ ...current, excluded: new Set() }));
+      const uploadScheduleVoiceReference = async (event) => {
+        const file = event.target.files?.[0] || null;
+        event.target.value = '';
+        if (!file || voiceUploading || busy) return;
+        if (file.size < 1 || file.size > 20 * 1024 * 1024) { fail('参考音频必须小于 20 MiB。'); return; }
+        setVoiceUploading(true);
+        try {
+          const data = await base64FromAudioFile(file);
+          const uploaded = await remote(packId, 'uploadVoiceReference', { name: file.name, mediaType: file.type, data });
+          patchForm((current) => ({ ...current, voiceSource: 'upload', voiceReference: uploaded }));
+          setError(null);
+        } catch (cause) { fail(cause.message); } finally { setVoiceUploading(false); }
+      };
 
       const tabs = h(AccountTabs, { accountLibrary, activeTab, onChange: setActiveTab, label: '按账号定位选择任务归属', disabled: Boolean(editing) });
 
@@ -3144,6 +3167,18 @@ window.__ModuleLoader__.load({
       };
 
       const runtimeBlockers = blockersFor(form.depth);
+      const voiceReferenceMeta = form.voiceReference ? [form.voiceReference.bytes != null ? formatMediaBytes(form.voiceReference.bytes) : null, form.voiceReference.durationSeconds != null ? formatMediaDuration(form.voiceReference.durationSeconds) : null].filter(Boolean).join(' · ') : null;
+      const voicePayloadOf = () => {
+        const numeric = (value, fallback) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : fallback; };
+        return form.voiceSource === 'upload'
+          ? {
+              voiceSource: 'upload',
+              referenceAudio: { id: form.voiceReference.id, file: form.voiceReference.file, name: form.voiceReference.name, mediaType: form.voiceReference.mediaType },
+              rate: numeric(form.voiceRate, 1),
+              volume: numeric(form.voiceVolume, 1),
+            }
+          : { voiceSource: 'system', rate: numeric(form.voiceRate, 1), volume: numeric(form.voiceVolume, 1) };
+      };
       const configCard = h('section', { className: 'sv-form' },
         h('div', { className: 'sv-section-head' },
           h('h3', null, editing ? `编辑任务 · ${editing.name}` : '新建自动化任务'),
@@ -3207,18 +3242,33 @@ window.__ModuleLoader__.load({
             h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '稿件篇幅'), h('select', { className: 'sv-select', value: form.scriptTier, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, scriptTier: event.target.value })) }, AS_TIERS.map((item) => h('option', { key: item.id, value: item.id }, item.label)))),
             h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '字幕'), h('select', { className: 'sv-select', value: form.subtitleEnabled ? 'on' : 'off', disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, subtitleEnabled: event.target.value === 'on' })) }, h('option', { value: 'on' }, '生成字幕'), h('option', { value: 'off' }, '不要字幕'))),
           ),
+          h('div', { className: 'sv-as-grid2' },
+            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '语速'), h('input', { className: 'sv-input', type: 'number', min: '0.5', max: '2', step: '0.05', value: form.voiceRate, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceRate: event.target.value })) })),
+            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音量'), h('input', { className: 'sv-input', type: 'number', min: '0', max: '2', step: '0.05', value: form.voiceVolume, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceVolume: event.target.value })) })),
+            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音色'), h('select', { className: 'sv-select', value: form.voiceSource, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceSource: event.target.value })) }, h('option', { value: 'system' }, 'Tiffy - 自信（系统默认）'), h('option', { value: 'upload' }, '上传参考音频'))),
+          ),
+          form.voiceSource === 'upload' ? h('div', { className: 'sv-voice-upload' },
+            h('input', { ref: scheduleVoiceFileInputRef, type: 'file', accept: 'audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/ogg,.mp3,.wav,.m4a,.ogg', tabIndex: -1, style: { display: 'none' }, onChange: (event) => { void uploadScheduleVoiceReference(event); } }),
+            h('div', { className: 'sv-voice-upload-row' },
+              h('p', { className: 'sv-voice-upload-file' }, form.voiceReference ? h(React.Fragment, null, form.voiceReference.name, voiceReferenceMeta ? h('span', null, ` · ${voiceReferenceMeta}`) : null) : '尚未选择参考音频'),
+              h('button', { type: 'button', className: 'lwb-plain-button', disabled: voiceUploading || Boolean(busy), onClick: () => scheduleVoiceFileInputRef.current?.click?.() }, voiceUploading ? '正在上传…' : form.voiceReference ? '更换音频' : '选择音频'),
+              form.voiceReference ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: voiceUploading || Boolean(busy), onClick: () => patchForm((current) => ({ ...current, voiceReference: null })) }, '移除') : null,
+            ),
+            h('p', { className: 'sv-note' }, '支持 MP3、WAV、M4A 和 OGG，最大 20 MiB。请上传只包含目标人声的清晰音频。'),
+          ) : null,
           h('label', { className: 'sv-as-field' },
             h('span', { className: 'sv-as-label' }, '画面制作说明（选填）'),
             h('textarea', { className: 'sv-textarea', style: { minHeight: '58px' }, value: form.visualBrief, maxLength: 6000, disabled: Boolean(busy), placeholder: '留空则交给 AI 视觉导演按稿件语义自由发挥', onChange: (event) => patchForm((current) => ({ ...current, visualBrief: event.target.value })) }),
           ),
-          h('p', { className: 'sv-as-task-note' }, '音色默认使用系统预置音色；需要为某个账号固定音色时，请先在「配音 / 字幕」页人工跑一次确认效果。'),
+          h('p', { className: 'sv-as-task-note' }, '音色预设对本任务的每一轮生效：每轮配音都使用这里设定的音色与语速、音量，执行渠道跟随当前配音服务配置。更换参考音频后建议先「立即执行」一轮试听效果。'),
         ),
         h('div', { className: 'sv-actions' },
           h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(busy) || !formValid, onClick: submit }, busy === 'save' ? '正在保存…' : editing ? '保存修改' : '创建任务'),
           editing ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(busy), onClick: cancelEdit }, '取消编辑，恢复为新建') : null,
           !form.name.trim() ? h('span', { className: 'sv-meta' }, '请填写任务名称')
             : !sortedDays.length ? h('span', { className: 'sv-meta' }, '请至少选择一个执行日')
-              : selectedCount === 0 ? h('span', { className: 'sv-meta' }, '至少选择一个参与渠道') : null,
+              : selectedCount === 0 ? h('span', { className: 'sv-meta' }, '至少选择一个参与渠道')
+                : !voiceReady ? h('span', { className: 'sv-meta' }, '音色选了「上传参考音频」，请先上传音频文件') : null,
         ),
       );
 
