@@ -570,7 +570,27 @@ test('a stored voice preset rides the voiceover request and stages uploaded refe
   assert.equal(voiceover.request.referenceAudio.file, `audio-media/references/${referenceId}.mp3`)
   assert.equal(voiceover.request.rate, 1.2)
   assert.equal(voiceover.request.volume, 0.9)
-  assert.equal(voiceover.request.provider, undefined, 'the preset must not pin the service channel')
+  assert.equal(voiceover.request.provider, 'bailian', 'the round voices through the configured connection channel')
+})
+
+test('media stages follow the configured connection channel instead of the bailian default', async (t) => {
+  const { host, currentAgent, fake } = await setup(t, { depth: 'packaging' })
+  fake.hosts.media.status = async () => ({
+    ttsConfigured: true,
+    connection: { provider: 'scitiger', providers: { scitiger: { configured: true, source: 'user', writable: true }, bailian: { configured: false } } },
+    renderers: { remotion: true, 'local-ffmpeg': true },
+    providers: {},
+  })
+  const created = await createTask(host, currentAgent)
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+
+  assert.equal(run.status, 'completed')
+  const voiceover = fake.calls.find((call) => call.name === 'startVoiceover')
+  const subtitles = fake.calls.find((call) => call.name === 'startSubtitles')
+  assert.equal(voiceover.request.provider, 'scitiger', 'voiceover rides the bridge endpoint when that is the saved channel')
+  assert.equal(subtitles.request.provider, 'scitiger')
+  assert.equal(voiceover.request.voiceSource, 'system')
 })
 
 test('depth script stops at the saved draft and never confirms it', async (t) => {

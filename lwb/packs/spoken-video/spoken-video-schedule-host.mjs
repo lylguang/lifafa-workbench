@@ -811,18 +811,24 @@ export class SpokenVideoScheduleHost {
     return { message: `稿件版本 ${summary.scriptApproval?.revision || '?'} 已由自动化确认` }
   }
 
+  /** The configured voiceover channel; the request normalizer would otherwise pin media runs to bailian. */
+  async #mediaProvider() {
+    try { return (await this.media.status())?.connection?.provider || 'bailian' } catch { return 'bailian' }
+  }
+
   async #stageVoiceover(agent, schedule, projectId, step, signal, paths, runId) {
     const detail = await this.projects.get(agent, { projectId })
     const voice = schedule.production.voice
     const request = { projectId, expectedRevision: detail.revision }
     if (step === 'subtitles') {
-      Object.assign(request, { language: 'zh', aiOptimize: true })
-    } else if (voice) {
-      // The provider is deliberately not frozen into the preset, so a stored
-      // voice never pins the service channel; the run keeps the same default
-      // channel as a preset-less round.
-      const preset = { voiceSource: voice.voiceSource, voiceId: voice.voiceId, voiceName: voice.voiceName, rate: voice.rate, volume: voice.volume, pitch: voice.pitch }
-      if (voice.voiceSource === 'upload' && voice.referenceAudio) {
+      Object.assign(request, { language: 'zh', aiOptimize: true, provider: await this.#mediaProvider() })
+    } else {
+      // Follow the configured voiceover channel every round, preset or not:
+      // bailian is cloud TTS, scitiger is the local bridge endpoint.
+      const preset = { provider: await this.#mediaProvider(), voiceSource: voice?.voiceSource || 'system', rate: voice?.rate ?? 1, volume: voice?.volume ?? 1, pitch: voice?.pitch ?? 0 }
+      if (voice?.voiceId) preset.voiceId = voice.voiceId
+      if (voice?.voiceName) preset.voiceName = voice.voiceName
+      if (voice?.voiceSource === 'upload' && voice.referenceAudio) {
         preset.referenceAudio = await this.media.stageScheduleVoiceReference(agent, { projectId, reference: voice.referenceAudio })
       }
       Object.assign(request, preset)
