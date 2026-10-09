@@ -34,7 +34,15 @@ function corepackEntry() {
 function run(command, args, cwd, label) {
   const started = Date.now()
   process.stdout.write(`[..] ${label}\n`)
-  const result = spawnSync(command, args, { cwd, stdio: 'inherit', shell: false })
+  // CI=true 让 pnpm 敢在无 TTY 下清空 node_modules：交付包里那份被 zip 拆散过
+  // （符号链接全丢），不重装就是错的。不设的话 pnpm 中止并要人按 y——实测报
+  // ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY。
+  const result = spawnSync(command, args, {
+    cwd,
+    stdio: 'inherit',
+    shell: false,
+    env: { ...process.env, CI: 'true' },
+  })
   if (result.status !== 0) {
     process.stderr.write(`\n[ERR] ${label} 失败。请检查网络（国内应走交付包内置的 .npmrc 镜像）。\n`)
     process.exit(1)
