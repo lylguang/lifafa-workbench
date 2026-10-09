@@ -15,7 +15,7 @@
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, cpSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -67,6 +67,10 @@ function gitArchive(repoDir, ref, destination) {
   // tar 落在交付目录里而不是 repoDir：工作副本可能只读，而且打包脚本本来就
   // 要求工作区干净，不能留下临时文件。
   const tarPath = join(destination, `.lwb-archive-${process.pid}.tar`)
+  // 解包必须在目标目录里、用**文件名**而不是盘符路径：Git Bash 的 MSYS 会把
+  // `F:\...` 改写成 `F\:\...`，`git archive -o F:\...` 还会把 `F:` 当远程主机。
+  // tar 与目标目录都在 cwd 下，整条链路就没有盘符形式的参数。
+  const tarName = basename(tarPath)
   try {
     const archive = spawnSync('git', ['archive', '--format=tar', ref, '-o', tarPath], {
       cwd: repoDir, stdio: ['ignore', 'pipe', 'pipe'], shell: false,
@@ -74,10 +78,12 @@ function gitArchive(repoDir, ref, destination) {
     if (archive.status !== 0) {
       throw new Error(`git archive ${ref} 失败：${archive.stderr?.toString().slice(-500) ?? ''}`)
     }
+    // 必须用 Windows 原生 tar：PowerShell 解析到的 `tar` 可能是 Git Bash 的
+    // /usr/bin/tar，它把 `F:` 当成远程主机，报 "Cannot connect to F: resolve failed"。
     const extract = spawnSync(
-      'powershell',
-      ['-NoProfile', '-Command', `tar -xf '${tarPath}' -C '${destination}'`],
-      { stdio: ['ignore', 'pipe', 'pipe'], shell: false },
+      join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'),
+      ['-xf', tarName],
+      { cwd: destination, stdio: ['ignore', 'pipe', 'pipe'], shell: false },
     )
     if (extract.status !== 0) {
       throw new Error(`解包失败：${extract.stderr?.toString().slice(-500) ?? ''}`)
