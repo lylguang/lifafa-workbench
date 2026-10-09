@@ -37,6 +37,42 @@ function parseArgs(argv) {
   return args
 }
 
+/**
+ * 找到 npm 的 JS 入口，绕开 `npm.cmd`。
+ *
+ * Windows 上 Node 24拒绝无 shell 地 spawn .cmd（CVE-2024-27980），直接 spawn
+ * 'npm' 会拿到退出码 null 而不是报错信息——"失败（退出码 null）"什么也说明不了。
+ * 走 JS 入口既不需要 shell，也不受这条限制影响。同 scripts/install-publisher-deps.mjs。
+ */
+function npmEntry() {
+  const candidates = [
+    join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ]
+  const found = candidates.find((candidate) => existsSync(candidate))
+  if (!found) throw new Error('找不到 npm 的 JS 入口，请确认 Node.js 安装完整（需含 npm）。')
+  return found
+}
+
+/**
+ * corepack 的 JS 入口，与 npm 同理：直接 spawn `corepack.cmd` 在 Windows 上拿不到退出码。
+ * 找不到时回退到普通 spawn，让脚本自己报错。
+ */
+function corepackEntry() {
+  const candidates = [
+    join(dirname(process.execPath), 'node_modules', 'corepack', 'dist', 'corepack.js'),
+    join(dirname(process.execPath), '..', 'lib', 'node_modules', 'corepack', 'dist', 'corepack.js'),
+  ]
+  const found = candidates.find((candidate) => existsSync(candidate))
+  if (found) return { command: process.execPath, prefix: [found] }
+  return { command: 'corepack', prefix: [] }
+}
+
+function runPnpm(args, cwd, label) {
+  const { command, prefix } = corepackEntry()
+  run(command, [...prefix, 'pnpm', ...args], cwd, label)
+}
+
 function run(command, commandArgs, cwd, label) {
   const started = Date.now()
   process.stdout.write(`[..] ${label}\n`)
@@ -127,9 +163,9 @@ async function main() {
   // 3) 依赖：现场装（实测 npm ci 7s + pnpm install 17s，走镜像）。
   //    不复制工作副本的 node_modules——那是 hardlink 与绝对路径 junction 的集合。
   writeFileSync(join(vendorDir, '.npmrc'), npmrc(NPM_REGISTRY), 'utf8')
-  run('npm', ['ci', '--no-audit', '--no-fund'], pkgDir, '安装工作台依赖')
-  run('corepack', ['pnpm', 'install', '--frozen-lockfile'], vendorDir, '安装上游依赖')
-  run('corepack', ['pnpm', 'run', 'build'], vendorDir, '构建上游')
+  runNpm(['ci', '--no-audit', '--no-fund'], pkgDir, '安装工作台依赖')
+  runPnpm(['install', '--frozen-lockfile'], vendorDir, '安装上游依赖')
+  runPnpm(['run', 'build'], vendorDir, '构建上游')
 
   // 4) 包运行期符号链接。必须在依赖装好之后——链接目标在 vendor 里。
   run('node', ['lwb/link-packs.mjs'], pkgDir, '建立能力包运行期链接')
