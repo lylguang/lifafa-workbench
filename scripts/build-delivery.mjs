@@ -49,13 +49,42 @@ function run(command, commandArgs, cwd, label) {
   process.stdout.write(`[ok] ${label}（${seconds}s）\n`)
 }
 
+/**
+ * 从 git 仓库导出指定 ref 的文件树到 destination。
+ *
+ * 这里有两处 Windows/Git Bash 的坑，绕开它们才能跑通：
+ *
+ * 1. `tar -x -C 'F:\...'` 里的盘符会被 MSYS 改写成 `F\:\...`，直接报
+ *    "Cannot open: No such file or directory"（2026-10-09 实测）。`MSYS2_ARG_CONV_EXCL`
+ *    在管道里对 Windows 自带的 tar 不生效。
+ * 2. `git archive -o 'F:\...'` 会把 `F:` 当成远程主机，报 "Cannot connect to F"。
+ *
+ * 所以：tar 文件用**相对名**写到工作目录，解包交给 PowerShell 里的 Windows
+ * 原生 tar —— 整条链路上没有任何盘符形式的参数。
+ */
 function gitArchive(repoDir, ref, destination) {
   mkdirSync(destination, { recursive: true })
-  // `git archive | tar -x` 必须走 shell 管道；shellescape 掉路径以免中文目录
-  // 与空格被拆开（本仓库路径就含中文）。
-  const cmd = `git archive --format=tar ${ref} | tar -x -C "${destination.replace(/"/gu, '\\"')}"`
-  const result = spawnSync(cmd, { cwd: repoDir, stdio: 'inherit', shell: true })
-  if (result.status !== 0) throw new Error(`git archive ${ref} 失败`)
+  // tar 落在交付目录里而不是 repoDir：工作副本可能只读，而且打包脚本本来就
+  // 要求工作区干净，不能留下临时文件。
+  const tarPath = join(destination, `.lwb-archive-${process.pid}.tar`)
+  try {
+    const archive = spawnSync('git', ['archive', '--format=tar', ref, '-o', tarPath], {
+      cwd: repoDir, stdio: ['ignore', 'pipe', 'pipe'], shell: false,
+    })
+    if (archive.status !== 0) {
+      throw new Error(`git archive ${ref} 失败：${archive.stderr?.toString().slice(-500) ?? ''}`)
+    }
+    const extract = spawnSync(
+      'powershell',
+      ['-NoProfile', '-Command', `tar -xf '${tarPath}' -C '${destination}'`],
+      { stdio: ['ignore', 'pipe', 'pipe'], shell: false },
+    )
+    if (extract.status !== 0) {
+      throw new Error(`解包失败：${extract.stderr?.toString().slice(-500) ?? ''}`)
+    }
+  } finally {
+    rmSync(tarPath, { force: true })
+  }
 }
 
 function npmrc(registry) {
