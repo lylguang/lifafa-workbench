@@ -41,7 +41,9 @@ export class SpokenVideoGateway extends TypertRemoteService {
   listScripts(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoProjects.listScripts(context, request)) }
   listApprovedScripts(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoProjects.listApprovedScripts(context, request)) }
   listWritableTopics() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoProjects.listWritableTopics(context)) }
+  pipelineOverview() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoProjects.pipelineOverview(context)) }
   create(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoProjects.create(context, request)) }
+  remove(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoProjects.remove(context, request)) }
   get(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoProjects.get(context, request)) }
   commit(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoProjects.commit(context, request)) }
   approveScript(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoProjects.approveScript(context, request)) }
@@ -61,6 +63,7 @@ export class SpokenVideoGateway extends TypertRemoteService {
   setScheduleEnabled(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoSchedule.setScheduleEnabled(context, request)) }
   runSchedule(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoSchedule.runSchedule(context, request)) }
   cancelScheduleRun(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoSchedule.cancelScheduleRun(context, request)) }
+  deleteScheduleRun(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoSchedule.deleteScheduleRun(context, request)) }
   scheduleRun(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoSchedule.scheduleRun(context, request)) }
   getProfile() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoContent.getProfile(context)) }
   setProfile(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoContent.setProfile(context, request)) }
@@ -86,6 +89,7 @@ export class SpokenVideoGateway extends TypertRemoteService {
   listMediaTasks() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.listTasks(context)) }
   listAudioTasks(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.listAudioTasks(context, request)) }
   listVideoTasks(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.listVideoTasks(context, request)) }
+  deleteMediaTasks(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.deleteTasks(context, request)) }
   uploadVoiceReference(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.uploadVoiceReference(context, request)) }
   bridgeVoiceoverInfo() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.bridgeVoiceoverInfo(context)) }
   uploadVideoBgm(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.uploadVideoBgm(context, request)) }
@@ -99,6 +103,9 @@ export class SpokenVideoGateway extends TypertRemoteService {
   startVoiceover(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startVoiceover(context, request)) }
   startSubtitles(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startSubtitles(context, request)) }
   startVideoRender(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startVideoRender(context, request)) }
+  whiteboardLineArtPlan(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.whiteboardLineArtPlan(context, request)) }
+  startWhiteboardLineArt(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startWhiteboardLineArt(context, request)) }
+  whiteboardLineArtStatus(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.whiteboardLineArtStatus(context, request)) }
   startTechnicalQc(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startTechnicalQc(context, request)) }
   readMedia(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.readMedia(context, request)) }
   publishStatus() { return this.ctx.spokenVideoScope.request(() => this.ctx.spokenVideoPublish.status()) }
@@ -106,6 +113,7 @@ export class SpokenVideoGateway extends TypertRemoteService {
   clearPublishConnectionCredential(request) { return this.ctx.spokenVideoScope.request(() => this.ctx.spokenVideoPublish.clearConnectionCredential(request)) }
   listPublishItems(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoPublish.listItems(context, request)) }
   startPackaging(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoPublish.startPackaging(context, request)) }
+  autoStartPackaging(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoPublish.autoStartPackaging(context, request)) }
   publishTask(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoPublish.task(context, request)) }
   updatePackaging(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoPublish.updatePackaging(context, request)) }
   uploadPublishCover(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoPublish.uploadCover(context, request)) }
@@ -119,7 +127,9 @@ Remote({ mode: 'stream' })(SpokenVideoGateway.prototype.followExecution, { kind:
 decorateRemote(SpokenVideoGateway.prototype, 'listScripts', 'listScripts')
 decorateRemote(SpokenVideoGateway.prototype, 'listApprovedScripts', 'listApprovedScripts')
 decorateRemote(SpokenVideoGateway.prototype, 'listWritableTopics', 'listWritableTopics')
+decorateRemote(SpokenVideoGateway.prototype, 'pipelineOverview', 'pipelineOverview')
 decorateRemote(SpokenVideoGateway.prototype, 'create', 'create')
+decorateRemote(SpokenVideoGateway.prototype, 'remove', 'remove')
 decorateRemote(SpokenVideoGateway.prototype, 'get', 'get')
 decorateRemote(SpokenVideoGateway.prototype, 'commit', 'commit')
 decorateRemote(SpokenVideoGateway.prototype, 'approveScript', 'approveScript')
@@ -139,6 +149,7 @@ decorateRemote(SpokenVideoGateway.prototype, 'deleteSchedule', 'deleteSchedule')
 decorateRemote(SpokenVideoGateway.prototype, 'setScheduleEnabled', 'setScheduleEnabled')
 decorateRemote(SpokenVideoGateway.prototype, 'runSchedule', 'runSchedule')
 decorateRemote(SpokenVideoGateway.prototype, 'cancelScheduleRun', 'cancelScheduleRun')
+decorateRemote(SpokenVideoGateway.prototype, 'deleteScheduleRun', 'deleteScheduleRun')
 decorateRemote(SpokenVideoGateway.prototype, 'scheduleRun', 'scheduleRun')
 decorateRemote(SpokenVideoGateway.prototype, 'getProfile', 'getProfile')
 decorateRemote(SpokenVideoGateway.prototype, 'setProfile', 'setProfile')
@@ -164,6 +175,7 @@ decorateRemote(SpokenVideoGateway.prototype, 'mediaOperations', 'mediaOperations
 decorateRemote(SpokenVideoGateway.prototype, 'listMediaTasks', 'listMediaTasks')
 decorateRemote(SpokenVideoGateway.prototype, 'listAudioTasks', 'listAudioTasks')
 decorateRemote(SpokenVideoGateway.prototype, 'listVideoTasks', 'listVideoTasks')
+decorateRemote(SpokenVideoGateway.prototype, 'deleteMediaTasks', 'deleteMediaTasks')
 decorateRemote(SpokenVideoGateway.prototype, 'uploadVoiceReference', 'uploadVoiceReference')
 decorateRemote(SpokenVideoGateway.prototype, 'bridgeVoiceoverInfo', 'bridgeVoiceoverInfo')
 decorateRemote(SpokenVideoGateway.prototype, 'uploadVideoBgm', 'uploadVideoBgm')
@@ -177,6 +189,9 @@ decorateRemote(SpokenVideoGateway.prototype, 'readVideoTaskMedia', 'readVideoTas
 decorateRemote(SpokenVideoGateway.prototype, 'startVoiceover', 'startVoiceover')
 decorateRemote(SpokenVideoGateway.prototype, 'startSubtitles', 'startSubtitles')
 decorateRemote(SpokenVideoGateway.prototype, 'startVideoRender', 'startVideoRender')
+decorateRemote(SpokenVideoGateway.prototype, 'whiteboardLineArtPlan', 'whiteboardLineArtPlan')
+decorateRemote(SpokenVideoGateway.prototype, 'startWhiteboardLineArt', 'startWhiteboardLineArt')
+decorateRemote(SpokenVideoGateway.prototype, 'whiteboardLineArtStatus', 'whiteboardLineArtStatus')
 decorateRemote(SpokenVideoGateway.prototype, 'startTechnicalQc', 'startTechnicalQc')
 decorateRemote(SpokenVideoGateway.prototype, 'readMedia', 'readMedia')
 decorateRemote(SpokenVideoGateway.prototype, 'publishStatus', 'publishStatus')
@@ -184,6 +199,7 @@ decorateRemote(SpokenVideoGateway.prototype, 'configurePublishConnection', 'conf
 decorateRemote(SpokenVideoGateway.prototype, 'clearPublishConnectionCredential', 'clearPublishConnectionCredential')
 decorateRemote(SpokenVideoGateway.prototype, 'listPublishItems', 'listPublishItems')
 decorateRemote(SpokenVideoGateway.prototype, 'startPackaging', 'startPackaging')
+decorateRemote(SpokenVideoGateway.prototype, 'autoStartPackaging', 'autoStartPackaging')
 decorateRemote(SpokenVideoGateway.prototype, 'publishTask', 'publishTask')
 decorateRemote(SpokenVideoGateway.prototype, 'updatePackaging', 'updatePackaging')
 decorateRemote(SpokenVideoGateway.prototype, 'uploadPublishCover', 'uploadPublishCover')

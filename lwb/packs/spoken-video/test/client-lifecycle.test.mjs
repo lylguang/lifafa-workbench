@@ -9,7 +9,7 @@ test('unloading releases capability pages so the client can be loaded again', as
   const end = source.indexOf('    exports.inject', start)
   assert.ok(start >= 0 && end > start)
   const components = ['AccountPositioningPage', 'SignalsPage', 'TopicsPage', 'ScriptPage',
-    'AudioCaptionsPageV2', 'VideoPreviewPageV2', 'PublishPageV4', 'ContentSchedulePage']
+    'AudioCaptionsPageV2', 'VideoPreviewPageV2', 'PublishPageV4', 'ContentSchedulePage', 'PipelineBoardPage']
   const apply = vm.runInNewContext(`${source.slice(start, end)}; apply`, {
     connection: null, executionRemote: null, executionStreams: null, installStyle() {},
     ...Object.fromEntries(components.map(name => [name, () => null])),
@@ -30,7 +30,7 @@ test('unloading releases capability pages so the client can be loaded again', as
   }
   for (let cycle = 0; cycle < 2; cycle++) {
     await apply(ctx)
-    assert.equal(Object.keys(registered.get('spoken-video')).length, 8)
+    assert.equal(Object.keys(registered.get('spoken-video')).length, 9)
     while (effects.length) effects.pop()()
     assert.equal(registered.size, 0, 'host disposal must unregister the pages')
   }

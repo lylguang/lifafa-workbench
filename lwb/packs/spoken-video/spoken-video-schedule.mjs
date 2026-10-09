@@ -30,13 +30,14 @@ const WEEKDAY_LABELS = Object.freeze(['周一', '周二', '周三', '周四', '�
 const ORIENTATIONS = Object.freeze(['portrait', 'landscape'])
 
 /** How deep one unattended round runs. The depth IS the authorisation scope. */
-export const SCHEDULE_DEPTHS = Object.freeze(['topic', 'script', 'video', 'packaging'])
+export const SCHEDULE_DEPTHS = Object.freeze(['topic', 'script', 'video', 'packaging', 'publish'])
 
 export const DEPTH_LABEL = Object.freeze({
   topic: '选题',
   script: '写稿',
   video: '成片 + 质检',
   packaging: '发布资料',
+  publish: '投递到平台',
 })
 
 /**
@@ -44,7 +45,7 @@ export const DEPTH_LABEL = Object.freeze({
  * review because the media host commits both artifacts atomically, and
  * `approve` is the script-confirmation gate that only the deeper depths cross.
  */
-export const AUTOMATION_STEPS = Object.freeze(['topic', 'script', 'approve', 'voiceover', 'subtitles', 'video', 'packaging'])
+export const AUTOMATION_STEPS = Object.freeze(['topic', 'script', 'approve', 'voiceover', 'subtitles', 'video', 'packaging', 'publish'])
 
 export const STEP_LABEL = Object.freeze({
   topic: '选题',
@@ -54,6 +55,7 @@ export const STEP_LABEL = Object.freeze({
   subtitles: '字幕',
   video: '成片质检',
   packaging: '发布资料',
+  publish: '投递到平台',
 })
 
 export const DEPTH_STEPS = Object.freeze({
@@ -61,10 +63,20 @@ export const DEPTH_STEPS = Object.freeze({
   script: ['topic', 'script'],
   video: ['topic', 'script', 'approve', 'voiceover', 'subtitles', 'video'],
   packaging: ['topic', 'script', 'approve', 'voiceover', 'subtitles', 'video', 'packaging'],
+  publish: ['topic', 'script', 'approve', 'voiceover', 'subtitles', 'video', 'packaging', 'publish'],
 })
 
 /** Depths that auto-confirm the AI script instead of leaving it for a human. */
-export const SCRIPT_APPROVING_DEPTHS = Object.freeze(['video', 'packaging'])
+export const SCRIPT_APPROVING_DEPTHS = Object.freeze(['video', 'packaging', 'publish'])
+
+/**
+ * How the publish step hands the work over. `confirm` uploads the cut and
+ * fills every field, then stops before the platform's submit button; `auto`
+ * clicks it. The default is confirm because this is the one step that leaves
+ * the machine and cannot be taken back.
+ */
+export const PUBLISH_SUBMIT_MODES = Object.freeze(['confirm', 'auto'])
+export const SCHEDULE_PUBLISH_ACCOUNT_LIMIT = 5
 
 export const STEP_TIMEOUT_MS = Object.freeze({
   topic: 15 * 60_000,
@@ -74,6 +86,8 @@ export const STEP_TIMEOUT_MS = Object.freeze({
   subtitles: 10 * 60_000,
   video: 40 * 60_000,
   packaging: 15 * 60_000,
+  // Uploading a long video to a platform takes longer than rendering it here.
+  publish: 25 * 60_000,
 })
 
 export const SCHEDULE_POLL_INTERVAL_MS = 2_000
@@ -298,6 +312,23 @@ function parseSources(value) {
 }
 
 /**
+ * Where a `publish`-depth round sends its finished cuts. Account ids belong to
+ * the publisher pack, which is the only component that knows a platform
+ * account exists; this layer only stores the selection and the submit mode.
+ * A schedule without a target simply stops at `packaging`, which is what every
+ * pre-existing task does.
+ */
+function parsePublish(value) {
+  if (value === undefined || value === null) return null
+  const input = object(value, '发布目标')
+  const accountIds = idList(input.accountIds, '发布账号', SCHEDULE_PUBLISH_ACCOUNT_LIMIT).map((id) => uuid(id, '发布账号标识'))
+  return {
+    accountIds,
+    submitMode: PUBLISH_SUBMIT_MODES.includes(input.submitMode) ? input.submitMode : 'confirm',
+  }
+}
+
+/**
  * Validate one create/update request into the stored shape. `accountId` may be
  * null for the general (no positioning) tab.
  */
@@ -314,6 +345,7 @@ export function parseScheduleRequest(request) {
     depth: validDepth(input.depth),
     perRunLimit: integer(input.perRunLimit, '每轮视频上限', 1, SCHEDULE_ITEM_LIMIT, 1),
     production: parseProduction(input.production),
+    publish: parsePublish(input.publish),
   }
 }
 
@@ -370,6 +402,12 @@ function itemRecord(value) {
     orientation: ORIENTATIONS.includes(item.orientation) ? item.orientation : null,
     qcPassed: bool(item.qcPassed, '质检结论', false),
     coverState: ['both', 'partial', 'none', 'disabled'].includes(item.coverState) ? item.coverState : null,
+    // Publish outcome, only ever set by a `publish`-depth round. `awaiting` means
+    // the cut was uploaded and filled in but the platform's submit button was
+    // left for a person — the honest state of a confirm-mode handover.
+    publishState: ['submitted', 'awaiting', 'failed'].includes(item.publishState) ? item.publishState : null,
+    publishAccount: text(item.publishAccount, '发布账号', 120, false),
+    publishUrl: text(item.publishUrl, '作品链接', 600, false),
     error: text(item.error, '条目错误', 500, false),
     stages: Array.isArray(item.stages) ? item.stages.map(stageRecord).slice(0, AUTOMATION_STEPS.length) : [],
   }
@@ -402,6 +440,7 @@ function runRecord(value) {
       scriptGenerationIds: idList(item.refs?.scriptGenerationIds, '写稿任务标识', SCHEDULE_ITEM_LIMIT * 2).slice(0, SCHEDULE_ITEM_LIMIT * 2),
       mediaRunIds: idList(item.refs?.mediaRunIds, '媒体任务标识', SCHEDULE_ITEM_LIMIT * 8).slice(0, SCHEDULE_ITEM_LIMIT * 8),
       publishTaskIds: idList(item.refs?.publishTaskIds, '发布任务标识', SCHEDULE_ITEM_LIMIT * 2).slice(0, SCHEDULE_ITEM_LIMIT * 2),
+      publishJobIds: idList(item.refs?.publishJobIds, '平台投递任务标识', SCHEDULE_ITEM_LIMIT * 2).slice(0, SCHEDULE_ITEM_LIMIT * 2),
     },
     items: Array.isArray(item.items) ? item.items.map(itemRecord).slice(0, SCHEDULE_ITEM_LIMIT) : [],
   }
@@ -430,9 +469,15 @@ export function emptyScheduleFile() { return { schemaVersion: SCHEDULE_SCHEMA, s
  * making the whole file unreadable. History records that fail validation are
  * dropped individually for the same reason.
  *
+ * `validPublishAccountIds` may be `null` to mean "the publisher pack is not
+ * loaded, so this cannot be judged". Pruning then does not happen: an unloaded
+ * pack must not permanently disable a task on disk, because reloading it would
+ * leave the task mysteriously switched off. The round itself still fails with
+ * an actionable message when it reaches the publish step.
+ *
  * @returns the normalized file plus whether it differs from what was read.
  */
-export function scheduleFile(value, { validSourceIds = new Set(), validAccountIds = new Set() } = {}) {
+export function scheduleFile(value, { validSourceIds = new Set(), validAccountIds = new Set(), validPublishAccountIds = new Set() } = {}) {
   if (value?.schemaVersion !== SCHEDULE_SCHEMA || !Array.isArray(value.schedules) || !Array.isArray(value.runs)) {
     fail('SPOKEN_VIDEO_SCHEDULE_FILE_UNSUPPORTED', '内容安排文件版本不受支持，请删除后重新创建内容安排。')
   }
@@ -444,11 +489,21 @@ export function scheduleFile(value, { validSourceIds = new Set(), validAccountId
     if (droppedSources) changed = true
     const accountMissing = Boolean(item.accountId) && !validAccountIds.has(item.accountId)
     if (accountMissing) changed = true
+    // A publish target whose platform account was deleted would otherwise fail
+    // every round after the video was already rendered.
+    const publish = item.publish
+      ? { ...item.publish, accountIds: validPublishAccountIds === null ? [...item.publish.accountIds] : item.publish.accountIds.filter((id) => validPublishAccountIds.has(id)) }
+      : null
+    if (publish && publish.accountIds.length !== item.publish.accountIds.length) changed = true
+    const publishMissing = Boolean(publish) && validPublishAccountIds !== null && publish.accountIds.length === 0
     let disabledReason = item.disabledReason
     let enabled = item.enabled
     if (accountMissing) {
       enabled = false
       disabledReason = `账号定位「${item.accountId}」已被删除，请重新选择账号后启用。`
+    } else if (publishMissing) {
+      enabled = false
+      disabledReason = '所选发布账号已被删除，请重新选择发布目标后启用。'
     } else if (!sourceIds.length) {
       enabled = false
       disabledReason = '所选信号来源均已被删除，请重新选择参与渠道后启用。'
@@ -456,7 +511,7 @@ export function scheduleFile(value, { validSourceIds = new Set(), validAccountId
       disabledReason = null
     }
     if (enabled !== item.enabled || disabledReason !== item.disabledReason) changed = true
-    return { ...item, enabled, disabledReason, sources: { ...item.sources, sourceIds } }
+    return { ...item, enabled, disabledReason, publish, sources: { ...item.sources, sourceIds } }
   })
   const runs = []
   for (const raw of value.runs) {

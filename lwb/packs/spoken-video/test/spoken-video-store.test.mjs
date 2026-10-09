@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -256,4 +256,147 @@ test('a topic can leave and re-enter the writing queue before writing begins', a
     store.setTopicSelected(currentAgent, { projectId: project.id, selected: false }),
     /已有稿件/u,
   )
+})
+
+test('remove deletes a project with all its artifacts and media, singly or in bulk', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const keep = await store.create(currentAgent, { title: '保留的项目' })
+  let doomed = await store.create(currentAgent, { title: '待删除的项目' })
+  doomed = (await store.commit(currentAgent, request(doomed, 'topic', { title: '待删除的项目' }, 'del-topic'))).project
+  doomed = (await store.commit(currentAgent, request(doomed, 'script', { body: '这段稿件会随项目一起删除。' }, 'del-script'))).project
+
+  // 素材目录里放一个文件，验证删除会连同媒体一起清掉，而不只是记录。
+  const mediaFile = join(cwd, 'data', 'projects', doomed.id, 'media', 'voiceovers', 'clip.wav')
+  await mkdir(join(cwd, 'data', 'projects', doomed.id, 'media', 'voiceovers'), { recursive: true })
+  await writeFile(mediaFile, 'fake-audio')
+
+  const result = await store.remove(currentAgent, { projectIds: [doomed.id] })
+  assert.deepEqual(result.removed, [doomed.id])
+  assert.deepEqual(result.missing, [])
+  assert.deepEqual((await store.list(currentAgent)).map((item) => item.title), ['保留的项目'])
+  await assert.rejects(readFile(mediaFile), /ENOENT/u)
+  await assert.rejects(store.get(currentAgent, { projectId: doomed.id }), /不存在/u)
+
+  // 重复删除同一 id 报告 missing，而不是抛错或误删别的项目。
+  const again = await store.remove(currentAgent, { projectIds: [doomed.id] })
+  assert.deepEqual(again.removed, [])
+  assert.deepEqual(again.missing, [doomed.id])
+
+  // 单个删除走 projectId 字段。
+  const single = await store.remove(currentAgent, { projectId: keep.id })
+  assert.deepEqual(single.removed, [keep.id])
+  assert.deepEqual(await store.list(currentAgent), [])
+})
+
+test('remove refuses an empty selection and caps the batch size', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  await assert.rejects(store.remove(currentAgent, { projectIds: [] }), /至少选择一个/u)
+  const tooMany = Array.from({ length: 51 }, (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`)
+  await assert.rejects(store.remove(currentAgent, { projectIds: tooMany }), /最多删除 50 个/u)
+})
+
+test('remove never follows a symlinked project directory out of the workspace', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const outside = join(cwd, '..', `lwb-outside-${Date.now()}`)
+  await mkdir(outside, { recursive: true })
+  t.after(() => rm(outside, { recursive: true, force: true }))
+  await writeFile(join(outside, 'project.json'), '{"schemaVersion":1,"id":"x","title":"外部"}')
+
+  const linkId = '11111111-1111-4111-8111-111111111111'
+  const projectsRoot = join(cwd, 'data', 'projects')
+  await mkdir(projectsRoot, { recursive: true })
+  try {
+    await symlink(outside, join(projectsRoot, linkId), process.platform === 'win32' ? 'junction' : 'dir')
+  } catch {
+    t.skip('symlinks are unavailable in this environment')
+    return
+  }
+
+  const result = await store.remove(currentAgent, { projectIds: [linkId] })
+  assert.deepEqual(result.removed, [], '符号链接目录不能被当作项目删除')
+  assert.deepEqual(result.missing, [linkId])
+  // 外部目录必须原样保留。
+  assert.equal(await readFile(join(outside, 'project.json'), 'utf8'), '{"schemaVersion":1,"id":"x","title":"外部"}')
+})
+
+test('pipelineOverview reports every project stage and its next page, aligned with work page gates', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+
+  // 项目一：只确认选题 → 待写稿。
+  let pending = await store.create(currentAgent, { title: '待写稿项目' })
+  pending = (await store.commit(currentAgent, request(pending, 'signals', { source: 'manual', text: '信号' }))).project
+  pending = (await store.commit(currentAgent, request(pending, 'topic', { title: '待写稿项目', angle: '角度' }))).project
+  await store.setTopicSelected(currentAgent, { projectId: pending.id, selected: true })
+
+  // 项目二：稿件已确认 → 待配音。
+  let voiced = await store.create(currentAgent, { title: '待配音项目' })
+  for (const [stage, payload] of [
+    ['signals', { source: 'manual', text: '信号' }],
+    ['topic', { title: '待配音项目', angle: null }],
+    ['script', { body: '正文。' }],
+  ]) {
+    voiced = (await store.commit(currentAgent, request(voiced, stage, payload))).project
+    if (stage === 'script') await store.approveScript(currentAgent, { projectId: voiced.id })
+  }
+  await store.setTopicSelected(currentAgent, { projectId: voiced.id, selected: true })
+
+  // 项目三：配音字幕齐、未渲染 → 待视频制作；项目四：质检通过 → 可发布。
+  let rendering = await store.create(currentAgent, { title: '待制作项目' })
+  for (const [stage, payload] of [
+    ['signals', { source: 'manual', text: '信号' }],
+    ['topic', { title: '待制作项目', angle: null }],
+    ['script', { body: '正文。' }],
+    ['voiceover', { notes: '配音说明。' }],
+    ['subtitles', { srt: '1\n00:00:00,000 --> 00:00:02,000\n正文。' }],
+  ]) {
+    const result = await store.commit(currentAgent, request(rendering, stage, payload))
+    rendering = result.project
+    if (stage === 'script') await store.approveScript(currentAgent, { projectId: rendering.id })
+  }
+  let publishing = await store.create(currentAgent, { title: '可发布项目' })
+  for (const [stage, payload] of [
+    ['signals', { source: 'manual', text: '信号' }],
+    ['topic', { title: '可发布项目', angle: null }],
+    ['script', { body: '正文。' }],
+    ['voiceover', { notes: '配音说明。' }],
+    ['subtitles', { srt: '1\n00:00:00,000 --> 00:00:02,000\n正文。' }],
+  ]) {
+    const result = await store.commit(currentAgent, request(publishing, stage, payload))
+    publishing = result.project
+    if (stage === 'script') await store.approveScript(currentAgent, { projectId: publishing.id })
+  }
+  const rendered = (await store.commitProduced(currentAgent, {
+    projectId: publishing.id, expectedRevision: publishing.revision, stage: 'video', idempotencyKey: 'pipeline-video-0001', source: 'spoken-video/local-ffmpeg',
+    payload: { mode: 'local-ffmpeg', renderer: 'local-ffmpeg', visualBrief: '竖屏。', sourceAudioFile: 'media/voiceovers/pipeline.wav', sourceSubtitleFile: 'media/subtitles/pipeline.srt', video: { file: 'media/videos/pipeline.mp4', mediaType: 'video/mp4', bytes: 4096, durationSeconds: 2, width: 1080, height: 1920, fps: 30, hasAudio: true } },
+  })).project
+  await store.commitProduced(currentAgent, {
+    projectId: rendered.id, expectedRevision: rendered.revision, stage: 'qc', idempotencyKey: 'pipeline-qc-0001', source: 'spoken-video/ffprobe',
+    payload: { mode: 'automatic', reportFile: 'media/qc/pipeline.json', passed: true, technical: { passed: true, issues: [], warnings: [], video: {}, audio: {}, subtitles: { cueCount: 1 } } },
+  })
+
+  const overview = await store.pipelineOverview(currentAgent)
+  assert.equal(overview.total, 4)
+  const stageOf = (title) => overview.items.find((item) => item.title === title)
+  assert.equal(stageOf('待写稿项目').stage, 'script-pending')
+  assert.equal(stageOf('待写稿项目').page, 'scripts')
+  assert.equal(stageOf('待配音项目').stage, 'voiceover')
+  assert.equal(stageOf('待配音项目').page, 'audio-captions')
+  assert.equal(stageOf('待制作项目').stage, 'video')
+  assert.equal(stageOf('待制作项目').page, 'video-preview')
+  assert.equal(stageOf('可发布项目').stage, 'publish')
+  assert.equal(stageOf('可发布项目').page, 'publish')
+  // 阶段顺序：写稿组在最前，发布组在最后。
+  assert.deepEqual(overview.items.map((item) => item.stage), ['script-pending', 'voiceover', 'video', 'publish'])
+  // 阶段布尔量与闸门一致：已确认稿件的项目 script=true，未确认=false。
+  assert.equal(stageOf('待写稿项目').stages.script, false)
+  assert.equal(stageOf('待配音项目').stages.script, true)
+  assert.equal(stageOf('可发布项目').stages.qc, true)
 })

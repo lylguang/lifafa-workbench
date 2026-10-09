@@ -451,11 +451,49 @@ function emptyTopicGenerationsFile() { return { schemaVersion: TOPIC_GENERATION_
 const SCRIPT_GENERATION_SCHEMA = 1
 const SCRIPT_GENERATION_CONCURRENCY = 2
 const ACTIVE_SCRIPT_GENERATION_STATUSES = new Set(['queued', 'running'])
-function scriptGenerationsFile(value) {
+const SCRIPT_GENERATION_TERMINAL_LIMIT = 40
+/**
+ * 正在被定时任务引用的写稿记录 id。
+ *
+ * 背景（2026-10-08 15:47 实测白等 15 分钟）：归一化只保留终态末 40 条，可定时任务
+ * 深度是 `topic → … → script`，脚本阶段在等 DSH 写稿（几十秒到几分钟）才去查状态。
+ * 这期间别的写稿会完成并把终态推过 40，于是**正在被本轮引用的那条被 slice 掉**，
+ * 此后每次 `scriptGenerationStatus` 都报「写稿生成记录不存在」——那是永久性的，重试
+ * 到超时也没用（实测 15:49 提交、15:50 就完成，却到 16:04 才报错）。
+ *
+ * 办法：把在跑轮次引用到的 id 一并保留，无论它多老都不淘汰。这不是「无限增长」——
+ * 只有真正在跑的轮次会被保护，跑完即释放；40 条的常规窗口仍然生效。
+ */
+async function protectedScriptGenerationIds(scriptGenerationsPath) {
+  try {
+    // script-generations.json 与 schedules.json 同在 <root>/data 下，取 dirname 即可。
+    const root = dirname(scriptGenerationsPath)
+    const data = await readJson(join(root, 'schedules.json'), { runs: [] })
+    const ids = new Set()
+    for (const run of Array.isArray(data.runs) ? data.runs : []) {
+      if (run?.status !== 'running') continue
+      for (const id of Array.isArray(run.refs?.scriptGenerationIds) ? run.refs.scriptGenerationIds : []) {
+        if (typeof id === 'string' && id) ids.add(id)
+      }
+    }
+    return ids
+  } catch {
+    return new Set()
+  }
+}
+/** 读脚本生成文件并按保留策略归一化；会保护在跑定时任务引用的记录。 */
+async function readScriptGenerations(path) {
+  return scriptGenerationsFile(await readJson(path, emptyScriptGenerationsFile), await protectedScriptGenerationIds(path))
+}
+function scriptGenerationsFile(value, protectedIds = new Set()) {
   if (value?.schemaVersion !== SCRIPT_GENERATION_SCHEMA || !Array.isArray(value.generations)) return { schemaVersion: SCRIPT_GENERATION_SCHEMA, generations: [] }
   const active = value.generations.filter((item) => ACTIVE_SCRIPT_GENERATION_STATUSES.has(item?.status))
-  const terminal = value.generations.filter((item) => !ACTIVE_SCRIPT_GENERATION_STATUSES.has(item?.status)).slice(-40)
-  return { schemaVersion: SCRIPT_GENERATION_SCHEMA, generations: [...active, ...terminal] }
+  const terminal = value.generations.filter((item) => !ACTIVE_SCRIPT_GENERATION_STATUSES.has(item?.status))
+  // 常规窗口取末 N 条，但被在跑轮次引用的记录额外留下——它可能正好在窗口之外。
+  const recent = terminal.slice(-SCRIPT_GENERATION_TERMINAL_LIMIT)
+  const kept = new Set(recent.map((item) => item?.id))
+  const extra = terminal.filter((item) => protectedIds.has(item?.id) && !kept.has(item?.id))
+  return { schemaVersion: SCRIPT_GENERATION_SCHEMA, generations: [...active, ...extra, ...recent] }
 }
 function emptyScriptGenerationsFile() { return { schemaVersion: SCRIPT_GENERATION_SCHEMA, generations: [] } }
 function sourceSummary(item, data) {
@@ -964,7 +1002,7 @@ export class SpokenVideoContentStore {
           projectId = project.id
         }
       } else if (projectId) {
-        const scriptData = scriptGenerationsFile(await readJson(paths.scriptGenerations, emptyScriptGenerationsFile))
+        const scriptData = await readScriptGenerations(paths.scriptGenerations)
         if (scriptData.generations.some((item) => item.status === 'running' && item.projectId === projectId)) {
           throw fail('该选题正在生成稿件，请等待任务结束后再调整。')
         }
@@ -1127,8 +1165,8 @@ export class SpokenVideoContentStore {
 
   /* ------------------------- script generation ------------------------- */
 
-  async saveScriptGeneration(workspace, path, record) { return this.serialGen(workspace, async () => { const data = scriptGenerationsFile(await readJson(path, emptyScriptGenerationsFile)); const index = data.generations.findIndex((item) => item.id === record.id); if (index === -1) data.generations.push(record); else data.generations[index] = record; await writeJson(path, data) }) }
-  async mutateScriptGeneration(workspace, path, id, mutate) { return this.serialGen(workspace, async () => { const data = scriptGenerationsFile(await readJson(path, emptyScriptGenerationsFile)); const record = data.generations.find((item) => item.id === id); if (!record) return null; mutate(record); await writeJson(path, data); return record }) }
+  async saveScriptGeneration(workspace, path, record) { return this.serialGen(workspace, async () => { const data = await readScriptGenerations(path); const index = data.generations.findIndex((item) => item.id === record.id); if (index === -1) data.generations.push(record); else data.generations[index] = record; await writeJson(path, data) }) }
+  async mutateScriptGeneration(workspace, path, id, mutate) { return this.serialGen(workspace, async () => { const data = await readScriptGenerations(path); const record = data.generations.find((item) => item.id === id); if (!record) return null; mutate(record); await writeJson(path, data); return record }) }
   async recordScriptDshStarted(workspace, path, id, run) {
     const childSessionId = typeof run?.childSessionId === 'string' ? run.childSessionId : null
     if (!childSessionId) return null
@@ -1146,10 +1184,10 @@ export class SpokenVideoContentStore {
       appendDshTrace(ensureDshTrace(record), projected)
     })
   }
-  async listScriptGenerations(agent) { const { scriptGenerations } = await this.paths(agent); const data = scriptGenerationsFile(await readJson(scriptGenerations, emptyScriptGenerationsFile)); return [...data.generations].sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt))) }
+  async listScriptGenerations(agent) { const { scriptGenerations } = await this.paths(agent); const data = await readScriptGenerations(scriptGenerations); return [...data.generations].sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt))) }
   async scriptGenerationStatus(agent, request) {
     const input = object(request ?? {}, '读取写稿生成请求'); const id = uuid(input.id, '写稿生成标识'); const { scriptGenerations } = await this.paths(agent)
-    const data = scriptGenerationsFile(await readJson(scriptGenerations, emptyScriptGenerationsFile))
+    const data = await readScriptGenerations(scriptGenerations)
     const record = data.generations.find((item) => item.id === id); if (!record) throw fail('写稿生成记录不存在。')
     return record
   }
@@ -1210,7 +1248,7 @@ export class SpokenVideoContentStore {
     // The durable write lock makes the project-level duplicate check safe for
     // two RPC calls arriving at the same time.
     await this.serialGen(workspace, async () => {
-      const current = scriptGenerationsFile(await readJson(scriptGenerations, emptyScriptGenerationsFile))
+      const current = await readScriptGenerations(scriptGenerations)
       if (current.generations.some((item) => item.projectId === input.projectId && ACTIVE_SCRIPT_GENERATION_STATUSES.has(item.status))) throw fail('该项目已有写稿任务，请等待当前任务完成后再提交。')
       current.generations.push(record)
       await writeJson(scriptGenerations, current)
@@ -1330,7 +1368,7 @@ export class SpokenVideoContentStore {
       const root = await rootFor(workspace, false); if (!root) continue
       const generations = join(root, 'script-generations.json')
       await this.serialGen(workspace, async () => {
-        const data = scriptGenerationsFile(await readJson(generations, emptyScriptGenerationsFile))
+        const data = await readScriptGenerations(generations)
         let changed = false
         for (const record of data.generations) {
           if (!ACTIVE_SCRIPT_GENERATION_STATUSES.has(record?.status)) continue

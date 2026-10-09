@@ -9,6 +9,9 @@ window.__ModuleLoader__.load({
     let connection; let executionRemote; let executionStreams;
     let audioCaptionsHandoff = null;
     let publishHandoff = null;
+    // Pipeline board → work page: carries the target project so the destination
+    // page selects it on mount. Keyed by page id, mirroring openPackMenu ids.
+    let pipelineHandoff = null;
     const STAGES = ['signals', 'topic', 'script', 'voiceover', 'subtitles', 'video', 'qc', 'packaging'];
     const LABEL = { signals: '信号', topic: '选题', script: '写稿', voiceover: '配音', subtitles: '字幕', video: '视频制作', qc: '质检', packaging: '发布资料' };
     const DEFAULT_VIDEO_VISUAL_BRIEF = '由 AI 视觉导演根据稿件语义完成主题化 Remotion 画面。';
@@ -459,6 +462,10 @@ window.__ModuleLoader__.load({
       .sv-media-field { display:grid; min-width:0; gap:6px; }
       .sv-media-field > span { color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); font-weight:700; }
       .sv-media-field-wide { grid-column:1/-1; }
+      .sv-style-presets { display:flex; flex-wrap:wrap; align-items:center; gap:5px; }
+      .sv-style-presets > .sv-meta { margin:0 2px 0 0; }
+      .sv-warn { margin:0; padding:10px 11px; border:1px solid #ecd39b; border-radius:7px; color:#7a5b17; background:#fffaf0; font-size:var(--lwb-text-sm,13px); line-height:1.55; }
+      body[data-ds-dark-theme] .sv-warn { border-color:#7a6534; color:#e8d9a9; background:#332b1b; }
       .sv-media-drawer-foot { display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:14px; border-top:1px solid var(--lwb-line); }
       body[data-ds-dark-theme] .sv-media-config-mark,body[data-ds-dark-theme] .sv-media-provider-choice[data-active="true"] { background:rgba(192,132,211,.14); }
       body[data-ds-dark-theme] .sv-media-config-trigger { border-color:var(--lwb-line); background:var(--lwb-surface); }
@@ -509,6 +516,13 @@ window.__ModuleLoader__.load({
       .sv-vprogress-bar progress::-webkit-progress-bar { border-radius:999px; background:var(--lwb-line); }
       .sv-vprogress-bar progress::-webkit-progress-value { border-radius:999px; background:#f59e0b; transition:width .4s ease; }
       .sv-vprogress-bar progress::-moz-progress-bar { border-radius:999px; background:#f59e0b; }
+      /* 结束后不再用「进行中」的橙色：一条 100% 的橙条看着仍像在跑（2026-10-08 反馈）。 */
+      .sv-vprogress-bar[data-status="succeeded"] progress::-webkit-progress-value { background:#1f7354; }
+      .sv-vprogress-bar[data-status="succeeded"] progress::-moz-progress-bar { background:#1f7354; }
+      .sv-vprogress-bar[data-status="failed"] progress::-webkit-progress-value { background:#a94343; }
+      .sv-vprogress-bar[data-status="failed"] progress::-moz-progress-bar { background:#a94343; }
+      .sv-vprogress-bar[data-status="succeeded"] .sv-vprogress-live { color:#1f7354; }
+      .sv-vprogress-bar[data-status="failed"] .sv-vprogress-live { color:#a94343; }
       .sv-vprogress-bar .sv-meta { margin:0; font-variant-numeric:tabular-nums; }
       .sv-vprogress-foot { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:6px; }
       .sv-vprogress-foot .sv-meta { margin:0; }
@@ -527,6 +541,13 @@ window.__ModuleLoader__.load({
       .sv-audio-project { display:grid; gap:5px; padding:10px 11px; border:1px solid var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
       .sv-audio-project strong { overflow:hidden; color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); text-overflow:ellipsis; white-space:nowrap; }
       .sv-audio-project span { color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); }
+      .sv-sync-target-banner { display:flex; align-items:center; gap:8px; margin-bottom:12px; padding:10px 12px; border:1.5px dashed color-mix(in srgb, var(--lwb-accent, #d6336c) 45%, var(--lwb-line)); border-radius:8px; background:color-mix(in srgb, var(--lwb-accent, #d6336c) 6%, transparent); }
+      .sv-sync-target-banner svg { flex:none; color:var(--lwb-accent, #d6336c); }
+      .sv-sync-target-banner-body { min-width:0; display:grid; gap:2px; }
+      .sv-sync-target-banner-body strong { overflow:hidden; color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); text-overflow:ellipsis; white-space:nowrap; }
+      .sv-sync-target-banner-body span { color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); }
+      .sv-sync-target-excerpt { color:var(--lwb-ink); opacity:.75; }
+      .sv-audio-task-excerpt { margin:2px 0 0; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
       .sv-voice-upload,.sv-video-bgm-upload { display:grid; gap:8px; padding:10px 11px; border:1px solid var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
       .sv-voice-upload-row,.sv-video-bgm-row { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
       .sv-voice-upload-file,.sv-video-bgm-file { min-width:0; flex:1; overflow:hidden; color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); text-overflow:ellipsis; white-space:nowrap; }
@@ -589,6 +610,12 @@ window.__ModuleLoader__.load({
       .sv-tp-tab:disabled { cursor:default; opacity:.6; }
       .sv-tp-tab[data-active="true"] { border-color:var(--sv-accent); color:var(--sv-accent-ink); background:var(--sv-accent-soft); }
       .sv-tp-tab-dot { width:6px; height:6px; border-radius:50%; background:var(--sv-accent); }
+      .sv-tp-tab-badge { min-width:18px; padding:1px 5px; border-radius:999px; background:var(--sv-accent); color:#fff; font-size:11px; font-weight:700; line-height:16px; text-align:center; }
+      .sv-pl-item { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; border:1px solid var(--lwb-line); border-radius:10px; background:var(--lwb-surface); }
+      .sv-pl-item-main { display:grid; gap:3px; min-width:0; }
+      .sv-pl-item-main strong { font-size:var(--lwb-text-base,14px); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+      .sv-pl-item-meta { color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); }
+      .sv-pl-item-go { flex:none; }
       .sv-tp-acct-note { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); line-height:1.6; }
       .sv-tp-acct-link { padding:0; border:0; color:var(--lwb-blue); background:none; cursor:pointer; font:inherit; font-size:var(--lwb-text-sm,13px); }
       .sv-tp-srcgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(170px,100%),1fr)); gap:8px; }
@@ -821,6 +848,11 @@ window.__ModuleLoader__.load({
       .sv-pb-prompt .sv-textarea { min-height:64px; font-size:var(--lwb-text-sm,13px); }
       .sv-pb-shelf { display:grid; gap:12px; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); }
       .sv-pb-card { display:grid; gap:10px; padding:12px; border:1px solid var(--lwb-line); border-radius:10px; background:var(--lwb-surface); box-shadow:var(--sv-shadow-sm); }
+      .sv-pb-card[data-selected="true"] { border-color:var(--sv-accent-line); box-shadow:0 0 0 2px var(--sv-accent-line); }
+      .sv-pb-select { display:inline-flex; flex:none; align-items:center; gap:6px; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); cursor:pointer; }
+      .sv-pb-select input { width:16px; height:16px; margin:0; cursor:pointer; }
+      .sv-pb-selection { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-page); }
+      .sv-pb-selection > .sv-meta { flex:1; margin:0; }
       .sv-pb-thumb { position:relative; display:grid; place-items:center; min-height:150px; overflow:hidden; border:1px solid var(--lwb-line); border-radius:8px; background:#0e1a2b; }
       .sv-pb-thumb img { display:block; width:100%; height:100%; max-height:220px; object-fit:cover; }
       .sv-pb-thumb video { display:block; width:100%; max-height:340px; }
@@ -939,6 +971,24 @@ window.__ModuleLoader__.load({
         .sv-tp-srcgrid { grid-template-columns:repeat(2,minmax(0,1fr)); }
       }
       @media (prefers-reduced-motion:reduce) { .sv-page * { animation:none !important; transition:none !important; } }
+
+      /* 白板线稿准备面板：选择制作方式后出现，按"状态 → 操作 → 网格"三段布局 */
+      .sv-lineart-panel { display:grid; gap:10px; padding:13px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-surface); }
+      .sv-lineart-head { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:8px; }
+      .sv-lineart-head strong { font-size:var(--lwb-text-base,14px); }
+      .sv-lineart-stat { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); }
+      .sv-lineart-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+      .sv-lineart-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:9px; }
+      .sv-lineart-card { display:grid; gap:6px; padding:8px; border:1px solid var(--lwb-line); border-radius:8px; }
+      .sv-lineart-card-head { display:flex; align-items:baseline; justify-content:space-between; gap:6px; }
+      .sv-lineart-no { color:var(--lwb-blue); background:var(--lwb-blue-soft); border-radius:4px; padding:1px 6px; font-size:var(--lwb-text-xs,12px); font-weight:700; }
+      .sv-lineart-time { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); font-variant-numeric:tabular-nums; }
+      .sv-lineart-thumb { aspect-ratio:16/9; display:grid; place-items:center; overflow:hidden; border-radius:6px; background:#f5ebd7; }
+      .sv-lineart-thumb img { width:100%; height:100%; object-fit:cover; }
+      .sv-lineart-empty { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); }
+      .sv-lineart-text { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); line-height:1.5; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+      body[data-ds-dark-theme] .sv-lineart-panel { border-color:var(--lwb-line); }
+      body[data-ds-dark-theme] .sv-lineart-thumb { background:#2a2a24; }
     `;
     function installStyle() {
       const existing = document.getElementById('lwb-spoken-video-style');
@@ -1897,13 +1947,16 @@ window.__ModuleLoader__.load({
     }
 
     const GENERAL_TAB = '__general__';
-    function AccountTabs({ accountLibrary, activeTab, onChange, label, disabled = false, children }) {
+    function AccountTabs({ accountLibrary, activeTab, onChange, label, disabled = false, children, tabBadge, tabBadgeLabel = '个待写稿' }) {
       const accounts = accountLibrary.accounts.filter((account) => account.status === 'active');
-      const tab = (id, name) => h('button', {
-        key: id, type: 'button', role: 'tab', className: 'sv-tp-tab',
-        'data-active': activeTab === id ? 'true' : 'false', 'aria-selected': activeTab === id,
-        disabled, onClick: () => onChange(id),
-      }, id === accountLibrary.defaultAccountId ? h('span', { className: 'sv-tp-tab-dot', title: '默认账号', 'aria-label': '默认账号' }) : null, name);
+      const tab = (id, name) => {
+        const badge = typeof tabBadge?.[id] === 'number' && tabBadge[id] > 0 ? tabBadge[id] : null;
+        return h('button', {
+          key: id, type: 'button', role: 'tab', className: 'sv-tp-tab',
+          'data-active': activeTab === id ? 'true' : 'false', 'aria-selected': activeTab === id,
+          disabled, onClick: () => onChange(id),
+        }, id === accountLibrary.defaultAccountId ? h('span', { className: 'sv-tp-tab-dot', title: '默认账号', 'aria-label': '默认账号' }) : null, name, badge != null ? h('span', { className: 'sv-tp-tab-badge', 'aria-label': `${badge} ${tabBadgeLabel}` }, String(badge)) : null);
+      };
       return h('div', { className: 'sv-tp-tabs', role: 'tablist', 'aria-label': label },
         accounts.map((account) => tab(account.id, account.name)),
         tab(GENERAL_TAB, '通用（无账号定位）'), children,
@@ -2017,9 +2070,14 @@ window.__ModuleLoader__.load({
       };
       const confirmLaunch = (payload, description) => {
         if (launching) return;
+        // 通用 Tab 的选题不带账号快照，写稿页只会在「通用（无账号定位）」Tab 展示它们；
+        // 用户默认停在账号 Tab 时会找不到，去向前置到这里说明。
+        const destination = payload.accountId
+          ? ''
+          : '选题将不带账号定位，加入待写稿后只会出现在写稿页「通用（无账号定位）」Tab。';
         ask({
           title: '启动选题任务？',
-          copy: `${description}。任务将先确认渠道当天采集，缺失时自动补采；补采仍失败的渠道会被跳过，不阻塞本轮选题，再交给 DSH 生成最多 5 个候选。任务会立即出现在右侧；你可以继续编辑并启动其他任务。完成后推荐候选会自动加入待写稿。`,
+          copy: `${description}。任务将先确认渠道当天采集，缺失时自动补采；补采仍失败的渠道会被跳过，不阻塞本轮选题，再交给 DSH 生成最多 5 个候选。任务会立即出现在右侧；你可以继续编辑并启动其他任务。完成后推荐候选会自动加入待写稿。${destination}`,
           confirm: '启动任务',
           onConfirm: () => { void launch(payload); },
         });
@@ -2234,6 +2292,17 @@ window.__ModuleLoader__.load({
     }
     const ARCHIVED_TAB = '__archived__';
     function emptyScriptForm() { return { tier: 'medium', instructions: '', targetId: null }; }
+    // 待写稿 = 已确认选题但还没有稿的项目（listWritableTopics 的 scriptState === 'none'）。
+    // 按选题冻结的账号快照分组：无快照的归通用 Tab，与写稿页 tabOf 的分组一致。
+    function pendingCountByTab(topics) {
+      const counts = {};
+      for (const topic of Array.isArray(topics) ? topics : []) {
+        if (topic?.scriptState !== 'none') continue;
+        const tab = topic.account?.id || GENERAL_TAB;
+        counts[tab] = (counts[tab] || 0) + 1;
+      }
+      return counts;
+    }
     const SCRIPT_STATE_LABEL = { none: '未写稿', draft: '已保存', approved: '已保存' };
     const TIER_OPTIONS = [['short', '短篇', '300-999 字'], ['medium', '中篇', '1000-2499 字'], ['long', '长篇', '2500 字以上']];
     const TIER_LABEL = { short: '短篇', medium: '中篇', long: '长篇' };
@@ -2301,9 +2370,20 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (!packId) return;
         void Promise.all([remote(packId, 'listAccounts'), loadTopics(), loadHistory()])
-          .then(([accounts]) => {
+          .then(([accounts, nextTopics]) => {
             setAccountLibrary(accounts);
-            setActiveTab((current) => current !== GENERAL_TAB && accounts.accounts.some((item) => item.id === current && item.status === 'active') ? current : accounts.defaultAccountId || GENERAL_TAB);
+            // 默认落在待写稿最多的 Tab：账号快照为空的选题（选题页通用 Tab 生成）
+            // 只会出现在通用 Tab，默认账号 Tab 会把它们藏住，用户因此找不到。
+            const pendingByTab = pendingCountByTab(nextTopics);
+            setActiveTab((current) => {
+              if (current === GENERAL_TAB || accounts.accounts.some((item) => item.id === current && item.status === 'active')) {
+                const general = pendingByTab[GENERAL_TAB] || 0;
+                const currentPending = current === GENERAL_TAB ? general : pendingByTab[current] || 0;
+                if (currentPending > 0 || general === 0) return current;
+                if (general > currentPending) return GENERAL_TAB;
+              }
+              return accounts.defaultAccountId || GENERAL_TAB;
+            });
           }).catch((cause) => setError(cause.message));
       }, [packId, loadTopics, loadHistory, setError]);
 
@@ -2332,6 +2412,21 @@ window.__ModuleLoader__.load({
       const activeAccounts = accountLibrary.accounts.filter((item) => item.status === 'active');
       const activeIds = new Set(activeAccounts.map((item) => item.id));
       const tabOf = (topic) => (!topic.account ? GENERAL_TAB : activeIds.has(topic.account.id) ? topic.account.id : ARCHIVED_TAB);
+
+      // Pipeline board handoff: open the carried project's draft drawer directly.
+      // Declared after activeAccounts — the dependency array evaluates during
+      // render, so referencing a later const here is a TDZ crash.
+      React.useEffect(() => {
+        if (!pipelineHandoff || pipelineHandoff.page !== 'scripts' || !pipelineHandoff.projectId) return;
+        const target = topics.find((topic) => topic.projectId === pipelineHandoff.projectId);
+        if (!target) return;
+        const { projectId } = pipelineHandoff;
+        pipelineHandoff = null;
+        // Land on the project's own tab so the card is visible, then open the drawer.
+        setActiveTab(target.account && activeAccounts.some((item) => item.id === target.account.id) ? target.account.id : GENERAL_TAB);
+        setOpenProject(projectId);
+        setOpenMore(false);
+      }, [topics, activeAccounts]);
       const sortTopics = (list) => { const rank = { approved: 0, none: 1 }; return [...list].sort((a, b) => (rank[a.scriptState] - rank[b.scriptState]) || b.updatedAt.localeCompare(a.updatedAt)); };
       const tabTopics = sortTopics(topics.filter((topic) => tabOf(topic) === activeTab));
       const archivedTopics = sortTopics(topics.filter((topic) => tabOf(topic) === ARCHIVED_TAB));
@@ -2533,7 +2628,8 @@ window.__ModuleLoader__.load({
         );
       };
 
-      const tabs = h(AccountTabs, { accountLibrary, activeTab, onChange: selectTab, label: '按账号筛选可写稿选题' });
+      const pendingByTab = React.useMemo(() => pendingCountByTab(topics), [topics]);
+      const tabs = h(AccountTabs, { accountLibrary, activeTab, onChange: selectTab, label: '按账号筛选可写稿选题', tabBadge: pendingByTab });
 
       const topicArea = tabTopics.length
         ? h(React.Fragment, null,
@@ -2826,17 +2922,30 @@ window.__ModuleLoader__.load({
       { id: 'script', label: '写稿', copy: '再自动起稿并保存版本，稿件留待人工确认' },
       { id: 'video', label: '成片 + 质检', copy: '再配音、字幕、渲染成片并通过质检' },
       { id: 'packaging', label: '发布资料', copy: '再生成标题文案标签与横竖封面' },
+      { id: 'publish', label: '投递到平台', copy: '再把成片投递到平台账号，默认停在发布前' },
     ];
-    const AS_APPROVING = new Set(['video', 'packaging']);
-    const AS_STEPS = { topic: '选题', script: '写稿', approve: '确认稿件', voiceover: '配音', subtitles: '字幕', video: '成片质检', packaging: '发布资料' };
+    const AS_APPROVING = new Set(['video', 'packaging', 'publish']);
+    const AS_STEPS = { topic: '选题', script: '写稿', approve: '确认稿件', voiceover: '配音', subtitles: '字幕', video: '成片质检', packaging: '发布资料', publish: '投递到平台' };
     const AS_TIERS = [{ id: 'short', label: '短（300-999 字）' }, { id: 'medium', label: '中（1000-2499 字）' }, { id: 'long', label: '长（2500 字以上）' }];
     // 桥接（小米 MiMo 云端）的内置音色表；与桥接 /api/v1/tts/voiceover-info 的 builtin_voices 同源。
     const SV_MIMO_BUILTIN_VOICES = ['冰糖', '茉莉', '苏打', '白桦', 'mimo_default'];
+    // 常用且专业的语气提示词。桥接把它作为 user 角色指令传给小米 TTS 控制语气/节奏，
+    // 不进合成文本，所以可以放心写风格描述；也允许在输入框里自己改。
+    const SV_VOICE_STYLE_PRESETS = [
+      '清晰沉稳，适合知识讲解。',
+      '亲切自然，像和朋友聊天。',
+      '轻快活泼，节奏明快。',
+      '温柔舒缓，适合情感共鸣。',
+      '沉稳有力，适合观点表达。',
+      '干练利落，适合资讯播报。',
+      '娓娓道来，适合故事讲述。',
+      '热情推荐，适合好物种草。',
+    ];
     const AS_RUN_STATUS = { running: '执行中', completed: '已完成', partial: '部分完成', failed: '失败', missed: '已错过', cancelled: '已停止' };
     const AS_ITEM_STATUS = { running: '进行中', completed: '已完成', failed: '失败', cancelled: '已停止' };
     const AS_STAGE_TONE = { done: 'sv-stage', failed: 'sv-status-error', running: '', skipped: 'sv-status-disabled' };
     function emptyScheduleForm() {
-      return { name: '', days: new Set([1, 2, 3, 4, 5]), time: '21:00', angle: '', offSources: new Set(), offPlatforms: new Set(), excluded: new Set(), depth: 'packaging', perRunLimit: 1, orientation: 'landscape', scriptTier: 'medium', subtitleEnabled: true, visualBrief: '', voiceSource: 'system', voiceReference: null, voiceRate: '1', voiceVolume: '1', bridgeVoice: '冰糖', libraryVoice: '', bridgeChannel: '', bridgeStyle: '' };
+      return { name: '', days: new Set([1, 2, 3, 4, 5]), time: '21:00', angle: '', offSources: new Set(), offPlatforms: new Set(), excluded: new Set(), depth: 'packaging', perRunLimit: 1, orientation: 'landscape', scriptTier: 'medium', subtitleEnabled: true, visualBrief: '', voiceSource: 'system', voiceReference: null, voiceRate: '1', voiceVolume: '1', bridgeVoice: '冰糖', libraryVoice: '', bridgeChannel: '', bridgeStyle: '', publishAccountId: '', publishSubmitMode: 'confirm' };
     }
     /** Rehydrate a per-tab form from a stored task so editing reuses the create form. */
     function scheduleFormOf(schedule, board) {
@@ -2868,6 +2977,10 @@ window.__ModuleLoader__.load({
         libraryVoice: voice?.voiceSource === 'preset' && !presetIsBuiltin ? voice.voiceId : '',
         bridgeChannel: voice?.bridge?.channel || '',
         bridgeStyle: voice?.bridge?.style || '',
+        // A stored task keeps its first target selected; the rest stay in the
+        // saved list and are reachable by editing the task again.
+        publishAccountId: schedule.publish?.accountIds?.[0] || '',
+        publishSubmitMode: schedule.publish?.submitMode === 'auto' ? 'auto' : 'confirm',
       };
     }
     function ScheduleRunDetails({ packId, runId, onChanged }) {
@@ -2913,6 +3026,12 @@ window.__ModuleLoader__.load({
             try { await remote(packId, 'cancelScheduleRun', { runId }); setRefresh((value) => value + 1); onChanged(); }
             catch (cause) { setError(cause.message); } finally { setBusy(false); }
           } }) }, busy ? '正在停止…' : '停止本轮') : null,
+          // 运行中的轮次不给删——先停止再删。执行的产物项目不受影响，只清这条审计记录。
+          detail.active ? null : h('button', { type: 'button', className: 'lwb-danger-button', disabled: busy, onClick: () => ask({ title: '删除这条执行记录？', copy: `将从运行记录里移除这次执行（${run ? `${relativeTime(run.triggeredAt)}触发，状态「${AS_RUN_STATUS[run.status] || run.status}」` : ''}）。只删这一条记录，不影响内容安排本身，也不删除它产出的项目。删除后无法恢复。`, confirm: '确认删除', danger: true, onConfirm: async () => {
+            setBusy(true);
+            try { await remote(packId, 'deleteScheduleRun', { runId }); setRefresh((value) => value + 1); onChanged(); }
+            catch (cause) { setError(cause.message); } finally { setBusy(false); }
+          } }) }, busy ? '正在删除…' : '删除这条记录'),
         ) : null,
         confirmNode,
       );
@@ -2976,6 +3095,126 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', className: 'lwb-plain-button', disabled: feed.loading || page === 0, onClick: () => { setExpanded(null); setPage((value) => value - 1); } }, '上一页'),
           h('button', { type: 'button', className: 'lwb-plain-button', disabled: feed.loading || page + 1 >= pages, onClick: () => { setExpanded(null); setPage((value) => value + 1); } }, '下一页'),
         )),
+      );
+    }
+    // 看板阶段元数据：顺序即流水线顺序；page 是该阶段下一步所在的页面 id。
+    const PIPELINE_STAGES = [
+      { id: 'script-pending', label: '待写稿', page: 'scripts', tone: 'orange', action: '去写稿' },
+      { id: 'script-review', label: '待确认稿件', page: 'scripts', tone: 'violet', action: '去确认稿件' },
+      { id: 'voiceover', label: '待配音 / 字幕', page: 'audio-captions', tone: 'pink', action: '去配音' },
+      { id: 'video', label: '待视频制作', page: 'video-preview', tone: 'green', action: '去制作视频' },
+      { id: 'publish', label: '可发布', page: 'publish', tone: 'red', action: '去发布' },
+    ];
+    // 看板没有 topic 组——未确认选题的项目仍在选题页管理，不进流水线视角。
+    function PipelineBoardPage({ packId, openConversation, openPackMenu }) {
+      const [items, setItems] = React.useState(null);
+      const [error, setError] = React.useState(null);
+      const [busy, setBusy] = React.useState(false);
+      // 读不到数据时要能自己爬起来。2026-10-08 实测：工作台重启的那几秒里打开本页，
+      // pipelineOverview 请求撞上重启窗口失败，而页面既不报错也不重试，就一直挂在
+      // 「正在读取流水线…」，计数全是初始的 0（后端其实 39ms 就能返回 59 个项目）。
+      // 一次失败先原地重试，两次都失败才把错误和「重试读取」按钮摆出来给人。
+      const [attempt, setAttempt] = React.useState(0);
+      const load = React.useCallback(async () => {
+        if (!packId) return;
+        setBusy(true);
+        // 超时看门狗：连接死掉时 remote() 的 promise 既不 resolve 也不 reject
+        // （2026-10-08 实测：工作台重启后旧标签页的 WebSocket 已断，页面永远停在
+        // 「正在读取流水线…」，error 始终为 null，所以任何依赖 error 的重试都不会触发）。
+        // 这里给它加个上限，超时按失败处理，页面就能把原因和重试入口摆出来。
+        const timer = new Promise((_, reject) => setTimeout(
+          () => reject(new Error('工作台连接没有响应，可能已重启。请刷新页面后重试。')),
+          15000,
+        ));
+        try {
+          const next = await Promise.race([remote(packId, 'pipelineOverview'), timer]);
+          setItems(next.items || []); setError(null);
+        }
+        catch (cause) { setError(cause.message); }
+        finally { setBusy(false); }
+      }, [packId, setError]);
+      React.useEffect(() => { void load(); }, [load]);
+      // 还没有任何数据、且刚失败过一次时，隔 2 秒自己再试一次。
+      React.useEffect(() => {
+        if (items != null || !error) return undefined;
+        const timer = setTimeout(() => { void load(); }, 2000);
+        return () => clearTimeout(timer);
+      }, [items, error, attempt, load]);
+      // 有运行中的写稿/配音/视频任务时轻量轮询，让阶段变化自动浮上来。
+      const [running, setRunning] = React.useState(false);
+      React.useEffect(() => {
+        if (!packId) return;
+        let active = true;
+        const hasRunning = async () => {
+          try {
+            const [scripts, media] = await Promise.all([remote(packId, 'listScriptGenerations'), remote(packId, 'listMediaTasks')]);
+            if (active) setRunning(scripts.some((item) => item.status === 'running' || item.status === 'queued') || media.some((item) => item.status === 'running' || item.status === 'queued'));
+          } catch (_) { if (active) setRunning(false); }
+        };
+        void hasRunning();
+        const timer = setInterval(hasRunning, 3000);
+        return () => { active = false; clearInterval(timer); };
+      }, [packId]);
+      React.useEffect(() => {
+        if (!running) return undefined;
+        const timer = setInterval(() => { void load(); }, 4000);
+        return () => clearInterval(timer);
+      }, [running, load]);
+
+      const byStage = new Map(PIPELINE_STAGES.map((stage) => [stage.id, []]));
+      for (const item of items || []) if (byStage.has(item.stage)) byStage.get(item.stage).push(item);
+      const total = (items || []).length;
+
+      // 选项卡：一次只看一个阶段，默认落在第一个非空阶段；全部为空时停在待写稿。
+      const [activeStage, setActiveStage] = React.useState(PIPELINE_STAGES[0].id);
+      React.useEffect(() => {
+        if (!items) return;
+        setActiveStage((current) => {
+          if (byStage.get(current)?.length) return current;
+          return PIPELINE_STAGES.find((stage) => byStage.get(stage.id)?.length)?.id || PIPELINE_STAGES[0].id;
+        });
+      }, [items]);
+      const selectedStage = PIPELINE_STAGES.find((stage) => stage.id === activeStage) || PIPELINE_STAGES[0];
+      const visibleItems = byStage.get(selectedStage.id) || [];
+
+      const goNext = (item) => {
+        const stage = PIPELINE_STAGES.find((entry) => entry.id === item.stage);
+        if (!stage) return;
+        pipelineHandoff = { page: stage.page, projectId: item.id };
+        openPackMenu?.(stage.page);
+      };
+
+      const stageCard = (item) => h('div', { key: item.id, className: 'sv-pl-item' },
+        h('div', { className: 'sv-pl-item-main' },
+          h('strong', null, item.title || '未命名项目'),
+          h('span', { className: 'sv-pl-item-meta' }, [item.account?.name || '通用', relativeTime(item.updatedAt)].filter(Boolean).join(' · ')),
+        ),
+        h('button', { type: 'button', className: 'lwb-plain-button sv-pl-item-go', onClick: () => goNext(item) }, PIPELINE_STAGES.find((entry) => entry.id === item.stage)?.action || '查看', ' →'),
+      );
+
+      return h(PackFrame, { packId, openConversation, title: '制作流水线', accent: 'sky', copy: '按阶段分选项卡查看：一张卡片就是一个项目，卡片上的按钮直达它下一步该去的工作页并自动选中它。各工作页的入口不变；本页只回答两件事——项目现在在哪、下一步去哪。', hero: h(HeroMini, { cells: PIPELINE_STAGES.map((stage) => ({ label: stage.label, value: String((byStage.get(stage.id) || []).length), tone: (byStage.get(stage.id) || []).length ? stage.tone : '' })) }) },
+        // 读不到数据时把原因和重试入口摆出来，别让页面无声无息地空着（与执行记录页同一模式）。
+        // 连接断了的话「重试读取」没用——RPC 根本发不出去，所以额外给一个刷新页面的出口。
+        error ? h('div', { className: 'sv-error', role: 'alert' }, error,
+          h('div', { className: 'sv-actions' },
+            h('button', { type: 'button', className: 'lwb-plain-button', disabled: busy, onClick: () => { setAttempt((value) => value + 1); void load(); } }, busy ? '正在重试…' : '重试读取'),
+            h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => location.reload() }, '刷新页面'))) : null,
+        total === 0 && !error && items ? h('div', { className: 'sv-empty' }, '还没有项目。到「选题」页生成候选并加入待写稿，或用「内容安排」让定时任务自动产出；流水线一有项目就会在这里出现。') : null,
+        total > 0 || error ? h('div', { className: 'sv-tp-tabs', role: 'tablist', 'aria-label': '按制作阶段筛选项目' }, PIPELINE_STAGES.map((stage) => {
+          const count = (byStage.get(stage.id) || []).length;
+          return h('button', { key: stage.id, type: 'button', role: 'tab', className: 'sv-tp-tab', 'data-active': activeStage === stage.id ? 'true' : 'false', 'aria-selected': activeStage === stage.id, onClick: () => setActiveStage(stage.id) },
+            stage.label,
+            count > 0 ? h('span', { className: 'sv-tp-tab-badge', 'aria-label': `${count} 个项目` }, String(count)) : null,
+          );
+        })) : null,
+        visibleItems.length ? h('section', { className: 'sv-section' },
+          h('div', { className: 'sv-section-head' }, h('h3', null, selectedStage.label), h('span', null, `${visibleItems.length} 个`)),
+          h('div', { className: 'sv-list' }, visibleItems.map(stageCard)),
+        ) : total > 0 && !error ? h('div', { className: 'sv-empty' }, `${selectedStage.label}暂时没有项目；点上面的其他选项卡查看。`) : null,
+        // 已经报错时不再显示「正在读取…」——两者同时出现会让人以为还在加载。
+        busy && items == null && !error ? h('p', { className: 'sv-meta', role: 'status' }, packId ? '正在读取流水线…' : '正在连接工作台…') : null,
+        // 有数据就别再挂着加载态了；失败且正在自动重试时说明一下在做什么。
+        !busy && items == null && !error ? h('p', { className: 'sv-meta', role: 'status' }, '正在重试读取流水线…') : null,
       );
     }
     function ContentSchedulePage({ packId, openConversation, openPackMenu }) {
@@ -3048,12 +3287,25 @@ window.__ModuleLoader__.load({
       const selectedCount = selectedPublic.length + selectedPlatforms.length;
       const submitSourceIds = [...selectedPublic, ...(selectedPlatforms.length ? ['ai-daily-import'] : [])];
       const sortedDays = [...form.days].sort((a, b) => a - b);
-      // A topic-only round needs no media chain, so only depth blockers apply.
-      const blockersFor = (depth) => (runtime?.blockers || []).filter((item) => (depth === 'topic' || depth === 'script' ? item.depth === 'topic' : true));
+      // Platform accounts come from the publisher pack's own status read; a
+      // signed-out account stays selectable so the operator can see it and
+      // re-login, but the label says so.
+      const publishAccounts = runtime?.publish?.accounts || [];
+      // A blocker only matters when the chosen depth actually reaches the step
+      // it guards: a task that stops at「写稿」must not be warned that its
+      // platform account is missing, and neither must one stopping at「成片」.
+      const AS_DEPTH_ORDER = AS_DEPTHS.map((item) => item.id);
+      const blockersFor = (depth) => {
+        const limit = AS_DEPTH_ORDER.indexOf(depth);
+        return (runtime?.blockers || []).filter((item) => AS_DEPTH_ORDER.indexOf(item.depth) <= limit);
+      };
       const voiceReady = (form.voiceSource !== 'upload' || Boolean(form.voiceReference))
         && (form.voiceSource !== 'library' || Boolean(form.libraryVoice))
         && !(form.voiceSource === 'builtin' && form.bridgeChannel === 'local');
-      const formValid = Boolean(form.name.trim()) && sortedDays.length > 0 && /^\d{2}:\d{2}$/u.test(form.time) && selectedCount > 0 && voiceReady;
+      // A publish-depth task is unusable without a target, so require one before
+      // letting it be saved rather than discovering it at the round's last step.
+      const publishReady = form.depth !== 'publish' || Boolean(form.publishAccountId);
+      const formValid = Boolean(form.name.trim()) && sortedDays.length > 0 && /^\d{2}:\d{2}$/u.test(form.time) && selectedCount > 0 && voiceReady && publishReady;
 
       const payloadOf = () => ({
         name: form.name.trim(),
@@ -3070,6 +3322,11 @@ window.__ModuleLoader__.load({
         },
         depth: form.depth,
         perRunLimit: form.perRunLimit,
+        // Only a publish-depth task carries a target; sending one for shallower
+        // depths would leave a stale account selection behind on the record.
+        publish: form.depth === 'publish' && form.publishAccountId
+          ? { accountIds: [form.publishAccountId], submitMode: form.publishSubmitMode }
+          : null,
         production: {
           orientation: form.orientation,
           subtitleEnabled: form.subtitleEnabled,
@@ -3089,10 +3346,21 @@ window.__ModuleLoader__.load({
           : form.voiceSource === 'library' ? `桥接音色库「${form.libraryVoice}」`
           : '系统默认音色';
         const bridgeChannelLabel = form.bridgeChannel === 'cloud' ? '，桥接配音方式固定为云端' : form.bridgeChannel === 'local' ? '，桥接配音方式固定为本地' : '';
-        const description = `${label}；${daysLabel} ${form.time}；深度「${depthLabel}」；每轮最多 ${form.perRunLimit} 条；${voiceLabel}${bridgeChannelLabel}；参与渠道 ${selectedCount} 个`;
+        const publishLabel = form.depth === 'publish' && form.publishAccountId
+          ? `；投递到「${publishAccounts.find((item) => item.id === form.publishAccountId)?.label || '所选账号'}」${form.publishSubmitMode === 'auto' ? '并自动提交' : '，停在发布前等你确认'}`
+          : '';
+        const description = `${label}；${daysLabel} ${form.time}；深度「${depthLabel}」；每轮最多 ${form.perRunLimit} 条；${voiceLabel}${bridgeChannelLabel}；参与渠道 ${selectedCount} 个${publishLabel}`;
+        // The old copy promised publishing was never automated. That promise is
+        // now a setting, so the confirmation states which one is in force
+        // instead of repeating something that is no longer true.
+        const automationNote = form.depth === 'publish'
+          ? (form.publishSubmitMode === 'auto'
+            ? '该深度会无人值守直接发布到平台，发布后无法撤回。'
+            : '该深度会把成片投递到平台并填好资料，最后一步停在发布前，需要你在浏览器窗口确认。')
+          : '发布动作不会执行，任务停在「发布资料」。';
         ask({
           title: editing ? '保存任务修改？' : '创建定时任务？',
-          copy: `${description}。${AS_APPROVING.has(form.depth) ? '该深度将自动确认 AI 稿件，不再人工过稿；' : ''}到点后由主机侧调度器无人值守执行，切换页面不会中断。发布动作永远不会自动执行。`,
+          copy: `${description}。${AS_APPROVING.has(form.depth) ? '该深度将自动确认 AI 稿件，不再人工过稿；' : ''}到点后由主机侧调度器无人值守执行，切换页面不会中断。${automationNote}`,
           confirm: editing ? '保存修改' : '创建任务',
           onConfirm: async () => {
             setBusy('save');
@@ -3255,7 +3523,29 @@ window.__ModuleLoader__.load({
             h('strong', null, item.label),
             h('span', null, item.copy),
           ))),
-          AS_APPROVING.has(form.depth) ? h('p', { className: 'sv-as-warn' }, h('strong', null, '将自动确认 AI 稿件，不再人工过稿。'), h('span', null, '深度到达「成片」或「发布资料」时，自动化会代为确认稿件后继续配音与渲染。想保留人工把关请选「写稿」档：跑完停在稿件等你确认。')) : null,
+          AS_APPROVING.has(form.depth) ? h('p', { className: 'sv-as-warn' }, h('strong', null, '将自动确认 AI 稿件，不再人工过稿。'), h('span', null, '深度到达「成片」或更深时，自动化会代为确认稿件后继续配音与渲染。想保留人工把关请选「写稿」档：跑完停在稿件等你确认。')) : null,
+          form.depth === 'publish' ? h('div', { className: 'sv-as-field' },
+            h('span', { className: 'sv-as-label' }, '投递到哪个平台账号'),
+            publishAccounts.length
+              ? h('div', { className: 'sv-as-grid2' },
+                h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '发布账号'),
+                  h('select', { className: 'sv-select', value: form.publishAccountId, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, publishAccountId: event.target.value })) },
+                    h('option', { value: '' }, '选择账号'),
+                    publishAccounts.map((account) => h('option', { key: account.id, value: account.id }, `${account.platformLabel} · ${account.label}${account.status === 'active' ? '' : '（登录已失效）'}`)),
+                  )),
+                h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '投递方式'),
+                  h('select', { className: 'sv-select', value: form.publishSubmitMode, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, publishSubmitMode: event.target.value })) },
+                    h('option', { value: 'confirm' }, '发布前确认（推荐）：填好资料，停在提交前'),
+                    h('option', { value: 'auto' }, '自动提交：无人值守直接发布'),
+                  )),
+              )
+              // The reason itself is rendered once by `runtimeBlockers` below;
+              // repeating it here would show the operator the same sentence twice.
+              : h('p', { className: 'sv-note' }, '还没有可选的平台账号。'),
+            form.publishSubmitMode === 'auto' && form.publishAccountId ? h('p', { className: 'sv-as-warn' }, h('strong', null, '将无人值守直接发布到平台。'), h('span', null, '视频上传、标题标签封面填写完成后会自动点击发布按钮，发布后无法撤回。想保留最后一道人工确认请选「发布前确认」。')) : null,
+          ) : null,
+          // Blockers are filtered by the chosen depth, so the publish reason
+          // shows up exactly here and nowhere else.
           runtimeBlockers.length ? h('div', { className: 'sv-as-blockers' }, runtimeBlockers.map((item, index) => h('p', { key: index, className: 'sv-as-warn' }, item.message))) : null,
           runtime && runtime.automationAvailable === false ? h('p', { className: 'sv-error' }, '当前运行环境不提供执行自动化所需的 Agent 服务，任务保存后无法执行。') : null,
         ),
@@ -3383,7 +3673,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sv-drawer-scroll' }, h(ScheduleRunHistory, { key: historySchedule.id, packId, scheduleId: historySchedule.id, refreshKey: historyRefresh, onPublish: goPublish, onContinue: continueItem })),
         ),
       );
-      return h(PackFrame, { packId, openConversation, title: '内容安排', accent: 'sky', copy: '按账号配置定时任务：到点后由主机侧调度器无人值守跑完「选题 → 写稿 → 配音字幕 → 成片质检 → 发布资料」。深度决定跑到哪一步；选到成片及以后会自动确认 AI 稿件。发布动作永远不会自动执行——跑完后到「发布」页人工核对。', hero },
+      return h(PackFrame, { packId, openConversation, title: '内容安排', accent: 'sky', copy: '按账号配置定时任务：到点后由主机侧调度器无人值守跑完「选题 → 写稿 → 配音字幕 → 成片质检 → 发布资料 → 投递到平台」。深度决定跑到哪一步；选到成片及以后会自动确认 AI 稿件。选「投递到平台」时，默认停在平台的发布按钮前等你确认；只有把投递方式设为「自动提交」，才会无人值守直接发布。', hero },
         h(Notice, { error }),
         h('section', { className: 'sv-split' }, configCard, taskPanel),
         signalsDrawerNode,
@@ -3624,6 +3914,27 @@ window.__ModuleLoader__.load({
         const timer = setInterval(() => { void refresh(); void refreshProjects(); }, 1800);
         return () => clearInterval(timer);
       }, [anyRunning, refresh, refreshProjects]);
+      // 渲染成功后自动补一份发布文案（不含封面）。原先只在用户点开发布页抽屉时
+      // 才生成，于是「跑完 → 打开发布页 → 未生成」成了常态，看着像白跑了
+      // （2026-10-08 反馈）。后端 autoStartPackaging 幂等：已有 packaging 或已在跑
+      // 都会自己跳过，所以这里可以对每个成功任务放心重复调用。
+      const autoPackaging = React.useRef(new Set());
+      React.useEffect(() => {
+        if (!packId) return;
+        for (const task of result.items) {
+          if (task.status !== 'succeeded' || !task.projectId) continue;
+          const key = `${task.projectId}:${task.expectedRevision ?? ''}`;
+          if (autoPackaging.current.has(key)) continue;
+          autoPackaging.current.add(key);
+          void remote(packId, 'autoStartPackaging', { projectId: task.projectId })
+            .then((outcome) => {
+              // 被后端拒绝（已有资料/已在跑/没过质检）是正常情况，不打扰用户；
+              // 只在真正出错时提示，且不阻断视频页。
+              if (outcome?.started) void refreshProjects();
+            })
+            .catch((cause) => { autoPackaging.current.delete(key); setError(cause.message); });
+        }
+      }, [packId, result.items, refreshProjects, setError]);
       return { ...result, loading, refresh, anyRunning };
     }
     function formatMediaDuration(value) {
@@ -3726,9 +4037,16 @@ window.__ModuleLoader__.load({
       }, [detail?.id, detail?.revision]);
       React.useEffect(() => {
         const handoff = audioCaptionsHandoff;
-        if (!handoff || !candidates.some((project) => project.id === handoff)) return;
-        setSelectedId(handoff);
-        audioCaptionsHandoff = null;
+        if (handoff && candidates.some((project) => project.id === handoff)) {
+          setSelectedId(handoff);
+          audioCaptionsHandoff = null;
+          return;
+        }
+        // Pipeline board handoff: same selection surface, carried per page id.
+        if (pipelineHandoff?.page === 'audio-captions' && candidates.some((project) => project.id === pipelineHandoff.projectId)) {
+          setSelectedId(pipelineHandoff.projectId);
+          pipelineHandoff = null;
+        }
       }, [candidates, setSelectedId]);
       React.useEffect(() => {
         if (provider || !media.service?.connection?.provider) return;
@@ -3931,10 +4249,18 @@ window.__ModuleLoader__.load({
       const [voiceSource, setVoiceSource] = React.useState('system');
       const [voiceReference, setVoiceReference] = React.useState(null);
       const [voiceUploading, setVoiceUploading] = React.useState(false);
+      const [bridgeInfo, setBridgeInfo] = React.useState(null);
+      const [bridgeVoice, setBridgeVoice] = React.useState('冰糖');
+      const [libraryVoice, setLibraryVoice] = React.useState('');
+      // 配音方式：'' = 跟随桥接全局配置；cloud/local 按任务覆盖。仅桥接渠道生效。
+      const [bridgeChannel, setBridgeChannel] = React.useState('');
+      const [bridgeStyle, setBridgeStyle] = React.useState('');
       const [rate, setRate] = React.useState(1);
       const [volume, setVolume] = React.useState(1);
       const [subtitleEnabled, setSubtitleEnabled] = React.useState(true);
       const [submitting, setSubmitting] = React.useState(null);
+      // 删除等无错误但需要回话的操作：用一句 sv-note 告知结果，成功与失败都看得见。
+      const [notice, setNotice] = React.useState('');
       const [connectionOpen, setConnectionOpen] = React.useState(false);
       const [connectionProvider, setConnectionProvider] = React.useState('bailian');
       const [apiKey, setApiKey] = React.useState('');
@@ -3950,6 +4276,10 @@ window.__ModuleLoader__.load({
       const [taskPage, setTaskPage] = React.useState(0);
       const [sourceDrawer, setSourceDrawer] = React.useState(null);
       const [subtitleDrawer, setSubtitleDrawer] = React.useState(null);
+      const [syncPicker, setSyncPicker] = React.useState(null);
+      // 纯手动任务的「自动放进项目」：生成成功后无需手动二次同步，视频页直接可见。
+      const [autoProjectId, setAutoProjectId] = React.useState('');
+      const [autoProjects, setAutoProjects] = React.useState([]);
       const [confirmNode, ask] = useSvConfirm();
       const textRef = React.useRef(null);
       const voiceFileInputRef = React.useRef(null);
@@ -3959,6 +4289,22 @@ window.__ModuleLoader__.load({
         catch (cause) { setError(cause.message); return null; }
       }, [setError]);
       React.useEffect(() => { void refreshService(); }, [refreshService]);
+      // 「自动放进项目」下拉的项目列表：选稿件时该项隐藏（已有归属），纯手动时可选。
+      React.useEffect(() => {
+        if (!packId || source?.projectId) return;
+        let cancelled = false;
+        void remote(packId, 'list').then((list) => { if (!cancelled) setAutoProjects(Array.isArray(list) ? list : []); }).catch(() => {});
+        return () => { cancelled = true; };
+      }, [packId, source?.projectId]);
+      // 桥接快照只用于填充音色/风格下拉；桥接不在线时表单照常可用（保持旧行为）。
+      React.useEffect(() => {
+        if (!packId) return;
+        void remote(packId, 'bridgeVoiceoverInfo').then((next) => {
+          setBridgeInfo(next);
+          if (next?.available && next.mimoVoice) setBridgeVoice((current) => current === '冰糖' ? next.mimoVoice : current);
+          if (next?.available && next.mimoStyle) setBridgeStyle((current) => current || next.mimoStyle);
+        }).catch(() => setBridgeInfo(null));
+      }, [packId]);
       React.useEffect(() => {
         if (!packId) return;
         void remote(packId, 'listAccounts').then((next) => {
@@ -3976,7 +4322,9 @@ window.__ModuleLoader__.load({
       const providerEntries = ['bailian', 'scitiger'].filter((id) => service?.providers?.[id]?.configured && service.providers[id].credential?.configured);
       React.useEffect(() => {
         if (!providerEntries.length) { setProvider(null); return; }
-        setProvider((current) => providerEntries.includes(current) ? current : providerEntries[0]);
+        // 默认选本机桥接（scitiger + loopback）：它不依赖外部 Key、永远本机可达；
+        // 百炼 Key 过期时用户没动过渠道选择就会撞 "Invalid API-key"（2026-10-02 实测）。
+        setProvider((current) => providerEntries.includes(current) ? current : (providerEntries.includes('scitiger') && service?.providers?.scitiger?.loopback ? 'scitiger' : providerEntries[0]));
       }, [providerEntries.join('|')]);
       React.useEffect(() => {
         if (!pickerOpen || !packId) return undefined;
@@ -4006,9 +4354,18 @@ window.__ModuleLoader__.load({
 
       const providerId = provider || null;
       const selectedProvider = providerId ? service?.providers?.[providerId] : null;
-      const providerName = providerId === 'bailian' ? '百炼' : providerId === 'scitiger' ? '远端 · SciTiger' : '尚未配置';
+      const providerName = providerId === 'bailian' ? '百炼' : providerId === 'scitiger' ? (selectedProvider?.loopback ? '本机桥接' : '远端 · SciTiger') : '尚未配置';
+      // 桥接专属控件只在渠道真的打到桥接时才有意义；其他渠道原样忽略。
+      const bridgeActive = providerId === 'scitiger';
+      const builtinVoiceOptions = Array.from(new Set([...(bridgeInfo?.available && Array.isArray(bridgeInfo.builtinVoices) && bridgeInfo.builtinVoices.length ? bridgeInfo.builtinVoices : SV_MIMO_BUILTIN_VOICES), bridgeVoice]));
+      const libraryVoiceOptions = bridgeInfo?.available && Array.isArray(bridgeInfo.voices) ? bridgeInfo.voices : [];
+      const bridgeVoiceReady = voiceSource !== 'builtin' || Boolean(bridgeVoice)
+        ? voiceSource !== 'library' || Boolean(libraryVoice)
+        : false;
       const referenceVoiceReady = voiceSource === 'upload' ? Boolean(voiceReference) : selectedProvider?.referenceVoiceConfigured;
-      const canGenerate = Boolean(providerId && selectedProvider?.credential?.configured && selectedProvider?.configured && referenceVoiceReady);
+      const canGenerate = Boolean(providerId && selectedProvider?.credential?.configured && selectedProvider?.configured && referenceVoiceReady && bridgeVoiceReady);
+      // 桥接内置音色由小米云端模型合成，本地 LongCat 分支没有这张表，提前拦住。
+      const bridgeConflict = bridgeActive && voiceSource === 'builtin' && bridgeChannel === 'local';
       const inActiveTab = (project) => activeTab === GENERAL_TAB ? !project.account : project.account?.id === activeTab;
       const tabProjects = projects.filter(inActiveTab);
       const visibleTasks = taskFeed.items;
@@ -4024,11 +4381,31 @@ window.__ModuleLoader__.load({
           setSource({ projectId: detail.id, title: detail.title }); setText(body); setPickerOpen(false); setError(null);
         } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
       };
+      /** Bridge overrides ride along only for the bridge channel; other channels ignore them. */
+      const bridgeFieldsOf = () => {
+        if (!bridgeActive) return {};
+        const bridge = {};
+        if (bridgeChannel) bridge.channel = bridgeChannel;
+        if (bridgeStyle.trim()) bridge.style = bridgeStyle.trim();
+        return Object.keys(bridge).length ? { bridge } : {};
+      };
+      /** Voice payload shared by create and retry, so both stay in step. */
+      const voiceFieldsOf = () => {
+        const bridgeFields = bridgeFieldsOf();
+        if (voiceSource === 'upload') return { voiceSource: 'upload', ...(voiceReference ? { referenceAudio: voiceReference, voiceName: voiceReference.name } : {}), ...bridgeFields };
+        // 桥接两类音色都走 voiceSource 'preset'：内置音色名由桥接识别 MiMo 表，
+        // 音色库 ID 由桥接在 voices/ 目录查找。
+        if (voiceSource === 'builtin') return { voiceSource: 'preset', voiceId: bridgeVoice, voiceName: bridgeVoice, ...bridgeFields };
+        if (voiceSource === 'library') return libraryVoice ? { voiceSource: 'preset', voiceId: libraryVoice, voiceName: libraryVoice, ...bridgeFields } : {};
+        return { voiceSource: 'system', ...bridgeFields };
+      };
       const createAudioTask = async () => {
         if (!canGenerate || !text.trim()) return;
         setSubmitting('voiceover');
         try {
-          await remote(packId, 'startAudioTask', { text, subtitleEnabled, ...(source?.projectId ? { sourceProjectId: source.projectId } : { title: source?.title || '手动输入文稿' }), provider: providerId, voiceSource, ...(voiceSource === 'upload' ? { referenceAudio: voiceReference, voiceName: voiceReference.name } : {}), rate: Number(rate), volume: Number(volume) });
+          // 未选稿件的纯手动任务可以携带目标项目：配音（和字幕）生成成功后由
+          // host 自动「采纳」进该项目，视频页立即可见，不再需要手动二次同步。
+          await remote(packId, 'startAudioTask', { text, subtitleEnabled, ...(source?.projectId ? { sourceProjectId: source.projectId } : { title: source?.title || '手动输入文稿', ...(autoProjectId ? { autoAdoptProjectId: autoProjectId } : {}) }), provider: providerId, ...voiceFieldsOf(), rate: Number(rate), volume: Number(volume) });
           await taskFeed.refresh(); setError(null);
         } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
       };
@@ -4063,6 +4440,8 @@ window.__ModuleLoader__.load({
             voiceSource: task.input?.voiceSource || 'system',
             ...(task.input?.voiceId ? { voiceId: task.input.voiceId } : {}),
             ...(task.input?.voiceName ? { voiceName: task.input.voiceName } : {}),
+            // 冻结的桥接覆盖也要一起重放，否则重试会悄悄回落到桥接全局配置。
+            ...(task.input?.bridge ? { bridge: task.input.bridge } : {}),
             rate: Number(task.input?.rate ?? 1),
             volume: Number(task.input?.volume ?? 1),
             subtitleEnabled: task.input?.subtitleEnabled === true,
@@ -4070,12 +4449,40 @@ window.__ModuleLoader__.load({
           await taskFeed.refresh(); setError(null);
         } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
       };
+      // 删一条已结束的配音任务及其产物。传多个 id 时走同一条路径（批量删）。
+      const deleteAudioTasks = async (tasks) => {
+        const targets = (Array.isArray(tasks) ? tasks : [tasks]).filter(Boolean);
+        if (!targets.length || submitting) return;
+        setSubmitting(`delete:${targets[0].id}`);
+        try {
+          const result = await remote(packId, 'deleteMediaTasks', { taskType: 'audio', ids: targets.map((task) => task.id) });
+          await taskFeed.refresh(); setError(null);
+          const gone = result?.missing?.length || 0;
+          setNotice(gone ? `已删除 ${result.removed.length} 条，另有 ${gone} 条此前已不存在。` : `已删除 ${result.removed.length} 条配音任务及其产物。`);
+        } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
+      };
       const openSubtitles = (task) => setSubtitleDrawer({ task, cues: subtitleCues(task.subtitle?.srt), saving: false });
-      const syncAudioResult = async (task) => {
+      const syncAudioResult = async (task, targetProjectId = null) => {
         setSubmitting(`sync:${task.id}`);
         try {
-          const updated = await remote(packId, 'syncAudioTask', { taskId: task.id });
+          const updated = await remote(packId, 'syncAudioTask', { taskId: task.id, ...(targetProjectId ? { targetProjectId } : {}) });
           await taskFeed.refresh();
+          setError(updated.projectSyncError || updated.subtitleSyncError || null);
+        } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
+      };
+      // 无项目任务的「同步到视频」：先把音频挂到选中的项目（必要时补稿件），视频页才有得用。
+      const syncTargetProject = async (task) => {
+        setSyncPicker({ task, loading: true, items: [] });
+        try {
+          const list = await remote(packId, 'list');
+          setSyncPicker({ task, loading: false, items: Array.isArray(list) ? list : [] });
+        } catch (cause) { setError(cause.message); setSyncPicker(null); }
+      };
+      const adoptIntoProject = async (task, projectId) => {
+        setSubmitting(`sync:${task.id}`);
+        try {
+          const updated = await remote(packId, 'syncAudioTask', { taskId: task.id, targetProjectId: projectId });
+          await taskFeed.refresh(); setSyncPicker(null);
           setError(updated.projectSyncError || updated.subtitleSyncError || null);
         } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
       };
@@ -4108,10 +4515,16 @@ window.__ModuleLoader__.load({
       const providerControl = !service
         ? h('p', { className: 'sv-note' }, '正在读取连接状态…')
         : providerEntries.length === 2
-          ? h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '配音服务' }, providerEntries.map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': providerId === id ? 'true' : 'false', onClick: () => setProvider(id) }, id === 'bailian' ? '百炼' : '远端 · SciTiger')))
+          ? h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '配音服务' }, providerEntries.map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': providerId === id ? 'true' : 'false', onClick: () => setProvider(id) }, id === 'bailian' ? '百炼' : service?.providers?.scitiger?.loopback ? '本机桥接' : '远端 · SciTiger')))
           : providerEntries.length === 1
             ? h('p', { className: 'sv-note' }, `当前使用：${providerName}。仅此服务已完成 API Key 配置。`)
             : h('p', { className: 'sv-error' }, '尚未配置百炼或远端 API Key。请在右上角「连接配置」中完成设置。');
+      // 渠道指向哪里必须看得见：本机桥接与远端云端用的是完全不同的 Key。
+      const providerEndpointNote = !service ? null : providerId === 'scitiger' && service.providers?.scitiger?.endpoint
+        ? h('p', { className: service.providers.scitiger.loopback ? 'sv-note' : 'sv-warn' }, service.providers.scitiger.loopback
+          ? `渠道指向本机桥接 ${service.providers.scitiger.endpoint}；云端/本地合成与音色都在桥接配置中心管理。`
+          : `渠道指向远端 ${service.providers.scitiger.endpoint}。本机部署应走本机桥接：请用「启动工作台.cmd」启动，否则云端 Key 不匹配会报「Invalid API key」。`)
+        : null;
       const scriptPickerDrawer = pickerOpen && h(React.Fragment, null,
         h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭稿件选择', onClick: () => setPickerOpen(false) }),
         h('aside', { className: 'sv-drawer sv-audio-picker', role: 'dialog', 'aria-modal': 'true', 'aria-label': '选择稿件' },
@@ -4125,6 +4538,23 @@ window.__ModuleLoader__.load({
         ),
       );
       const connectionCredential = service?.providers?.[connectionProvider]?.credential;
+      const syncPickerDrawer = syncPicker && h(React.Fragment, null,
+        h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭项目选择', onClick: () => setSyncPicker(null) }),
+        h('aside', { className: 'sv-drawer sv-audio-picker', role: 'dialog', 'aria-modal': 'true', 'aria-label': '选择要采纳配音的项目' },
+          h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, '这条音频要放进哪个项目？'), h('p', { className: 'sv-meta' }, '视频按项目组织：项目是「视频的文件夹」，配音要挂到某个项目名下，视频页才有得用。下面选的就是目标项目，不是音频。')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSyncPicker(null) }, '关闭')),
+          h('div', { className: 'sv-drawer-scroll sv-audio-picker-body' },
+            h('div', { className: 'sv-sync-target-banner' },
+              h('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 2, 'aria-hidden': true }, h('path', { d: 'M9 18V6l10-2v12' }), h('circle', { cx: 6, cy: 18, r: 3 }), h('circle', { cx: 19, cy: 16, r: 3 })),
+              h('div', { className: 'sv-sync-target-banner-body' },
+                h('strong', null, syncPicker.task.source?.title || '手动输入文稿'),
+                h('span', null, `正在同步的音频（本条，无需再选） · ${syncPicker.task.result?.audio?.durationSeconds ? `${Math.round(syncPicker.task.result.audio.durationSeconds)} 秒` : '时长未知'} · 创建于 ${formatTime(syncPicker.task.createdAt)}`),
+                syncPicker.task.source?.text ? h('span', { className: 'sv-sync-target-excerpt' }, [...syncPicker.task.source.text.replace(/\s+/gu, ' ').trim()].slice(0, 50).join('') + ([...syncPicker.task.source.text.replace(/\s+/gu, '').trim()].length > 50 ? '…' : '')) : null,
+              ),
+            ),
+            syncPicker.loading ? h('p', { className: 'sv-note' }, '正在加载项目…') : syncPicker.items.length ? h('div', { className: 'sv-list' }, syncPicker.items.map((project) => h('article', { key: project.id, className: 'sv-audio-picker-item' }, h('div', null, h('strong', null, project.title), h('p', null, `目标项目 · ${project.account?.name || '通用'} · 更新于 ${relativeTime(project.updatedAt)}`)), h('button', { type: 'button', className: 'lwb-primary-button', disabled: submitting === `sync:${syncPicker.task.id}`, onClick: () => { void adoptIntoProject(syncPicker.task, project.id); } }, submitting === `sync:${syncPicker.task.id}` ? '采纳中…' : '放进这个项目')))) : h('div', { className: 'sv-empty' }, '还没有项目。请先在「选题与稿件」里创建一个（或随便发起一次选题），再回来把这条音频放进去。'),
+          ),
+        ),
+      );
       const connectionDrawer = connectionOpen && h(React.Fragment, null,
         h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭连接配置', onClick: () => setConnectionOpen(false) }),
         h('aside', { className: 'sv-drawer sv-media-config-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '连接配置' },
@@ -4142,8 +4572,18 @@ window.__ModuleLoader__.load({
         h('div', { className: 'sv-audio-source-row' }, source ? h('div', { className: 'sv-audio-project' }, h('strong', null, source.title), h('span', null, `当前稿件 · ${charCount(text)} 字 · 可继续修改`)) : h('p', { className: 'sv-note' }, '稿件为可选项。也可以直接输入自己的口播内容。'), h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => { setPickerPage(0); setPickerOpen(true); } }, source ? '更换稿件' : '选择稿件'), source ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSource(null) }, '改为手动输入') : null)),
         h('label', { className: 'sv-media-field' }, h('span', null, '文本内容'), h('textarea', { ref: textRef, className: 'sv-textarea sv-audio-script', value: text, maxLength: 60000, placeholder: '输入或粘贴需要配音的口播文稿', onChange: (event) => setText(event.target.value), onInput: (event) => { event.currentTarget.style.height = 'auto'; event.currentTarget.style.height = `${Math.max(event.currentTarget.scrollHeight, 136)}px`; } })),
         h('p', { className: 'sv-meta' }, `${charCount(text)} 字 · 预计口播 ${scriptDurationLabel(text)}`),
+        !source?.projectId && autoProjects.length ? h('label', { className: 'sv-media-field' }, h('span', null, '生成后放进项目（可选）'), h('select', { className: 'sv-select', value: autoProjectId, onChange: (event) => setAutoProjectId(event.target.value) },
+          h('option', { value: '' }, '不放进项目（留在配音列表，稍后手动放）'),
+          autoProjects.map((project) => h('option', { key: project.id, value: project.id }, `${project.title}${project.account?.name ? ` · ${project.account.name}` : ''}`))),
+          h('small', { className: 'sv-meta' }, '选中后，配音（含字幕）生成成功会自动挂到该项目名下，视频页立即可见，无需再手动同步。')) : null,
         h('label', { className: 'sv-media-field' }, h('span', null, '配音服务'), providerControl),
-        h('label', { className: 'sv-media-field' }, h('span', null, '音色'), h('select', { className: 'sv-select', value: voiceSource, onChange: (event) => setVoiceSource(event.target.value) }, h('option', { value: 'system' }, 'Tiffy - 自信（系统默认）'), h('option', { value: 'upload' }, '上传自己的参考音频'))),
+        providerEndpointNote,
+        h('label', { className: 'sv-media-field' }, h('span', null, '音色'), h('select', { className: 'sv-select', value: voiceSource, onChange: (event) => setVoiceSource(event.target.value) },
+          h('option', { value: 'system' }, 'Tiffy - 自信（系统默认）'),
+          h('option', { value: 'upload' }, '上传自己的参考音频'),
+          bridgeActive ? h('option', { value: 'builtin' }, '桥接内置音色（云端 · 小米 MiMo）') : null,
+          bridgeActive ? h('option', { value: 'library' }, '桥接音色库（本机参考音频）') : null,
+        )),
         voiceSource === 'upload' ? h('div', { className: 'sv-voice-upload' },
           h('input', { ref: voiceFileInputRef, type: 'file', accept: 'audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/ogg,.mp3,.wav,.m4a,.ogg', tabIndex: -1, style: { display: 'none' }, onChange: (event) => { void uploadVoiceReference(event); } }),
           h('div', { className: 'sv-voice-upload-row' },
@@ -4153,20 +4593,42 @@ window.__ModuleLoader__.load({
           ),
           h('p', { className: 'sv-note' }, '支持 MP3、WAV、M4A 和 OGG，最大 20 MiB。请上传只包含目标人声的清晰音频。'),
         ) : null,
+        bridgeActive && voiceSource === 'builtin' ? h('label', { className: 'sv-media-field' }, h('span', null, '内置音色'), h('select', { className: 'sv-select', value: bridgeVoice, onChange: (event) => setBridgeVoice(event.target.value) }, builtinVoiceOptions.map((voice) => h('option', { key: voice, value: voice }, voice)))) : null,
+        bridgeActive && voiceSource === 'library' ? h('label', { className: 'sv-media-field' }, h('span', null, '音色库音色'), libraryVoiceOptions.length
+          ? h('select', { className: 'sv-select', value: libraryVoice, onChange: (event) => setLibraryVoice(event.target.value) }, h('option', { value: '' }, '选择音色'), libraryVoiceOptions.map((voice) => h('option', { key: voice.id, value: voice.id }, `${voice.id}${voice.hasTxt ? '' : '（首次使用自动转写）'}`)))
+          : h('select', { className: 'sv-select', value: '', disabled: true }, h('option', { value: '' }, bridgeInfo?.available ? '音色库为空：到桥接配置中心上传音色' : '桥接未响应，无法读取音色库'))) : null,
+        bridgeActive ? h('div', { className: 'sv-audio-parameters' },
+          h('label', { className: 'sv-media-field' }, h('span', null, '合成方式'), h('select', { className: 'sv-select', value: bridgeChannel, onChange: (event) => setBridgeChannel(event.target.value) },
+            h('option', { value: '' }, '跟随桥接配置'),
+            h('option', { value: 'cloud' }, '云端（小米 MiMo）'),
+            h('option', { value: 'local' }, '本地（LongCat）'),
+          )),
+        ) : null,
+        bridgeActive ? h('label', { className: 'sv-media-field' }, h('span', null, '语气风格（选填）'), h('input', { className: 'sv-input', value: bridgeStyle, maxLength: 200, list: 'sv-voice-style-presets', placeholder: '留空则跟随桥接配置；仅云端合成时生效', onChange: (event) => setBridgeStyle(event.target.value) }), h('datalist', { id: 'sv-voice-style-presets' }, SV_VOICE_STYLE_PRESETS.map((style) => h('option', { key: style, value: style })))) : null,
+        bridgeActive && SV_VOICE_STYLE_PRESETS.length ? h('div', { className: 'sv-style-presets' }, h('span', { className: 'sv-meta' }, '常用语气'), SV_VOICE_STYLE_PRESETS.map((style) => h('button', { key: style, type: 'button', className: 'sv-filter-chip', 'data-on': bridgeStyle === style ? 'true' : 'false', onClick: () => setBridgeStyle((current) => current === style ? '' : style) }, style.replace(/[，。]$/u, '')))) : null,
+        bridgeActive && bridgeInfo?.available ? h('p', { className: 'sv-note' }, `桥接当前：${bridgeInfo.ttsProvider === 'local' ? '本地合成（LongCat）' : '云端合成（小米 MiMo）'}${bridgeInfo.mimoKeyConfigured ? '' : ' · 未配置小米 API Key'}${bridgeInfo.mimoVoice ? ` · 内置音色「${bridgeInfo.mimoVoice}」` : ''}${bridgeInfo.mimoStyle ? ` · 风格「${bridgeInfo.mimoStyle}」` : ''}${bridgeInfo.defaultVoice ? ` · 默认音色映射「${bridgeInfo.defaultVoice}」` : ' · 未设置默认音色映射'}。系统默认音色经桥接时会自动替换为映射的音色库音色。`) : null,
         h('div', { className: 'sv-audio-parameters' }, h('label', { className: 'sv-media-field' }, h('span', null, '语速'), h('input', { className: 'sv-input', type: 'number', min: '0.5', max: '2', step: '0.05', value: rate, onChange: (event) => setRate(event.target.value) })), h('label', { className: 'sv-media-field' }, h('span', null, '音量'), h('input', { className: 'sv-input', type: 'number', min: '0', max: '2', step: '0.05', value: volume, onChange: (event) => setVolume(event.target.value) }))),
         h('label', { className: 'sv-audio-subtitle-option' }, h('input', { type: 'checkbox', checked: subtitleEnabled, onChange: (event) => setSubtitleEnabled(event.target.checked) }), h('span', null, h('strong', null, '同时生成字幕'), h('small', null, '配音完成后自动对齐字幕；字幕失败不影响音频，可单独重试。'))),
-        h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(submitting) || voiceUploading || !canGenerate || !text.trim(), onClick: () => ask({ title: '生成配音', copy: `将使用${providerName}和${voiceSource === 'upload' ? `参考音频「${voiceReference?.name || ''}」` : '系统默认音色'}为「${source?.title || '手动输入文稿'}」创建新的配音任务${subtitleEnabled ? '，并在配音完成后自动生成字幕' : ''}，提交后会调用远端服务。`, confirm: '确认生成', onConfirm: () => { void createAudioTask(); } }) }, submitting === 'voiceover' ? '正在提交…' : subtitleEnabled ? '生成配音和字幕' : '生成配音')),
+        h('div', { className: 'sv-actions' },
+          h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(submitting) || voiceUploading || !canGenerate || !text.trim() || bridgeConflict, onClick: () => ask({ title: '生成配音', copy: `将使用${providerName}和${voiceSource === 'upload' ? `参考音频「${voiceReference?.name || ''}」` : voiceSource === 'builtin' ? `桥接内置音色「${bridgeVoice}」` : voiceSource === 'library' ? `桥接音色库「${libraryVoice}」` : '系统默认音色'}为「${source?.title || '手动输入文稿'}」创建新的配音任务${subtitleEnabled ? '，并在配音完成后自动生成字幕' : ''}，提交后会调用${bridgeActive ? '本机桥接' : '远端服务'}。`, confirm: '确认生成', onConfirm: () => { void createAudioTask(); } }) }, submitting === 'voiceover' ? '正在提交…' : subtitleEnabled ? '生成配音和字幕' : '生成配音'),
+          bridgeConflict ? h('span', { className: 'sv-meta' }, '桥接内置音色只能搭配云端（小米 MiMo）合成，请调整「合成方式」')
+            : voiceSource === 'library' && !libraryVoice ? h('span', { className: 'sv-meta' }, '请选择桥接音色库里的音色')
+              : voiceSource === 'upload' && !voiceReference ? h('span', { className: 'sv-meta' }, '请先上传参考音频')
+                : text.trim().length > 600 ? h('span', { className: 'sv-meta' }, `文稿约 ${text.trim().length} 字，长文案会分段合成，预计约 ${Math.max(2, Math.round(text.trim().length / 700))} 分钟，进度会显示在任务记录里`) : null,
+        ),
       );
       const taskCard = (task) => {
         const subtitle = task.subtitle || { status: 'idle' };
         const audio = task.result?.audio;
+        const liveProgress = task.status === 'running' && task.progress?.stage ? `${task.progress.stage}${task.progress.progress != null ? ` · ${task.progress.progress}%` : ''}` : null;
         const activeSubtitle = ['queued', 'running'].includes(subtitle.status);
         const subtitleProgress = subtitleTaskProgress(task);
         const subtitleButton = task.status !== 'succeeded' ? null : activeSubtitle
           ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: true }, subtitleProgress?.button || '字幕生成中…')
           : h('button', { type: 'button', className: subtitle.status === 'succeeded' ? 'lwb-plain-button' : 'lwb-primary-button', disabled: !canGenerate || Boolean(submitting), onClick: () => ask({ title: subtitle.status === 'succeeded' ? '重新生成字幕' : '生成字幕', copy: subtitle.status === 'succeeded' ? '将基于这条音频重新生成字幕，现有字幕版本会保留为历史结果。' : '将基于这条音频的真实时间轴生成字幕。', confirm: subtitle.status === 'succeeded' ? '重新生成' : '生成字幕', onConfirm: () => { void startSubtitles(task); } }) }, submitting === `subtitle:${task.id}` ? '正在提交…' : subtitle.status === 'succeeded' ? '重新生成字幕' : '生成字幕');
         return h('article', { key: task.id, className: 'sv-audio-task', 'data-status': task.status },
-          h('div', { className: 'sv-audio-task-head' }, h('div', null, h('p', { className: 'sv-audio-task-title' }, task.source?.title || '手动输入文稿'), h('p', { className: 'sv-audio-task-meta' }, [formatTime(task.createdAt), task.input?.provider === 'bailian' ? '百炼' : task.input?.provider === 'scitiger' ? '远端 · SciTiger' : task.input?.provider, task.source?.kind === 'manual-text' ? '手动文稿' : task.source?.kind === 'edited-script-copy' ? '已保存稿件副本' : '已保存稿件'].filter(Boolean).join(' · '))), h('span', { className: `sv-tag ${task.status === 'failed' ? 'sv-status-error' : task.status === 'succeeded' ? 'sv-stage' : 'sv-status-manual'}` }, mediaStatusLabel(task.status))),
+          h('div', { className: 'sv-audio-task-head' }, h('div', null, h('p', { className: 'sv-audio-task-title' }, task.source?.title || '手动输入文稿'), h('p', { className: 'sv-audio-task-meta' }, [formatTime(task.createdAt), task.input?.provider === 'bailian' ? '百炼' : task.input?.provider === 'scitiger' ? (service?.providers?.scitiger?.loopback ? '本机桥接' : '远端 · SciTiger') : task.input?.provider, task.input?.bridge?.channel === 'cloud' ? '云端合成' : task.input?.bridge?.channel === 'local' ? '本地合成' : null, liveProgress, task.source?.kind === 'manual-text' ? '手动文稿' : task.source?.kind === 'edited-script-copy' ? '已保存稿件副本' : task.source?.kind === 'adopted-by-project' ? '已采纳进项目' : '已保存稿件'].filter(Boolean).join(' · '))), h('span', { className: `sv-tag ${task.status === 'failed' ? 'sv-status-error' : task.status === 'succeeded' ? 'sv-stage' : 'sv-status-manual'}` }, mediaStatusLabel(task.status))),
+          task.source?.text && task.source?.kind !== 'saved-script' ? h('p', { className: 'sv-audio-task-excerpt' }, [...task.source.text.replace(/\s+/gu, ' ').trim()].slice(0, 42).join('') + ([...task.source.text.replace(/\s+/gu, '').trim()].length > 42 ? '…' : '')) : null,
           audio ? h('div', { className: 'sv-audio-task-detail' }, h('span', null, `时长 ${formatMediaDuration(audio.durationSeconds)}`), h('span', null, formatMediaBytes(audio.bytes)), h('span', null, subtitle.status === 'succeeded' ? `字幕 ${subtitle.cueCount || 0} 条` : subtitle.status === 'failed' ? '字幕失败 · 配音可用' : activeSubtitle ? '字幕实时处理中' : '未生成字幕')) : null,
           subtitleProgress ? h('div', { className: 'sv-audio-subtitle-progress', role: 'status', 'aria-live': 'polite' },
             h('div', { className: 'sv-audio-subtitle-progress-head' }, h('strong', null, subtitleProgress.label), subtitleProgress.percent == null ? null : h('span', null, `${subtitleProgress.percent}%`)),
@@ -4179,7 +4641,11 @@ window.__ModuleLoader__.load({
             h('p', { className: task.projectSyncError || task.subtitleSyncError ? 'sv-error' : 'sv-note', role: 'status' }, task.projectSyncError || task.subtitleSyncError || (task.projectSync ? '配音已同步到项目，可在「视频 / 预览」中使用。' : '配音已生成，尚未同步到项目。同步后可在「视频 / 预览」中使用。')),
             (!task.projectSync || task.projectSyncError || task.subtitleSyncError) ? h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(submitting) || activeSubtitle, onClick: () => { void syncAudioResult(task); } }, submitting === `sync:${task.id}` ? '正在同步…' : '同步到视频'), h('span', { className: 'sv-meta' }, '复用已有音频和字幕，不会重新生成。')) : null,
           ) : null,
-          h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSourceDrawer(task) }, '查看稿件'), task.status === 'failed' && task.source?.text ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: !canGenerate || Boolean(submitting), onClick: () => ask({ title: '重试配音', copy: `将按原任务的文稿、音色和语速重新生成配音${task.source?.projectId ? `，并覆盖「${task.source?.title || '当前项目'}」的配音版本` : ''}。原失败记录会保留。`, confirm: '确认重试', onConfirm: () => { void retryAudioTask(task); } }) }, submitting === `retry:${task.id}` ? '正在提交…' : '重试配音') : null, h(ExecutionButton, { kind: 'audio', id: task.id }), subtitleButton, subtitle.status === 'succeeded' ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => openSubtitles(task) }, '查看字幕') : null),
+          task.status === 'succeeded' && !task.source?.projectId ? h('div', { className: 'sv-list' },
+            h('p', { className: task.projectSyncError ? 'sv-error' : 'sv-note', role: 'status' }, task.projectSyncError || (task.projectSync ? `配音已放进「${task.source?.projectTitle || '项目'}」，可在「视频 / 预览」中制作视频。` : '这条音频要做成视频，需要先放进一个项目（视频按项目组织）。点击后选择目标项目即可，音频就是本条，无需再挑。')),
+            task.projectSync ? null : h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(submitting) || activeSubtitle, onClick: () => { void syncTargetProject(task); } }, submitting === `sync:${task.id}` ? '正在打开…' : '放进项目做视频…'), h('span', { className: 'sv-meta' }, '音频就是本条，弹层里选的是目标项目。')),
+          ) : null,
+          h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSourceDrawer(task) }, '查看稿件'), task.status === 'failed' && task.source?.text ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: !canGenerate || Boolean(submitting), onClick: () => ask({ title: '重试配音', copy: `将按原任务的文稿、音色和语速重新生成配音${task.source?.projectId ? `，并覆盖「${task.source?.title || '当前项目'}」的配音版本` : ''}。原失败记录会保留。`, confirm: '确认重试', onConfirm: () => { void retryAudioTask(task); } }) }, submitting === `retry:${task.id}` ? '正在提交…' : '重试配音') : null, h(ExecutionButton, { kind: 'audio', id: task.id }), subtitleButton, subtitle.status === 'succeeded' ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => openSubtitles(task) }, '查看字幕') : null, ['succeeded', 'failed'].includes(task.status) ? h('button', { type: 'button', className: 'lwb-danger-button', disabled: Boolean(submitting), onClick: () => ask({ title: '删除这条配音任务？', copy: `将删除「${task.source?.title || '手动输入文稿'}」这条${task.status === 'failed' ? '失败' : '已完成'}的配音任务记录，以及磁盘上的音频与字幕文件。删除后无法恢复；如果只是想再生成一次，用「重试配音」更合适。`, confirm: '确认删除', danger: true, onConfirm: () => { void deleteAudioTasks(task); } }) }, submitting === `delete:${task.id}` ? '正在删除…' : '删除') : null),
         );
       };
       const taskPanel = h('section', { className: 'sv-section' },
@@ -4191,7 +4657,7 @@ window.__ModuleLoader__.load({
       const sourceDrawerNode = sourceDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭稿件内容', onClick: () => setSourceDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '稿件内容' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, sourceDrawer.source?.title || '稿件内容'), h('p', { className: 'sv-meta' }, sourceDrawer.source?.kind === 'manual-text' ? '手动输入文稿快照' : '任务创建时冻结的稿件快照')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSourceDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll' }, h('article', { className: 'sv-sc-manuscript' }, sourceDrawer.source?.text || ''))));
       const subtitleDrawerNode = subtitleDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭字幕内容', onClick: () => setSubtitleDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '编辑字幕' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, `字幕 · ${subtitleDrawer.task.source?.title || '手动文稿'}`), h('p', { className: 'sv-meta' }, `${subtitleDrawer.cues.length} 条字幕，可直接校对错别字并保存。`)), h('button', { type: 'button', className: 'lwb-plain-button', disabled: subtitleDrawer.saving, onClick: () => setSubtitleDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll sv-audio-subtitle-editor' }, h('div', { className: 'sv-subtitle-cues' }, subtitleDrawer.cues.map((cue, index) => h('article', { key: cue.id, className: 'sv-subtitle-cue' }, h('time', null, cue.time), h('textarea', { className: 'sv-textarea sv-subtitle-text', value: cue.text, maxLength: 30000, 'aria-label': `第 ${index + 1} 条字幕文本`, onChange: (event) => setSubtitleDrawer((current) => ({ ...current, cues: current.cues.map((currentCue, currentIndex) => currentIndex === index ? { ...currentCue, text: event.target.value } : currentCue) })) }))))), h('div', { className: 'sv-media-drawer-foot' }, h('span', { className: 'sv-meta' }, '时间码来自音频对齐结果，保存将更新字幕文本。'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: subtitleDrawer.saving || !subtitleDrawer.cues.length || subtitleDrawer.cues.some((cue) => !cue.text.trim()), onClick: () => ask({ title: '保存字幕', copy: `将保存这 ${subtitleDrawer.cues.length} 条字幕的文本修改，时间码保持不变。`, confirm: '确认保存', onConfirm: () => { void saveSubtitles(); } }) }, subtitleDrawer.saving ? '正在保存…' : '保存字幕'))));
       const accountTabs = h(AccountTabs, { accountLibrary, activeTab, onChange: setActiveTab, label: '按账号查看配音任务' });
-      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
+      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
     }
     /**
      * 视频制作任务的实时进度：步骤条 + 当前阶段用时 + 总耗时 + 阶段明细。
@@ -4211,15 +4677,23 @@ window.__ModuleLoader__.load({
       if (running && render?.remainingSeconds != null) summary.push(`预计剩余 ${formatElapsed(render.remainingSeconds)}`);
       else if (running && eta?.range) summary.push(`参考历史 ${eta.range}`);
       const doneCount = progress.steps.filter((step) => step.status === 'done').length;
+      // 进度块在任务结束后仍然保留（时长、帧数值得看），但标题不能说「正在」——
+      // 2026-10-08 反馈：卡片已标「已完成」却又写着「正在渲染成片 100%」。
+      const renderHeadline = !running
+        ? (status === 'succeeded' ? '渲染完成' : status === 'failed' ? '渲染中断' : '渲染已停止')
+        : (render?.stage === 'bundling' ? '正在打包工程' : '正在渲染成片');
       return h('div', { className: 'sv-vprogress' },
         h('div', { className: 'sv-vprogress-steps', role: 'list', 'aria-label': '视频制作阶段' },
           progress.steps.map((step, index) => h('div', {
             key: step.id, role: 'listitem', className: 'sv-vprogress-step', 'data-status': step.status,
             title: step.seconds == null ? step.label : `${step.label} · ${formatElapsed(step.seconds)}`,
           }, h('i', { 'aria-hidden': true }, step.status === 'done' ? '✓' : step.status === 'failed' ? '!' : String(index + 1)), h('span', null, step.label)))),
-        repair ? h('p', { className: 'sv-vprogress-repair', role: 'status' }, `审片触发修复：第 ${repair.attempts}${repair.maxAttempts ? `/${repair.maxAttempts}` : ''} 次尝试，正在按审片意见重做。`) : null,
-        render ? h('div', { className: 'sv-vprogress-bar' },
-          h('div', { className: 'sv-vprogress-bar-head' }, h('span', null, render.stage === 'bundling' ? '正在打包工程' : '正在渲染成片'), h('span', { className: 'sv-vprogress-live' }, `${render.percent}%`)),
+        // 修复提示同理：结束后它记录的是「做过第几次修复」，不是「正在」。
+        repair ? h('p', { className: 'sv-vprogress-repair', role: 'status' }, running
+          ? `审片触发修复：第 ${repair.attempts}${repair.maxAttempts ? `/${repair.maxAttempts}` : ''} 次尝试，正在按审片意见重做。`
+          : `审片曾触发修复：共 ${repair.attempts}${repair.maxAttempts ? `/${repair.maxAttempts}` : ''} 次尝试。`) : null,
+        render ? h('div', { className: 'sv-vprogress-bar', 'data-status': status },
+          h('div', { className: 'sv-vprogress-bar-head' }, h('span', null, renderHeadline), h('span', { className: 'sv-vprogress-live' }, `${render.percent}%`)),
           h('progress', { max: 100, value: render.percent, 'aria-label': '渲染进度' }),
           render.total ? h('span', { className: 'sv-meta' }, `已完成 ${render.done}/${render.total} 帧`) : null,
         ) : null,
@@ -4239,6 +4713,15 @@ window.__ModuleLoader__.load({
       const inActiveTab = (project) => activeTab === GENERAL_TAB ? !project.account : project.account?.id === activeTab;
       const candidates = projects.filter((project) => inActiveTab(project) && project.completedStages.includes('script') && project.completedStages.includes('voiceover'));
       const [selectedId, setSelectedId] = useSelectedProject(candidates);
+      // Pipeline board handoff: switch to the project's tab so it enters candidates, then select it.
+      React.useEffect(() => {
+        if (!pipelineHandoff || pipelineHandoff.page !== 'video-preview' || !pipelineHandoff.projectId) return;
+        const target = projects.find((project) => project.id === pipelineHandoff.projectId);
+        if (!target) return;
+        pipelineHandoff = null;
+        setActiveTab(target.account ? target.account.id : GENERAL_TAB);
+        setSelectedId(target.id);
+      }, [projects, setSelectedId]);
       const { detail, error: detailError, reload } = useDetail(packId, selectedId);
       const [visualBrief, setVisualBrief] = React.useState('');
       const [subtitleEnabled, setSubtitleEnabled] = React.useState(true);
@@ -4247,7 +4730,12 @@ window.__ModuleLoader__.load({
       const [bgmVolume, setBgmVolume] = React.useState('0.12');
       const [bgmUploading, setBgmUploading] = React.useState(false);
       const bgmFileInputRef = React.useRef(null);
-      const renderer = 'remotion';
+      const [renderer, setRenderer] = React.useState('remotion');
+      const [wbLineArtPlan, setWbLineArtPlan] = React.useState(null);
+      const [wbLineArtLoading, setWbLineArtLoading] = React.useState(false);
+      const [wbLineArtError, setWbLineArtError] = React.useState(null);
+      const [wbLineArtJob, setWbLineArtJob] = React.useState(null);
+      const [wbPlanning, setWbPlanning] = React.useState(false);
       const [sourcePickerOpen, setSourcePickerOpen] = React.useState(false);
       const [sourceQuery, setSourceQuery] = React.useState('');
       const [sourcePage, setSourcePage] = React.useState(0);
@@ -4255,6 +4743,8 @@ window.__ModuleLoader__.load({
       const [taskFilter, setTaskFilter] = React.useState('all');
       const [taskPage, setTaskPage] = React.useState(0);
       const [submitting, setSubmitting] = React.useState(null);
+      // 删除等无错误但需要回话的操作：用一句 sv-note 告知结果。
+      const [notice, setNotice] = React.useState('');
       const [scriptDrawer, setScriptDrawer] = React.useState(null);
       const [mediaDrawer, setMediaDrawer] = React.useState(null);
       const [summaryDrawer, setSummaryDrawer] = React.useState(null);
@@ -4282,6 +4772,7 @@ window.__ModuleLoader__.load({
         setVisualBrief(['默认信息型竖屏口播版式。', '默认信息型口播版式。', DEFAULT_VIDEO_VISUAL_BRIEF].includes(savedBrief) ? '' : savedBrief);
         setSubtitleEnabled(savedVideo ? savedVideo.subtitleEnabled !== false : done(detail, 'subtitles'));
         setOrientation(savedVideo?.orientation === 'portrait' ? 'portrait' : 'landscape');
+        setRenderer(savedVideo?.renderer === 'whiteboard' ? 'whiteboard' : 'remotion');
         setBackgroundMusic(savedVideo?.backgroundMusic || null);
         setBgmVolume(String(savedVideo?.bgmVolume ?? 0.12));
       }, [detail?.id, detail?.revision]);
@@ -4297,6 +4788,44 @@ window.__ModuleLoader__.load({
       const hasRequiredSource = detail && done(detail, 'script') && done(detail, 'voiceover') && (!subtitleEnabled || done(detail, 'subtitles'));
       const selectedSource = candidates.find((project) => project.id === selectedId) || null;
       const projectForTask = (task) => projects.find((project) => project.id === task.projectId) || null;
+      // ── 白板线稿准备：分幕规划 / 批量生成 / 轮询进度 ──
+      const loadWbLineArt = React.useCallback(async (projectId) => {
+        if (!projectId) { setWbLineArtPlan(null); return; }
+        setWbLineArtLoading(true);
+        try {
+          const value = await remote(packId, 'whiteboardLineArtPlan', { projectId });
+          setWbLineArtPlan(value); setWbLineArtError(null);
+        } catch (cause) { setWbLineArtError(cause.message); setWbLineArtPlan(null); }
+        finally { setWbLineArtLoading(false); }
+      }, []);
+
+      React.useEffect(() => {
+        if (renderer === 'whiteboard') void loadWbLineArt(detail?.id);
+      }, [renderer, detail?.id, loadWbLineArt]);
+
+      const generateWbLineArt = async ({ force = false, scenes } = {}) => {
+        if (!detail) return;
+        setWbLineArtError(null); setWbPlanning(true);
+        try {
+          const started = await remote(packId, 'startWhiteboardLineArt', { projectId: detail.id, force, scenes });
+          setWbPlanning(false);
+          if (started.skipped) { setWbLineArtError(null); await loadWbLineArt(detail.id); return; }
+          // 轮询后台批量任务；完成或失败后重拉 plan 拿新缩略图
+          await new Promise((resolve) => {
+            const timer = setInterval(async () => {
+              try {
+                const job = await remote(packId, 'whiteboardLineArtStatus', { projectId: detail.id });
+                setWbLineArtJob(job && job.phase !== 'idle' ? job : null);
+                if (!job || ['completed', 'failed', 'cancelled', 'idle'].includes(job.phase)) {
+                  clearInterval(timer); resolve();
+                }
+              } catch (cause) { setWbLineArtError(cause.message || String(cause)); clearInterval(timer); resolve(); }
+            }, 2000);
+          });
+        } catch (cause) { setWbLineArtError(cause.message); }
+        finally { setWbPlanning(false); setWbLineArtJob(null); if (detail) await loadWbLineArt(detail.id); }
+      };
+
       const createVideoTask = async (source = detail, settings = { visualBrief, subtitleEnabled, orientation, backgroundMusic, bgmVolume: Number(bgmVolume) }) => {
         if (!source) return;
         setSubmitting(source.id);
@@ -4323,6 +4852,32 @@ window.__ModuleLoader__.load({
         if (!project || project.revision !== task.expectedRevision) { setError('稿件、配音或字幕已更新。请在左侧重新选择当前稿件后创建新的视频任务。'); return; }
         ask({ title: '重试视频任务', copy: `将按该任务冻结的配置，重新提交「${task.projectTitle}」当前版本的视频渲染。`, confirm: '确认重试', onConfirm: () => { void createVideoTask(project, task.input); } });
       };
+      /**
+       * 补做技术质检：成片已存在但缺 qc 产物（老任务，或渲染路径没提交 qc）时，
+       * 重跑渲染既慢又没必要——直接对现有成片补一次技术质检。发布页只列
+       * qc 通过的项目，所以这是让这类成片重新可见的捷径。
+       */
+      const runTechnicalQc = async (task) => {
+        const project = projectForTask(task);
+        if (!project) { setError('找不到该成片对应的项目。'); return; }
+        setSubmitting(`qc:${task.id}`);
+        try {
+          await remote(packId, 'startTechnicalQc', { projectId: task.projectId, expectedRevision: project.revision, videoTaskId: task.id });
+          await taskFeed.refresh(); setError(null);
+        } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
+      };
+      // 删一条已结束的视频任务及其产物。视频渲染产物动辄几百 MB，失败任务尤其占地方。
+      const deleteVideoTasks = async (tasks) => {
+        const targets = (Array.isArray(tasks) ? tasks : [tasks]).filter(Boolean);
+        if (!targets.length || submitting) return;
+        setSubmitting(`delete:${targets[0].id}`);
+        try {
+          const result = await remote(packId, 'deleteMediaTasks', { taskType: 'video', ids: targets.map((task) => task.id) });
+          await taskFeed.refresh(); setError(null);
+          const gone = result?.missing?.length || 0;
+          setNotice(gone ? `已删除 ${result.removed.length} 条，另有 ${gone} 条此前已不存在。` : `已删除 ${result.removed.length} 条视频任务及其成片文件。`);
+        } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
+      };
       const taskPages = Math.max(1, Math.ceil(taskFeed.total / 6));
       const sourceMatches = candidates.filter((project) => !sourceQuery.trim() || project.title.toLowerCase().includes(sourceQuery.trim().toLowerCase()));
       const sourcePages = Math.max(1, Math.ceil(sourceMatches.length / 8));
@@ -4342,7 +4897,8 @@ window.__ModuleLoader__.load({
           progress ? h(VideoTaskProgress, { progress, status: task.status, eta: task.status === 'running' && task.status !== 'succeeded' ? taskEta : null }) : null,
           task.status === 'succeeded' && task.result?.video ? h(React.Fragment, null, h(VideoTaskMediaPreview, { packId, task, stage: 'video', setError }), h('div', { className: 'sv-video-task-detail' }, h('span', null, `${task.result.video.width || '?'}x${task.result.video.height || '?'} · ${task.result.video.fps || '?'}fps`), h('span', null, `时长 ${formatMediaDuration(task.result.video.durationSeconds)}`), h('span', null, formatMediaBytes(task.result.video.bytes)))) : null,
           task.error ? h('p', { className: 'sv-error' }, mediaErrorText(task.error)) : null,
-          h('div', { className: 'sv-actions' }, task.source?.script?.body ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setScriptDrawer(task) }, '查看稿件') : null, task.source?.voiceover?.audio || task.source?.subtitles || task.input?.backgroundMusic ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setMediaDrawer(task) }, '查看配音/字幕/BGM') : null, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSummaryDrawer(task) }, '执行详情'), task.status === 'failed' ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: submitting === task.projectId, onClick: () => retryTask(task) }, submitting === task.projectId ? '正在提交…' : '重试') : null, qcPassed ? h('span', { className: 'sv-meta' }, task.result?.qc ? '技术质检与独立审片通过' : '技术质检通过') : null),
+          task.status === 'succeeded' && task.result?.video && !qcPassed ? h('p', { className: 'sv-warn' }, '这条成片还没有技术质检记录，因此不会出现在「发布」页。可点「补做技术质检」，无需重新渲染。') : null,
+          h('div', { className: 'sv-actions' }, task.source?.script?.body ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setScriptDrawer(task) }, '查看稿件') : null, task.source?.voiceover?.audio || task.source?.subtitles || task.input?.backgroundMusic ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setMediaDrawer(task) }, '查看配音/字幕/BGM') : null, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSummaryDrawer(task) }, '执行详情'), task.status === 'succeeded' && task.result?.video && !qcPassed ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(submitting) || taskFeed.anyRunning, onClick: () => ask({ title: '补做技术质检', copy: `将对「${task.projectTitle}」的现有成片补做一次技术质检（检查分辨率、帧率、音轨、时长与字幕），通过后该成片会出现在「发布」页。不会重新渲染视频。`, confirm: '开始质检', onConfirm: () => { void runTechnicalQc(task); } }) }, submitting === `qc:${task.id}` ? '正在提交…' : '补做技术质检') : null, task.status === 'failed' ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: submitting === task.projectId, onClick: () => retryTask(task) }, submitting === task.projectId ? '正在提交…' : '重试') : null, qcPassed ? h('span', { className: 'sv-meta' }, task.result?.qc ? '技术质检与独立审片通过' : '技术质检通过') : null, ['succeeded', 'failed'].includes(task.status) ? h('button', { type: 'button', className: 'lwb-danger-button', disabled: Boolean(submitting), onClick: () => ask({ title: '删除这条视频任务？', copy: `将删除「${task.projectTitle}」这条${task.status === 'failed' ? '失败' : '已完成'}的视频任务记录，以及磁盘上的成片与渲染中间文件（视频产物通常有几百 MB）。删除后无法恢复；项目的稿件与配音不受影响，只是这条渲染记录不再出现在列表里。`, confirm: '确认删除', danger: true, onConfirm: () => { void deleteVideoTasks(task); } }) }, submitting === `delete:${task.id}` ? '正在删除…' : '删除') : null),
         );
       };
       const sourcePanel = h('section', { className: 'sv-section sv-video-source' },
@@ -4350,7 +4906,41 @@ window.__ModuleLoader__.load({
         candidates.length ? h(React.Fragment, null, h('div', { className: 'sv-list' }, candidates.slice(0, 6).map(sourceCard)), candidates.length > 6 ? h('button', { type: 'button', className: 'sv-sc-more', onClick: () => { setSourceQuery(''); setSourcePage(0); setSourcePickerOpen(true); } }, `还有 ${candidates.length - 6} 篇 · 查看更多`) : null) : h('div', { className: 'sv-empty' }, '当前账号暂无可制作视频的稿件。若配音已完成，请到「配音 / 字幕」检查项目同步状态。'),
         detail ? h('section', { className: 'sv-form sv-video-create' },
           h('div', { className: 'sv-section-head' }, h('h3', null, '创建视频任务'), h('span', null, selectedSource?.title || '')),
-          h('p', { className: 'sv-note' }, subtitleEnabled ? 'DSH 视觉导演将读取当前稿件、配音和字幕，直接制作 Remotion 成片，再由独立会话审片。' : done(detail, 'subtitles') ? '当前任务将跳过已有字幕，仅使用稿件和配音制作成片。' : '当前稿件没有字幕，将直接制作无字幕成片。'),
+          h('p', { className: 'sv-note' }, renderer === 'whiteboard' ? (subtitleEnabled ? '白板手绘将读取当前稿件的配音和字幕，按字幕叙事顺序逐幕绘制成片，再由独立会话审片。' : '白板手绘将按字幕时间轴逐幕绘制成片（当前任务未烧录字幕），再由独立会话审片。') : subtitleEnabled ? 'DSH 视觉导演将读取当前稿件、配音和字幕，直接制作 Remotion 成片，再由独立会话审片。' : done(detail, 'subtitles') ? '当前任务将跳过已有字幕，仅使用稿件和配音制作成片。' : '当前稿件没有字幕，将直接制作无字幕成片。'),
+          h('div', { className: 'sv-video-option' }, h('span', null, '制作方式'), h('div', { className: 'sv-video-orientation', role: 'radiogroup', 'aria-label': '制作方式' }, [{ id: 'remotion', label: 'AI 图文（Remotion）' }, { id: 'whiteboard', label: '白板手绘' }].map((item) => h('button', { key: item.id, type: 'button', role: 'radio', 'aria-checked': renderer === item.id, 'data-active': renderer === item.id ? 'true' : 'false', onClick: () => setRenderer(item.id) }, item.label)))),
+          renderer === 'whiteboard' ? h('div', { className: 'sv-lineart-panel' },
+            h('div', { className: 'sv-lineart-head' },
+              h('strong', null, '线稿准备'),
+              wbLineArtPlan ? h('span', { className: 'sv-lineart-stat' },
+                `共 ${wbLineArtPlan.total} 幕 · 已有 ${wbLineArtPlan.generated} 张`,
+                wbLineArtPlan.engine?.up ? ' · 生图引擎就绪' : wbLineArtPlan.engine?.reachable ? ' · 生图引擎未连接' : ' · 本地桥接未运行',
+              ) : h('span', { className: 'sv-lineart-stat' }, wbLineArtLoading ? '读取分幕…' : ''),
+            ),
+            h('p', { className: 'sv-note' }, '每幕一张线稿，按字幕叙事顺序逐笔画出；线稿由本机 Qwen-Image 按视觉规范生成，生成后请逐张确认，不满意可单独重画。'),
+            h('div', { className: 'sv-lineart-actions' },
+              h('button', { type: 'button', className: 'lwb-primary-button', disabled: wbLineArtLoading || wbPlanning || (wbLineArtJob && wbLineArtJob.phase === 'running') || !detail, onClick: () => void generateWbLineArt({}) },
+                wbLineArtJob && wbLineArtJob.phase === 'running' ? `生成中 ${wbLineArtJob.done || 0}/${wbLineArtJob.total}…` : '生成缺失线稿'),
+              wbLineArtPlan && wbLineArtPlan.generated > 0 ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: wbLineArtLoading || wbPlanning || (wbLineArtJob && wbLineArtJob.phase === 'running'), onClick: () => void generateWbLineArt({ force: true }) }, '全部重新生成') : null,
+            ),
+            wbLineArtError ? h('p', { className: 'sv-error' }, wbLineArtError) : null,
+            wbPlanning ? h('p', { className: 'sv-note' }, '分镜师正在把每幕旁白转成画面描述（约 1-2 分钟）…') : null,
+            wbLineArtJob && wbLineArtJob.phase === 'running' && wbLineArtJob.current ? h('p', { className: 'sv-note' }, `正在生成第 ${wbLineArtJob.current} 幕…`) : null,
+            wbLineArtPlan && wbLineArtPlan.scenes.length ? h('div', { className: 'sv-lineart-grid' },
+              wbLineArtPlan.scenes.map((scene) => h('div', { key: scene.index, className: 'sv-lineart-card' },
+                h('div', { className: 'sv-lineart-card-head' },
+                  h('span', { className: 'sv-lineart-no' }, `幕 ${scene.index}`),
+                  h('span', { className: 'sv-lineart-time' }, `${(scene.startMs / 1000).toFixed(0)}–${(scene.endMs / 1000).toFixed(0)}s`),
+                ),
+                h('div', { className: 'sv-lineart-thumb' },
+                  scene.thumb ? h('img', { src: scene.thumb, alt: `第 ${scene.index} 幕线稿` })
+                    : h('div', { className: 'sv-lineart-empty' }, '无线稿'),
+                ),
+                h('p', { className: 'sv-lineart-text', title: scene.text }, scene.text),
+                h('button', { type: 'button', className: 'lwb-plain-button', disabled: wbLineArtLoading || wbPlanning || (wbLineArtJob && wbLineArtJob.phase === 'running'), onClick: () => void generateWbLineArt({ scenes: [scene.index], force: true }) }, '重新生成本幕'),
+              )),
+            ) : null,
+          ) : null,
+          renderer === 'whiteboard' ? null : h('p', { className: 'sv-note' }, subtitleEnabled ? 'DSH 视觉导演将读取当前稿件、配音和字幕，直接制作 Remotion 成片，再由独立会话审片。' : done(detail, 'subtitles') ? '当前任务将跳过已有字幕，仅使用稿件和配音制作成片。' : '当前稿件没有字幕，将直接制作无字幕成片。'),
           h('div', { className: 'sv-video-option' }, h('span', null, '视频方向'), h('div', { className: 'sv-video-orientation', role: 'radiogroup', 'aria-label': '视频方向' }, [{ id: 'landscape', label: '横屏 16:9' }, { id: 'portrait', label: '竖屏 9:16' }].map((item) => h('button', { key: item.id, type: 'button', role: 'radio', 'aria-checked': orientation === item.id, 'data-active': orientation === item.id ? 'true' : 'false', onClick: () => setOrientation(item.id) }, item.label)))),
           h('label', { className: 'sv-checks' }, h('span', null, h('input', { type: 'checkbox', checked: subtitleEnabled, disabled: !done(detail, 'subtitles'), onChange: (event) => setSubtitleEnabled(event.target.checked) }), '启用字幕')),
           h('div', { className: 'sv-video-option' },
@@ -4366,7 +4956,7 @@ window.__ModuleLoader__.load({
             ),
           ),
           h('textarea', { className: 'sv-textarea', value: visualBrief, maxLength: 6000, placeholder: '可选：补充视觉风格、表现重点或必须避开的表达；留空由 AI 视觉导演自主决定', onChange: (event) => setVisualBrief(event.target.value) }),
-          h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-primary-button', disabled: submitting === detail.id || bgmUploading || !hasRequiredSource, onClick: () => ask({ title: '创建视频任务', copy: `将为「${detail.title}」启动 DSH 视觉导演，制作${orientation === 'landscape' ? '横屏 16:9' : '竖屏 9:16'} Remotion 成片。任务会冻结当前稿件、配音${subtitleEnabled ? '、字幕' : ''}${backgroundMusic ? `和 BGM「${backgroundMusic.name}」` : ''}，并在技术质检后交给独立 DSH 会话审片；任一环节不通过都会直接失败。`, confirm: '确认创建', onConfirm: () => { void createVideoTask(); } }) }, submitting === detail.id ? '正在提交…' : '生成视频')),
+          h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-primary-button', disabled: submitting === detail.id || bgmUploading || !hasRequiredSource, onClick: () => ask({ title: '创建视频任务', copy: renderer === 'whiteboard' ? `将为「${detail.title}」按字幕叙事顺序绘制白板手绘成片（${orientation === 'landscape' ? '横屏 16:9' : '竖屏 9:16'}）。任务会冻结当前稿件、配音${subtitleEnabled ? '、字幕' : ''}，按 media/whiteboard/ 下的线稿逐幕渲染并合成配音音轨，并在技术质检后交给独立 DSH 会话审片；任一环节不通过都会直接失败。` : `将为「${detail.title}」启动 DSH 视觉导演，制作${orientation === 'landscape' ? '横屏 16:9' : '竖屏 9:16'} Remotion 成片。任务会冻结当前稿件、配音${subtitleEnabled ? '、字幕' : ''}${backgroundMusic ? `和 BGM「${backgroundMusic.name}」` : ''}，并在技术质检后交给独立 DSH 会话审片；任一环节不通过都会直接失败。`, confirm: '确认创建', onConfirm: () => { void createVideoTask(); } }) }, submitting === detail.id ? '正在提交…' : '生成视频')),
         ) : null,
       );
       const taskPanel = h('section', { className: 'sv-section sv-video-task-list' }, h('div', { className: 'sv-section-head' }, h('h3', null, '视频制作任务'), h('span', { role: 'status', 'aria-live': 'polite' }, taskFeed.anyRunning ? '任务执行中' : `共 ${taskFeed.total} 条`)), h('div', { className: 'sv-video-task-tools' }, h('input', { className: 'sv-input', value: taskQuery, maxLength: 160, placeholder: '搜索稿件标题、稿件内容或制作说明', onChange: (event) => setTaskQuery(event.target.value) }), h('div', { className: 'sv-filter-chips' }, taskFilters.map((filter) => h('button', { key: filter.id, type: 'button', className: 'sv-filter-chip', 'data-on': taskFilter === filter.id ? 'true' : 'false', onClick: () => setTaskFilter(filter.id) }, `${filter.label} ${filter.count}`)))), taskFeed.items.length ? h('div', { className: 'sv-list' }, taskFeed.items.map(taskCard)) : h('div', { className: 'sv-empty' }, taskFeed.loading ? '正在读取视频任务…' : '尚无视频制作任务。请在左侧选择完成配音的稿件后创建。'), h('div', { className: 'sv-audio-pagebar' }, h('span', { className: 'sv-meta' }, `第 ${taskPage + 1}/${taskPages} 页 · 共 ${taskFeed.total} 条`), h('span', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', 'aria-label': '上一页', disabled: taskPage === 0, onClick: () => setTaskPage((current) => Math.max(0, current - 1)) }, '上一页'), h('button', { type: 'button', className: 'lwb-plain-button', 'aria-label': '下一页', disabled: taskPage + 1 >= taskPages, onClick: () => setTaskPage((current) => current + 1) }, '下一页'))));
@@ -4374,7 +4964,7 @@ window.__ModuleLoader__.load({
       const scriptDrawerNode = scriptDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭稿件内容', onClick: () => setScriptDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '任务稿件' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, scriptDrawer.projectTitle), h('p', { className: 'sv-meta' }, `任务创建时冻结的稿件快照 · 稿件版本 ${scriptDrawer.source?.script?.revision || '—'}`)), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setScriptDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll' }, h('article', { className: 'sv-sc-manuscript' }, scriptDrawer.source?.script?.body || '该历史任务未保存稿件快照。'))));
       const mediaDrawerNode = mediaDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭配音、字幕和背景音乐', onClick: () => setMediaDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '任务配音、字幕和背景音乐' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, `配音 / 字幕 / BGM · ${mediaDrawer.projectTitle}`), h('p', { className: 'sv-meta' }, '展示任务创建时冻结的声音与字幕版本。')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setMediaDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll sv-video-media-drawer' }, mediaDrawer.source?.voiceover?.audio ? h(React.Fragment, null, h('p', { className: 'sv-meta' }, '配音'), h(VideoTaskMediaPreview, { packId, task: mediaDrawer, stage: 'voiceover', setError })) : null, mediaDrawer.input?.backgroundMusic ? h(React.Fragment, null, h('p', { className: 'sv-meta' }, `BGM · ${mediaDrawer.input.backgroundMusic.name} · ${Math.round(Number(mediaDrawer.input.bgmVolume ?? 0.12) * 100)}%`), h(VideoTaskMediaPreview, { packId, task: mediaDrawer, stage: 'bgm', setError })) : null, mediaDrawer.source?.subtitles ? h(React.Fragment, null, h('p', { className: 'sv-meta' }, `字幕 · ${mediaDrawer.source.subtitles.cueCount || 0} 条`), h('pre', { className: 'sv-subtitle-raw' }, mediaDrawer.source.subtitles.srt || '该任务未包含字幕。')) : h('p', { className: 'sv-note' }, '该视频任务未启用字幕。'))));
       const summaryDrawerNode = summaryDrawer && h(ExecutionDrawer, { key: summaryDrawer.id, request: { kind: 'media', id: summaryDrawer.id, projectId: summaryDrawer.projectId }, onClose: () => setSummaryDrawer(null) });
-      return h(PackFrame, { packId, openConversation, title: '视频 / 预览', copy: '选择完成配音的稿件后，DSH 视觉导演会直接制作 Remotion 成片，并由独立 DSH 会话审核。只有技术质检和审片都通过的任务才会展示成片。', hero: videoHero }, h(Notice, { error: error || detailError }), accountTabs, h('section', { className: 'sv-layout sv-video-workbench' }, sourcePanel, taskPanel), sourcePicker, scriptDrawerNode, mediaDrawerNode, summaryDrawerNode, confirmNode);
+      return h(PackFrame, { packId, openConversation, title: '视频 / 预览', copy: '选择完成配音的稿件后，DSH 视觉导演会直接制作 Remotion 成片，并由独立 DSH 会话审核。只有技术质检和审片都通过的任务才会展示成片。', hero: videoHero }, h(Notice, { error: error || detailError }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, accountTabs, h('section', { className: 'sv-layout sv-video-workbench' }, sourcePanel, taskPanel), sourcePicker, scriptDrawerNode, mediaDrawerNode, summaryDrawerNode, confirmNode);
     }
     const PUBLISH_STATE_LABEL = { none: '未生成', running: '生成中', failed: '生成失败', ready: '已就绪' };
     const PUBLISH_PAGE_SIZE = 8;
@@ -4499,6 +5089,9 @@ window.__ModuleLoader__.load({
       const [coverBusy, setCoverBusy] = React.useState(null);
       const [triggerError, setTriggerError] = React.useState(null);
       const [tagInput, setTagInput] = React.useState('');
+      // 素材管理：单个删除直接走卡片按钮，多选后批量删除。选择集按项目 id 存。
+      const [selected, setSelected] = React.useState(() => new Set());
+      const [deleting, setDeleting] = React.useState(null);
       const [confirmNode, ask] = useSvConfirm();
       const landscapeInputRef = React.useRef(null);
       const portraitInputRef = React.useRef(null);
@@ -4519,6 +5112,35 @@ window.__ModuleLoader__.load({
         catch (cause) { setError(cause.message); return []; }
       }, [packId, setError]);
 
+      /** 删除项目会连同它的稿件、配音、字幕、成片与封面一起永久移除。 */
+      const deleteItems = async (targets) => {
+        if (!packId || !targets.length || deleting) return;
+        setDeleting(targets.length === 1 ? targets[0].id : `batch:${targets.length}`);
+        try {
+          const result = await remote(packId, 'remove', { projectIds: targets.map((item) => item.id) });
+          const removed = new Set(result?.removed || []);
+          setSelected((current) => { const next = new Set(current); for (const id of removed) next.delete(id); return next; });
+          // 抽屉正开着被删的项目时关掉，避免停留在已不存在的记录上。
+          if (openProject && removed.has(openProject)) { setOpenProject(null); setTriggerError(null); }
+          await Promise.all([loadItems(), refresh()]);
+          const missing = result?.missing?.length || 0;
+          setError(missing ? `有 ${missing} 个素材已不存在，可能已被删除。` : null);
+        } catch (cause) { setError(cause.message); } finally { setDeleting(null); }
+      };
+      const askDelete = (targets) => {
+        if (!targets.length) return;
+        const single = targets.length === 1;
+        ask({
+          title: single ? '删除素材' : `删除 ${targets.length} 个素材`,
+          danger: true,
+          confirm: '永久删除',
+          copy: single
+            ? `将永久删除「${targets[0].title}」，包括它的稿件、配音、字幕、成片和封面，无法恢复。`
+            : `将永久删除选中的 ${targets.length} 个素材，包括各自的稿件、配音、字幕、成片和封面，无法恢复。`,
+          onConfirm: () => { void deleteItems(targets); },
+        });
+      };
+
       React.useEffect(() => { void refreshService(); }, [refreshService]);
       React.useEffect(() => {
         if (!packId) return;
@@ -4532,7 +5154,32 @@ window.__ModuleLoader__.load({
               setActiveTab(item?.account?.id || GENERAL_TAB);
               return;
             }
-            setActiveTab((current) => current !== GENERAL_TAB && accounts.accounts.some((item) => item.id === current && item.status === 'active') ? current : accounts.defaultAccountId || GENERAL_TAB);
+            // Pipeline board handoff: open the passed-qc project's publish drawer.
+            if (pipelineHandoff?.page === 'publish' && shelfItems.some((row) => row.id === pipelineHandoff.projectId)) {
+              const target = pipelineHandoff.projectId; pipelineHandoff = null;
+              const item = shelfItems.find((row) => row.id === target);
+              setOpenProject(target);
+              setActiveTab(item?.account?.id || GENERAL_TAB);
+              return;
+            }
+            // 默认落在成片最多的那个 Tab。原逻辑退回「通用」，而绝大多数成片都带账号
+            // 归属，「通用」里往往只有零星几条——用户第一眼就以为成片不见了
+            // （2026-10-08 反馈：刚跑完的成片在发布页找不到）。有作品最多的账号优先，
+            // 全都为空时才回到默认账号 / 通用。
+            const activeIds = new Set(accounts.accounts.filter((item) => item.status === 'active').map((item) => item.id));
+            const byTab = shelfItems.reduce((tally, row) => {
+              const key = !row.account ? GENERAL_TAB : activeIds.has(row.account.id) ? row.account.id : ARCHIVED_TAB;
+              tally[key] = (tally[key] || 0) + 1;
+              return tally;
+            }, {});
+            const richest = Object.keys(byTab)
+              .filter((key) => key !== ARCHIVED_TAB)
+              .sort((left, right) => byTab[right] - byTab[left])[0] || null;
+            setActiveTab((current) => {
+              if (current !== GENERAL_TAB && accounts.accounts.some((item) => item.id === current && item.status === 'active')) return current;
+              if (richest && byTab[richest] > 0) return richest;
+              return accounts.defaultAccountId || GENERAL_TAB;
+            });
           }).catch((cause) => setError(cause.message));
       }, [packId, loadItems, setError]);
       // Reflect the saved image-generation config into the drawer form.
@@ -4676,6 +5323,13 @@ window.__ModuleLoader__.load({
       const tabItems = sortItems(items.filter((item) => tabOf(item) === activeTab));
       const archivedItems = sortItems(items.filter((item) => tabOf(item) === ARCHIVED_TAB));
       const tabName = activeTab === GENERAL_TAB ? '通用（无账号定位）' : (activeAccounts.find((item) => item.id === activeTab)?.name || '—');
+      // 每个 Tab 上的成片数量：默认落在「通用」Tab 时，真正有作品的账号是隐形的，
+      // 用户会以为成片丢了（2026-10-08 反馈）。角标把藏起来的量直接说出来。
+      const countByTab = items.reduce((tally, item) => {
+        const key = tabOf(item);
+        tally[key] = (tally[key] || 0) + 1;
+        return tally;
+      }, {});
       const pageCount = Math.max(1, Math.ceil(tabItems.length / PUBLISH_PAGE_SIZE));
       const pagedItems = tabItems.slice(page * PUBLISH_PAGE_SIZE, page * PUBLISH_PAGE_SIZE + PUBLISH_PAGE_SIZE);
       // Shelf pagination follows the audio workbench: reset on tab switch and
@@ -4702,6 +5356,16 @@ window.__ModuleLoader__.load({
         if (failed.length) return `封面待补：${failed.map((kind) => kind === 'landscape' ? '横屏' : '竖屏').join('、')}`;
         return ready.length ? `封面：${ready[0] === 'landscape' ? '横屏' : '竖屏'}已就绪` : '封面：尚未生成';
       };
+      // 卡片底部的状态说明。旧文案对未生成的情况只写「点『发布』查看或生成发布资料」，
+      // 而发布资料其实是「点开抽屉才自动生成」——用户看到「未生成」以为白跑了
+      // （2026-10-08 反馈）。改成按状态说清下一步该做什么。
+      const publishFootNote = (item) => {
+        const state = publishStateOf(item);
+        if (state === 'ready') return '标题 / 文案 / 描述 / 标签已就绪';
+        if (state === 'running') return '正在生成发布资料…';
+        if (state === 'failed') return '发布资料生成失败，点「发布」查看原因并重试';
+        return '点「发布」生成本片的标题、文案与标签';
+      };
       const videoSpec = (item) => [
         item.orientation === 'portrait' ? '竖屏 9:16' : item.orientation === 'landscape' ? '横屏 16:9' : null,
         item.video?.width && item.video?.height ? `${item.video.width}x${item.video.height}` : null,
@@ -4712,9 +5376,12 @@ window.__ModuleLoader__.load({
       // shelf listing settles; the card falls back to the list item.
       const detailVideo = stageData(detail, 'video') || null;
       const drawerSpec = videoSpec({ orientation: detailVideo?.orientation || openItem?.orientation || null, video: detailVideo?.video || openItem?.video || null });
-      const itemCard = (item, archived) => h('article', { key: item.id, className: 'sv-pb-card' },
+      const itemCard = (item, archived) => h('article', { key: item.id, className: 'sv-pb-card', 'data-selected': selected.has(item.id) ? 'true' : 'false' },
         h(PublishVideoThumb, { packId, item, setError }),
         h('div', { className: 'sv-pb-card-head' },
+          h('label', { className: 'sv-pb-select' },
+            h('input', { type: 'checkbox', checked: selected.has(item.id), disabled: Boolean(deleting), 'aria-label': `选择素材「${item.title}」`, onChange: () => setSelected((current) => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; }) }),
+          ),
           h('p', { className: 'sv-pb-card-title' }, item.title),
           stateBadge(item),
         ),
@@ -4722,19 +5389,40 @@ window.__ModuleLoader__.load({
         h('p', { className: 'sv-pb-card-meta' }, [coverNote(item), item.packaging ? `标签 ${item.packaging.content?.tags?.length || 0} 个` : null, archived ? `已归档 · ${item.account?.name || ''}` : null, relativeTime(item.updatedAt)].filter(Boolean).join(' · ')),
         item.task?.status === 'failed' ? h('p', { className: 'sv-pb-cover-error' }, item.task.error || '发布信息生成失败。') : null,
         h('div', { className: 'sv-pb-card-foot' },
-          h('span', { className: 'sv-pb-card-meta' }, publishStateOf(item) === 'ready' ? '标题 / 文案 / 描述 / 标签已就绪' : '点「发布」查看或生成发布资料'),
-          h('button', { type: 'button', className: 'lwb-primary-button', onClick: () => setOpenProject(item.id) }, '发布'),
+          h('span', { className: 'sv-pb-card-meta' }, publishFootNote(item)),
+          h('span', { className: 'sv-actions' },
+            h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(deleting), onClick: () => askDelete([item]) }, deleting === item.id ? '正在删除…' : '删除'),
+            h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(deleting), onClick: () => setOpenProject(item.id) }, '发布'),
+          ),
         ),
       );
 
-      const tabs = h(AccountTabs, { accountLibrary, activeTab, onChange: setActiveTab, label: '按账号筛选成片' },
+      const tabs = h(AccountTabs, { accountLibrary, activeTab, onChange: setActiveTab, label: '按账号筛选成片', tabBadge: countByTab, tabBadgeLabel: '条成片' },
         archivedItems.length ? h('span', { className: 'sv-sc-archived', title: '已归档账号的成片仅在列表尾部展示' }, `已归档 ${archivedItems.length}`) : null,
       );
+
+      // 批量选择只覆盖当前 Tab 当前页可见的卡片，跨页选择容易误删。
+      const pageIds = [...pagedItems.map((item) => item.id), ...(page === pageCount - 1 ? archivedItems.map((item) => item.id) : [])];
+      const selectedOnPage = pageIds.filter((id) => selected.has(id));
+      const allOnPageSelected = pageIds.length > 0 && selectedOnPage.length === pageIds.length;
+      const selectedItems = items.filter((item) => selected.has(item.id));
+      const selectionBar = pageIds.length ? h('div', { className: 'sv-pb-selection' },
+        h('label', { className: 'sv-pb-select' },
+          h('input', { type: 'checkbox', checked: allOnPageSelected, disabled: Boolean(deleting), 'aria-label': '选择本页全部素材', onChange: () => setSelected((current) => { const next = new Set(current); if (allOnPageSelected) for (const id of pageIds) next.delete(id); else for (const id of pageIds) next.add(id); return next; }) }),
+          h('span', null, allOnPageSelected ? '取消本页全选' : '全选本页'),
+        ),
+        h('span', { className: 'sv-meta' }, selected.size ? `已选 ${selected.size} 个` : '可勾选多个素材后批量删除'),
+        h('span', { className: 'sv-actions' },
+          selected.size ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(deleting), onClick: () => setSelected(new Set()) }, '清空选择') : null,
+          h('button', { type: 'button', className: 'lwb-danger-button', disabled: Boolean(deleting) || !selected.size, onClick: () => askDelete(selectedItems) }, typeof deleting === 'string' && deleting.startsWith('batch:') ? '正在删除…' : `删除选中${selected.size ? `（${selected.size}）` : ''}`),
+        ),
+      ) : null;
 
       const shelf = h('section', { className: 'sv-section' },
         h('div', { className: 'sv-section-head' }, h('h3', null, '成片与发布资料'), h('span', null, `当前 Tab · ${tabName} · ${tabItems.length} 个`)),
         tabs,
         tabItems.length || archivedItems.length ? h(React.Fragment, null,
+          selectionBar,
           h('div', { className: 'sv-pb-shelf' }, pagedItems.map((item) => itemCard(item, false)), page === pageCount - 1 && archivedItems.length ? archivedItems.map((item) => itemCard(item, true)) : null),
           pageCount > 1 ? h('div', { className: 'sv-audio-pagebar' },
             h('span', { className: 'sv-meta' }, `第 ${page + 1}/${pageCount} 页 · 共 ${tabItems.length + archivedItems.length} 个`),
@@ -4748,7 +5436,9 @@ window.__ModuleLoader__.load({
 
       // ---- lifecycle drawer ----
       const coverCard = (kind) => {
-        const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 9:16';
+        // 封面标签里的比例要和实际生成的尺寸一致：竖版是 3:4（抖音/小红书信息流展示比例），
+// 不是视频本身的 9:16 —— 标错会让人以为该把封面裁窄。
+const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
         const descriptor = packaging?.covers?.[kind] || null;
         const asset = covers[kind];
         const coverError = packaging?.coverErrors?.[kind] || null;
@@ -4880,7 +5570,7 @@ window.__ModuleLoader__.load({
         { label: '封面生图', value: service?.configured ? (service.provider === 'bailian' ? '百炼' : 'SciTiger') : '待配置', tone: service?.configured ? 'green' : undefined },
       ] });
 
-      return h(PackFrame, { packId, openConversation, title: '发布', accent: 'red', copy: '这里直接陈列上一模块生成的成片，可点开播放。点「发布」查看或生成发布资料：标题、文案、描述、标签与横竖封面。资料齐备即视为可发布，复制到平台即可；封面可按提示词重生，也可自行上传。本模块不会向任何平台直发。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !service.configured ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '封面生图', h('span', { className: 'sv-config-state' }, !service ? '读取中' : service.configured ? '已连接' : '待配置'))) },
+      return h(PackFrame, { packId, openConversation, title: '发布', accent: 'red', copy: '这里直接陈列上一模块生成的成片，可点开播放。点「发布」查看或生成发布资料：标题、文案、描述、标签与横竖封面。资料齐备即视为可发布，复制到平台即可；封面可按提示词重生，也可自行上传。本页只准备资料，不会向任何平台直发；要自动投递请用「发布与账号管理」能力包。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !service.configured ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '封面生图', h('span', { className: 'sv-config-state' }, !service ? '读取中' : service.configured ? '已连接' : '待配置'))) },
         h(Notice, { error: error || detailError }),
         shelf,
         lifecycleDrawer,
@@ -4897,7 +5587,7 @@ window.__ModuleLoader__.load({
         cancellation: { parameter: 'signal' }, result: { mode: 'src-json' },
       }] });
       await ctx.plugin({ name: 'spoken-video-execution-client', inject: ['remote.spokenVideo'], apply(scope) { executionRemote = scope.get('remote.spokenVideo'); scope.effect(() => () => { executionRemote = null; }); } });
-      installStyle(); ctx.effect(() => ctx.lwbPackClient.register({ packId: 'spoken-video', pages: { positioning: AccountPositioningPage, signals: SignalsPage, topics: TopicsPage, scripts: ScriptPage, 'audio-captions': AudioCaptionsPageV2, 'video-preview': VideoPreviewPageV2, publish: PublishPageV4, 'content-schedule': ContentSchedulePage } }), 'spoken-video: register capability pages'); }
+      installStyle(); ctx.effect(() => ctx.lwbPackClient.register({ packId: 'spoken-video', pages: { positioning: AccountPositioningPage, signals: SignalsPage, topics: TopicsPage, scripts: ScriptPage, 'audio-captions': AudioCaptionsPageV2, 'video-preview': VideoPreviewPageV2, publish: PublishPageV4, 'content-schedule': ContentSchedulePage, pipeline: PipelineBoardPage } }), 'spoken-video: register capability pages'); }
     exports.inject = ['connection', 'lwbPackClient', 'remote']; exports.apply = apply; return module.exports;
   },
 });

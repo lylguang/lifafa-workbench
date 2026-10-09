@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { SUSPICION_MAX, SUSPICION_MEAN, decodePcmMono8k, driftStats, estimateStarts, parseSrt, snapStarts, speechIntervalsFromPcm } from './spoken-video-subtitle-align.mjs'
 
 const motionProperty = (name) => /^(?:animation|animationname|transition|transitionproperty)$/u.test(String(name).replace(/^(?:-webkit-|-moz-|-o-|Webkit|Moz|O)/u, '').replaceAll('-', '').toLowerCase())
 const literal = (node) => ['TSAsExpression', 'TSSatisfiesExpression', 'TSNonNullExpression', 'ParenthesizedExpression'].includes(node?.type) ? literal(node.expression) : node?.type === 'StringLiteral' ? node.value : node?.type === 'TemplateLiteral' && node.expressions.length === 0 ? node.quasis[0].value.cooked : null
@@ -114,8 +115,45 @@ export function inspectTimelineAlignment(source, srt) {
   return findings
 }
 
+/**
+ * 字幕时间轴与音频的忠实性检查——只产警告，不阻塞渲染。
+ *
+ * 阻断性防护在字幕阶段的对齐守卫（spoken-video-subtitle-align.mjs）：守卫会实测音频
+ * 并在漂移成立时直接采用修正后的 SRT。这里负责兜底提醒：
+ * - 守卫记录显示已修正/已核实健康 → 放行；
+ * - 记录显示「有疑点但未核实」（本地 ASR 不可用等）→ 依据记录警告；
+ * - 无记录（旧项目/守卫异常）→ 本地做一次纯 VAD 占比怀疑检查。
+ * 注意占比估计对局部语速偏差有最高 ~3s 误差，分不清「语速不均的好时间轴」和「漂移的
+ * 坏时间轴」，所以无论哪条路径都只警告、不定罪。
+ */
+export async function inspectSubtitleAudioAlignment(projectDir, srt) {
+  const warnings = []
+  const report = (code, message) => warnings.push({ code, file: 'inputs/subtitles.srt', line: 1, column: 1, message })
+  const record = await readFile(join(projectDir, 'inputs', 'subtitles-align.json'), 'utf8').then(JSON.parse).catch(() => null)
+  if (record && ['healthy', 'corrected'].includes(record.verdict)) return warnings
+  if (record?.verdict === 'unverified' && record.suspicion) {
+    report('subtitle-audio-suspicion', `字幕时间轴存在与语音分布不符的疑点（平均 ${Number(record.suspicion.mean).toFixed(2)}s、最大 ${Number(record.suspicion.max).toFixed(2)}s），当时本地 ASR 不可用未能核实。若成片出现配音与画面错位，请重新生成字幕。`)
+    return warnings
+  }
+  try {
+    const cues = parseSrt(srt)
+    if (cues.length < 6) return warnings
+    const pcm = await decodePcmMono8k(join(projectDir, 'inputs', 'narration.wav'))
+    const intervals = speechIntervalsFromPcm(pcm)
+    const estimate = estimateStarts(cues, intervals)
+    if (!estimate) return warnings
+    const snapped = snapStarts(estimate, intervals, { audioDuration: pcm.length / 8000 })
+    const stats = driftStats(cues.map((c) => c.start), snapped)
+    if (stats.mean > SUSPICION_MEAN || stats.max > SUSPICION_MAX) {
+      report('subtitle-audio-suspicion', `字幕时间轴与音频语音分布存在平均 ${stats.mean.toFixed(2)}s（最大 ${stats.max.toFixed(2)}s）的偏差疑点，未经锚点核实。若成片出现配音与画面错位，请重新生成字幕。`)
+    }
+  } catch { /* ffmpeg 缺失等环境问题不产警告 */ }
+  return warnings
+}
+
 export async function inspectAgentProject(workspace) {
   const findings = []
+  const warnings = []
   for (const [file, expected] of Object.entries(workspace.protected)) {
     const source = await readFile(join(workspace.projectDir, file), 'utf8').catch(() => null)
     if (source === null || createHash('sha256').update(source).digest('hex') !== expected) findings.push({ code: 'protected-file', file, line: 1, column: 1, message: `受保护文件 ${file} 被修改或丢失。` })
@@ -127,12 +165,16 @@ export async function inspectAgentProject(workspace) {
     // 场景边界必须落在真实语音的时间点上：字幕时间轴是唯一依据，缺失就无从对齐。
     const srt = await readFile(join(workspace.projectDir, 'inputs', 'subtitles.srt'), 'utf8').catch(() => '')
     if (!srt.trim()) findings.push({ code: 'timeline-missing', file: 'inputs/subtitles.srt', line: 1, column: 1, message: '缺少字幕时间轴：画面场景边界必须有真实语音时间可依，请先生成字幕再制作视频。' })
-    else findings.push(...inspectTimelineAlignment(creativeSource, srt))
+    else {
+      findings.push(...inspectTimelineAlignment(creativeSource, srt))
+      warnings.push(...await inspectSubtitleAudioAlignment(workspace.projectDir, srt))
+    }
   }
   return {
     passed: findings.length === 0,
     repairable: findings.length > 0 && findings.every((item) => item.code !== 'protected-file'),
     findings,
+    warnings,
     failures: findings.map((item) => `${item.file}:${item.line}:${item.column} ${item.message}`),
     creativeBytes: Buffer.byteLength(creativeSource), creativeSource,
   }

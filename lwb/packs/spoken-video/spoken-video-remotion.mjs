@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, statfs, symlink, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, statfs, symlink, unlink, writeFile } from 'node:fs/promises'
+import { readFileSync, realpathSync } from 'node:fs'
 import { dirname, extname, join, parse as parsePath, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -10,7 +11,7 @@ import { inspectAgentProject } from './spoken-video-preflight.mjs'
 
 const execFileAsync = promisify(execFile)
 const PACK_ROOT = dirname(fileURLToPath(import.meta.url))
-const APP_NODE_MODULES = resolve(PACK_ROOT, '../../..', 'node_modules')
+export const APP_NODE_MODULES = resolve(PACK_ROOT, '../../..', 'node_modules')
 // Windows 兼容：.bin/remotion 是 bash 脚本无法在 Windows spawn，改为用 node 直接跑 CLI 的 JS 入口
 const REMOTION_CLI = join(APP_NODE_MODULES, '@remotion', 'cli', 'remotion-cli.js')
 const AGENT_SKILL_ROOT = join(PACK_ROOT, 'skills')
@@ -254,8 +255,8 @@ function agentPackageSource() {
     type: 'module',
     scripts: {
       check: 'node scripts/preflight.mjs',
-      still: 'remotion still src/index.ts SpokenVideo outputs/check.png --props public/task-props.json --gl=swiftshader --overwrite',
-      render: 'remotion render src/index.ts SpokenVideo outputs/final_video.mp4 --props public/task-props.json --gl=swiftshader --overwrite',
+      still: 'remotion still src/index.ts SpokenVideo outputs/check.png --props public/task-props.json --overwrite',
+      render: 'remotion render src/index.ts SpokenVideo outputs/final_video.mp4 --props public/task-props.json --overwrite',
     },
   }
 }
@@ -362,7 +363,7 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
       backgroundMusic: bgmFileName ? { file: `inputs/${bgmFileName}`, name: backgroundMusic?.name || bgmFileName, volume: props.bgmVolume } : null,
     },
     skillPaths: { remotionBestPractices: 'skills/remotion-best-practices/SKILL.md', contentVideo: 'skills/content-video/SKILL.md' },
-    commands: { check: 'node scripts/preflight.mjs', still: 'node_modules/.bin/remotion still src/index.ts SpokenVideo outputs/check.png --props public/task-props.json --gl=swiftshader --overwrite', render: 'npm run render', output: 'outputs/final_video.mp4' },
+    commands: { check: 'node scripts/preflight.mjs', still: 'node_modules/.bin/remotion still src/index.ts SpokenVideo outputs/check.png --props public/task-props.json --overwrite', render: 'npm run render', output: 'outputs/final_video.mp4' },
     visualBrief,
   }
   await Promise.all([
@@ -383,9 +384,16 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
     'src/DeterministicSrtSubtitles.tsx': sha256(captions), 'public/task-props.json': sha256(json(props)),
   }
   const checker = await readFile(join(PACK_ROOT, 'spoken-video-preflight.mjs'), 'utf8')
+  const alignSource = await readFile(join(PACK_ROOT, 'spoken-video-subtitle-align.mjs'), 'utf8')
   await mkdir(join(projectDir, 'scripts'), { recursive: true, mode: 0o700 })
   await writeFile(join(projectDir, 'scripts/preflight.mjs'), checker, { mode: 0o600 })
   protectedFiles['scripts/preflight.mjs'] = sha256(checker)
+  // 预检快照相对导入对齐模块，两份必须同源分发。
+  await writeFile(join(projectDir, 'scripts/spoken-video-subtitle-align.mjs'), alignSource, { mode: 0o600 })
+  protectedFiles['scripts/spoken-video-subtitle-align.mjs'] = sha256(alignSource)
+  // 字幕阶段对齐守卫的结论随工件进入任务：applied=true 表示安装的 SRT 已按音频重对齐。
+  const alignmentGuard = subtitles?.diagnostics?.alignmentGuard
+  if (alignmentGuard) await writeFile(join(inputsDir, 'subtitles-align.json'), json(alignmentGuard), { encoding: 'utf8', mode: 0o600 })
   const manifest = json({ protected: protectedFiles })
   await writeFile(join(projectDir, 'preflight-manifest.json'), manifest, { mode: 0o600 })
   protectedFiles['preflight-manifest.json'] = sha256(manifest)
@@ -453,6 +461,16 @@ async function assertRenderDiskSpace({ projectDir, outputPath, durationSeconds }
   }
 }
 
+// 不要给 Remotion 传 --gl：配套的 Chrome 149 headless-shell 只接受
+// [(gl=egl-angle,angle=default)] 这一种实现，其余值（含 --gl=swiftshader）会被
+// 直接拒绝——GPU 进程每次初始化都退出再重启，日志里刷
+// "Requested GL implementation (gl=none,angle=none) not found" 与
+// "Failed to retrieve video device"。不传时 Chromium 用默认的 egl-angle，WebGL
+// 仍然可用（ANGLE/D3D11），且实测渲染帧与 --gl=swiftshader 逐字节相同（同一帧
+// PNG SHA256 一致，mse=0.00）而 200 帧渲染 5.3s vs 5.8s，不传更快。同理不要传
+// --gl=swangle：它让 WebGL 落到 SwiftShader（maxTextureSize 8192 而非 16384），
+// 同样 200 帧要 10-12s，慢一倍。
+//
 // Remotion 与系统 Chrome 的版本必须配对：4.0.522 期望 Chrome 149 的
 // chrome-headless-shell，走的是旧版无头模式。系统 Chrome（153+）已移除该模式，
 // 每帧退回到更重的合成路径。实测同一项目 2000 帧：headless-shell 37 秒、
@@ -464,54 +482,242 @@ async function assertRenderDiskSpace({ projectDir, outputPath, durationSeconds }
 // 字符，spawn 直接报 ENOENT（文件明明存在）。所以这里只接受长度安全的路径，
 // 找不到就退回系统 Chrome，绝不因为缺浏览器而让渲染失败。
 const MAX_EXECUTABLE_PATH = 200
+function sharedHeadlessShellPath() {
+  const exe = join(APP_NODE_MODULES, '.remotion', 'chrome-headless-shell', 'win64', 'chrome-headless-shell-win64', 'chrome-headless-shell.exe')
+  try {
+    // 必须先 realpath 化：任务工作区的 node_modules 含指向共享目录的符号链接，
+    // Windows 的 CreateProcessW spawn「symlink 路径下的 exe」会报 ENOENT（文件
+    // 明明存在，2026-10-01 实测）。realpath 落到共享目录真实路径后 spawn 正常。
+    const real = realpathSync(exe)
+    if (real.length <= MAX_EXECUTABLE_PATH) return real
+  } catch { /* 浏览器未安装时退回自选路径 */ }
+  return null
+}
 function browserExecutableArgs() {
-  // 优先用配套 headless-shell（实测快 5.6 倍），但必须路径够短。
+  // 优先用配套 headless-shell（实测快 5.6 倍）：环境变量显式指定 > 共享目录自动探测。
+  // 自动探测是必须的：Remotion 自选浏览器时把缓存目录解析到渲染 cwd 的
+  // node_modules/.remotion，任务工作区经 symlink spawn 必 ENOENT（同上）。
   const headlessShell = process.env.LWB_REMOTION_HEADLESS_SHELL?.trim()
   if (headlessShell && headlessShell.length <= MAX_EXECUTABLE_PATH) return ['--browser-executable', headlessShell]
+  const shared = sharedHeadlessShellPath()
+  if (shared) return ['--browser-executable', shared]
   // 退回系统 Chrome：慢，但一定能启动。
   const override = process.env.LWB_REMOTION_BROWSER_EXECUTABLE?.trim()
   if (override) return ['--browser-executable', override]
   return []
 }
 
+// Remotion 连接浏览器是固定 25 秒预算，与本次渲染内容无关：浏览器进程偶尔启动后
+// 始终不报告 DevTools 端点——stdout/stderr 一行都没有，临时 profile 里也没有
+// DevToolsActivePort——25 秒后整个 render 在出第一帧前就失败；紧接着重跑同一条
+// 命令必然成功（2026-10-01 实测两次失败均如此）。对这种明确的「启动即静默」签名
+// 做有限重试，其他渲染/编码错误必须立刻抛出，不能被重试掩盖。
+export const RENDER_BROWSER_ATTEMPTS = 3
+const RENDER_BROWSER_RETRY_DELAY_MS = 3000
+
+export function isBrowserLaunchFailure(message) {
+  const text = String(message || '')
+  return /Timed out after \d+ ms while trying to connect to the browser/u.test(text)
+    || /Failed to launch the browser process/u.test(text)
+}
+
+/** 把 `remotion compositions` 的失败输出归位成预检 finding（含 file:line）。 */
+export function parseRemotionEvalFailure(text) {
+  const raw = String(text || '').replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '')
+  const lines = raw.split('\n').map((line) => line.trim()).filter(Boolean)
+  const occurredAt = lines.findIndex((line) => line.startsWith('An error occurred'))
+  let headline = occurredAt >= 0 ? (lines[occurredAt + 1] || null) : null
+  if (!headline) headline = lines.find((line) => /^(?:Error|ReferenceError|TypeError|SyntaxError|RangeError|EvalError)\b/u.test(line)) || null
+  if (!headline) return null
+  const location = raw.match(/\bat (src\/[^\s:]+):(\d+)/u)
+  const summary = headline.replace(/\s+/gu, ' ').slice(0, 300)
+  const at = location ? `（${location[1]}:${location[2]}）` : ''
+  return {
+    code: 'runtime-eval',
+    file: location ? location[1] : 'src/CreativeVideo.tsx',
+    line: location ? Number(location[2]) : 1,
+    column: 1,
+    message: `工程无法求值：${summary}${at}。这是运行时错误（如定义前引用、坏导入），语法检查不报，但渲染必然失败。请先修复求值顺序再交付。`,
+  }
+}
+
+/**
+ * 真求值一遍入口：`remotion compositions` 会开一次浏览器执行 src/index.ts 读取
+ * composition 元数据（与渲染同款 --browser-executable），bundle 走缓存，单次十几秒。
+ * 静态预检抓不到「语法正确但一求值就炸」的代码（TDZ、循环引用、组件表先于定义），
+ * 这类错误必须在创作 Agent 的修复环内暴露，而不是等渲染命令失败把整轮报废。
+ * 返回 null 表示可求值，或环境本身起不来浏览器（那不是代码问题，交给渲染去报）。
+ *
+ * 注意它只覆盖**加载期**：compositions 只读元数据，不渲染任何一帧。组件体内写在
+ * 动画分支里的坏引用（`a4 is not defined` —— 某场景用了相邻场景的锚点常量）要等到
+ * 帧号落进那个场景的区间才会求值，这类 compositions 一律放行。补抽帧门见
+ * evaluateAgentProjectFrames。
+ */
+export async function evaluateAgentProjectComposition(workspace, { signal } = {}) {
+  signal?.throwIfAborted()
+  try {
+    await execFileAsync(process.execPath, [REMOTION_CLI,
+      'compositions', join('src', 'index.ts'),
+      '--props', join('public', 'task-props.json'), ...browserExecutableArgs(),
+    ], { cwd: workspace.projectDir, timeout: 180 * 1000, maxBuffer: 1024 * 1024 * 8 })
+    return null
+  } catch (error) {
+    signal?.throwIfAborted()
+    const detail = `${error.stdout || ''}\n${error.stderr || ''}\n${error.message}`
+    if (isBrowserLaunchFailure(detail)) return null
+    return parseRemotionEvalFailure(detail)
+  }
+}
+
+/**
+ * 抽帧求值门：把成片按场景切段，每段渲染一帧，把「只有落到那段才会求值」的坏代码
+ * 逼出来。2026-10-08 实测踩坑：`SceneFounders` 里用了 `a4` 却没声明（复制相邻场景时
+ * 漏掉锚点常量），compositions 正常通过、渲染到该场景区间立刻
+ * `ReferenceError: a4 is not defined`，整轮 40 分钟报废。
+ *
+ * 抽帧而非全片：每帧都要开一次浏览器上下文，全片上千帧不现实；按场景中点抽样既能
+ * 覆盖每个组件体，又把成本压在一分钟量级。场景边界从源码里的 `F(秒)` 锚点读，
+ * 读不到就退化为均匀抽样（宁可多抽几帧，也不要漏掉整段）。
+ */
+export async function evaluateAgentProjectFrames(workspace, { signal } = {}) {
+  signal?.throwIfAborted()
+  const projectDir = workspace.projectDir
+  const props = readTaskProps(projectDir)
+  const durationSeconds = Number(props?.durationSeconds) || 0
+  if (!(durationSeconds > 0)) return null
+  const fps = 30
+  const totalFrames = Math.max(1, Math.ceil((durationSeconds + 0.1) * fps))
+  const frames = sampleFrameNumbers(projectDir, totalFrames)
+  if (!frames.length) return null
+  const scratch = join(projectDir, 'outputs', '.preflight-frames')
+  await mkdir(scratch, { recursive: true })
+  try {
+    for (const frame of frames) {
+      signal?.throwIfAborted()
+      const target = join(scratch, `f${frame}.png`)
+      try {
+        await execFileAsync(process.execPath, [REMOTION_CLI,
+          'still', join('src', 'index.ts'), 'SpokenVideo', target,
+          `--frame=${frame}`,
+          '--props', join('public', 'task-props.json'), ...browserExecutableArgs(),
+        ], { cwd: projectDir, timeout: 120 * 1000, maxBuffer: 1024 * 1024 * 8 })
+      } catch (error) {
+        signal?.throwIfAborted()
+        const detail = `${error.stdout || ''}\n${error.stderr || ''}\n${error.message}`
+        // 浏览器起不来是环境问题，不伪造 finding 去浪费修复轮（与 compositions 门一致）。
+        if (isBrowserLaunchFailure(detail)) return null
+        const parsed = parseRemotionEvalFailure(detail)
+        if (!parsed) return null
+        return {
+          ...parsed,
+          message: `工程在第 ${frame} 帧（${(frame / fps).toFixed(1)} 秒处）渲染失败：${parsed.message.replace(/^工程无法求值：/u, '')}这一帧落在某个场景区间内，说明该场景的组件体里有只有渲染到才会求值的坏引用。请检查该场景是否用了未声明的锚点常量或变量。`,
+        }
+      }
+    }
+    return null
+  } finally {
+    await rm(scratch, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+function readTaskProps(projectDir) {
+  try { return JSON.parse(readFileSync(join(projectDir, 'public', 'task-props.json'), 'utf8')) } catch { return null }
+}
+
+/**
+ * 从源码里的 `F(秒)` 时间锚点推断场景区间，取每个区间的中点抽一帧。
+ *
+ * 不能简单地把相邻锚点两两配对：同一场景里常有 0.2s 级的次级动画锚点
+ * （`F(0)` 是入点、`F(0.2)` 是入场结束），那样会把它们切成一个独立「场景」，
+ * 既抽到无意义的帧，又在末尾多出一段（2026-10-08 单测实测多抽 2 帧）。
+ * 正确做法：先按「场景至少 0.5 秒」的阈值把密集锚点并成场景起点，再取相邻起点
+ * 之间的中点。认不出锚点就按每 5 秒一帧均匀抽样——覆盖不完整也比只验加载期强。
+ */
+export function sampleFrameNumbers(projectDir, totalFrames) {
+  const fps = 30
+  let source = ''
+  try { source = readFileSync(join(projectDir, 'src', 'CreativeVideo.tsx'), 'utf8') } catch {}
+  const seconds = [...source.matchAll(/\bF\((\d+(?:\.\d+)?)\)/gu)].map((m) => Number(m[1]))
+  const anchors = [...new Set(seconds)].filter((s) => Number.isFinite(s) && s >= 0).sort((a, b) => a - b)
+  if (anchors.length >= 2) {
+    // 场景起点：第一个锚点，以及那些离上一个起点足够远的锚点。
+    const starts = [anchors[0]]
+    for (const value of anchors.slice(1)) {
+      if (value - starts[starts.length - 1] >= 0.5) starts.push(value)
+    }
+    if (starts.length >= 2) {
+      const frames = []
+      for (let i = 0; i + 1 < starts.length; i += 1) {
+        const mid = Math.round(((starts[i] + starts[i + 1]) / 2) * fps)
+        frames.push(Math.max(0, Math.min(totalFrames - 1, mid)))
+      }
+      if (frames.length) return [...new Set(frames)]
+    }
+  }
+  const fallback = []
+  for (let second = 2; second * fps < totalFrames; second += 5) fallback.push(Math.round(second * fps))
+  return fallback
+}
+
+function waitBeforeRetry(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const finish = () => { signal?.removeEventListener('abort', onAbort); resolve() }
+    const onAbort = () => { clearTimeout(timer); reject(signal.reason ?? new Error('渲染已取消。')) }
+    const timer = setTimeout(finish, ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
 /** Render the already-authored Agent project through the locally pinned Remotion CLI. */
 export async function renderSpokenVideoAgentProject(workspace, { signal, onProgress } = {}) {
   signal?.throwIfAborted()
   const temporaryOutput = `${workspace.outputPath}.partial.mp4`
+  const renderLogPath = join(workspace.projectDir, 'outputs', 'render.log')
   const encoding = remotionEncodingSettings(workspace.durationSeconds)
   // Do not abort only the CLI parent and leave renderer descendants writing.
   // An in-progress render keeps its lifecycle lease until the CLI settles;
   // the host's stop deadline blocks data maintenance if that takes too long.
   await assertRenderDiskSpace({ projectDir: workspace.projectDir, outputPath: temporaryOutput, durationSeconds: workspace.durationSeconds })
-  const rendering = execFileAsync(process.execPath, [REMOTION_CLI,
-    'render', join('src', 'index.ts'), 'SpokenVideo', temporaryOutput,
-    '--props', join('public', 'task-props.json'), '--gl=swiftshader', '--overwrite', ...browserExecutableArgs(),
-    '--codec', encoding.codec, '--audio-bitrate', encoding.audioBitrate,
-    '--video-bitrate', encoding.videoBitrate, '--x264-preset', encoding.x264Preset,
-    // 让预编码走显卡（NVENC），把 CPU 留给每帧的 DOM 渲染；无可用硬件编码器时
-    // 自动退回 libx264（if-possible 不会让渲染失败）。
-    '--hardware-acceleration', 'if-possible',
-  ], { cwd: workspace.projectDir, timeout: 30 * 60 * 1000, maxBuffer: 1024 * 1024 * 24 })
-  let pending = ''; let lastProgressAt = 0; let progressTail = Promise.resolve()
-  const flushProgress = () => {
-    const text = pending.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '').trim(); pending = ''
-    if (text && onProgress) progressTail = progressTail.then(() => onProgress(text.slice(-1600))).catch(() => {})
-    lastProgressAt = Date.now()
+  for (let attempt = 1; ; attempt += 1) {
+    signal?.throwIfAborted()
+    if (attempt > 1) await waitBeforeRetry(RENDER_BROWSER_RETRY_DELAY_MS, signal)
+    const rendering = execFileAsync(process.execPath, [REMOTION_CLI,
+      'render', join('src', 'index.ts'), 'SpokenVideo', temporaryOutput,
+      '--props', join('public', 'task-props.json'), '--overwrite', ...browserExecutableArgs(),
+      '--codec', encoding.codec, '--audio-bitrate', encoding.audioBitrate,
+      '--video-bitrate', encoding.videoBitrate, '--x264-preset', encoding.x264Preset,
+      // 让预编码走显卡（NVENC），把 CPU 留给每帧的 DOM 渲染；无可用硬件编码器时
+      // 自动退回 libx264（if-possible 不会让渲染失败）。
+      '--hardware-acceleration', 'if-possible',
+    ], { cwd: workspace.projectDir, timeout: 30 * 60 * 1000, maxBuffer: 1024 * 1024 * 24 })
+    let pending = ''; let lastProgressAt = 0; let progressTail = Promise.resolve()
+    const flushProgress = () => {
+      const text = pending.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '').trim(); pending = ''
+      if (text && onProgress) progressTail = progressTail.then(() => onProgress(text.slice(-1600))).catch(() => {})
+      lastProgressAt = Date.now()
+    }
+    const observe = (chunk) => { pending += String(chunk); if (Date.now() - lastProgressAt > 5000) flushProgress() }
+    rendering.child?.stdout?.on('data', observe)
+    rendering.child?.stderr?.on('data', observe)
+    let failure = null
+    try {
+      const output = await rendering
+      await writeFile(renderLogPath, `${attempt > 1 ? `浏览器启动失败后重试成功（第 ${attempt} 次尝试）。\n` : ''}${output.stdout || ''}\n${output.stderr || ''}`, 'utf8')
+    } catch (error) {
+      failure = error
+      const detail = `${error.stdout || ''}\n${error.stderr || ''}\n${error.message}`
+      await writeFile(renderLogPath, `${attempt > 1 ? `浏览器启动失败已重试 ${attempt - 1} 次。\n` : ''}${detail}`, 'utf8').catch(() => {})
+    } finally { flushProgress(); await progressTail }
+    signal?.throwIfAborted()
+    if (!failure) {
+      if (!await exists(temporaryOutput)) throw new Error('Remotion 没有生成视频文件。')
+      await rename(temporaryOutput, workspace.outputPath)
+      return workspace.outputPath
+    }
+    const retryable = attempt < RENDER_BROWSER_ATTEMPTS && isBrowserLaunchFailure(`${failure.message}\n${failure.stderr || ''}`)
+    if (!retryable) throw failure
+    onProgress?.(`浏览器未能在 25 秒内就绪（第 ${attempt}/${RENDER_BROWSER_ATTEMPTS} 次尝试），正在重试…`)
   }
-  const observe = (chunk) => { pending += String(chunk); if (Date.now() - lastProgressAt > 5000) flushProgress() }
-  rendering.child?.stdout?.on('data', observe)
-  rendering.child?.stderr?.on('data', observe)
-  try {
-    const output = await rendering
-    await writeFile(join(workspace.projectDir, 'outputs', 'render.log'), `${output.stdout || ''}\n${output.stderr || ''}`, 'utf8')
-  } catch (error) {
-    await writeFile(join(workspace.projectDir, 'outputs', 'render.log'), `${error.stdout || ''}\n${error.stderr || ''}\n${error.message}`, 'utf8').catch(() => {})
-    throw error
-  } finally { flushProgress(); await progressTail }
-  signal?.throwIfAborted()
-  if (!await exists(temporaryOutput)) throw new Error('Remotion 没有生成视频文件。')
-  await rename(temporaryOutput, workspace.outputPath)
-  return workspace.outputPath
 }
 
 async function writeProject(projectDir) {
@@ -564,7 +770,7 @@ export async function renderSpokenVideoWithRemotion({ projectRoot, runId, audioP
   const temporaryOutput = `${outputPath}.partial.mp4`
   await execFileAsync(process.execPath, [REMOTION_CLI,
     'render', join('src', 'index.ts'), 'SpokenVideo', temporaryOutput,
-    '--props', propsPath, '--gl=swiftshader', '--overwrite', ...browserExecutableArgs(),
+    '--props', propsPath, '--overwrite', ...browserExecutableArgs(),
   ], { cwd: projectDir, timeout: 15 * 60 * 1000, maxBuffer: 1024 * 1024 * 12 })
   if (!await exists(temporaryOutput)) throw new Error('Remotion 没有生成视频文件。')
   await rename(temporaryOutput, outputPath)

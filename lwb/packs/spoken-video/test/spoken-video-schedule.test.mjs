@@ -7,6 +7,7 @@ import {
   approvesScript,
   DEPTH_STEPS,
   emptyScheduleFile,
+  finalStep,
   isoWeekday,
   missedSlot,
   nextRunAt,
@@ -237,13 +238,16 @@ test('scheduleFile drops one corrupt run but keeps the rest of the file readable
  * A scripted pipeline double. Each stage resolves after `advance` polls so the
  * orchestrator's sequencing, not the real media chain, is what gets asserted.
  */
-function fakeHosts({ depth = 'packaging', perRunLimit = 1, failStep = null, neverDone = null, candidates = 2 } = {}) {
+function fakeHosts({ depth = 'packaging', perRunLimit = 1, failStep = null, neverDone = null, candidates = 2, awaitSubmit = 'confirm', missingRecordReads = 0 } = {}) {
   const calls = []
   const record = (name, value) => { calls.push({ name, ...(value || {}) }); return value }
   const projectIdFor = (index) => `1111111${index}-1111-4111-8111-111111111111`.slice(0, 36)
   const generationId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
   const projects = new Map()
   let pollCounts = new Map()
+  // 模拟 Windows 上「刚写完的记录在 rename 落地前读不到」：前 N 次查询按未找到抛错。
+  // 2026-10-08 实测写稿落盘后 102ms 就被读，于是整轮报废——见 #poll 的说明。
+  let missingLeft = missingRecordReads
 
   const candidateList = Array.from({ length: candidates }, (_, index) => ({
     id: `ddddddd${index}-dddd-4ddd-8ddd-dddddddddddd`.slice(0, 36),
@@ -293,6 +297,7 @@ function fakeHosts({ depth = 'packaging', perRunLimit = 1, failStep = null, neve
       return { id }
     },
     async scriptGenerationStatus(currentAgent, { id }) {
+      if (missingLeft > 0) { missingLeft -= 1; throw new Error('写稿生成记录不存在。') }
       const done = neverDone === 'script' ? false : settle(id, 'script')
       return { id, status: done ? 'completed' : 'running', error: done && failStep === 'script' ? '写稿失败：测试' : null }
     },
@@ -363,6 +368,28 @@ function fakeHosts({ depth = 'packaging', perRunLimit = 1, failStep = null, neve
     },
   }
 
+  // The sibling publisher pack, faked at the exact surface #stagePublish uses.
+  const publisher = {
+    async listAccounts() {
+      return [{ id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', label: 'AI明白局·抖音', platform: 'douyin', platformLabel: '抖音', status: 'active', adapterReady: true }]
+    },
+    async startPublish(request) {
+      record('startPublish', { request })
+      return { id: `publish:${request.projectId}` }
+    },
+    async job(jobId) {
+      const done = neverDone === 'publish' ? false : settle(jobId, 'publish')
+      const failed = done && failStep === 'publish'
+      return {
+        id: jobId,
+        status: failed ? 'failed' : done ? (awaitSubmit === 'confirm' ? 'awaiting-confirm' : 'succeeded') : 'running',
+        phase: done ? 'done' : 'upload',
+        error: failed ? '平台投递失败：测试' : null,
+        proof: { remoteUrl: done && !failed && awaitSubmit === 'auto' ? 'https://creator.douyin.com/creator-micro/content/manage' : null },
+      }
+    },
+  }
+
   const disposed = []
   const created = []
   const agents = {
@@ -378,7 +405,7 @@ function fakeHosts({ depth = 'packaging', perRunLimit = 1, failStep = null, neve
   const sessionTitle = { rename(session, title) { renamed.push(title); return {} } }
 
   return {
-    calls, projects, created, disposed, renamed, candidateList, projectIdFor,
+    calls, projects, created, disposed, renamed, candidateList, projectIdFor, publisher,
     reset: () => { pollCounts = new Map() },
     hosts: { content, projects: store, media, publish, agents, agentPresets, agentDefaultModel, sessionTitle },
   }
@@ -387,8 +414,16 @@ function fakeHosts({ depth = 'packaging', perRunLimit = 1, failStep = null, neve
 async function setup(t, options = {}) {
   const { root, cwd } = await workspace(t)
   const fake = fakeHosts(options)
+  // The host resolves the sibling publisher pack through `ctx.get`; wire the
+  // fake here so a publish-depth round exercises the real dispatch path. Tests
+  // that need the pack absent overwrite `host.ctx` themselves.
+  const ctx = options.ctx === null ? null : {
+    get(name) { return name === 'publisherHost' ? fake.publisher : null },
+    ...options.ctx,
+  }
   const host = new SpokenVideoScheduleHost({
     ...fake.hosts,
+    ctx,
     workspacePath: cwd,
     pollIntervalMs: 2,
     tickIntervalMs: 60_000,
@@ -756,6 +791,7 @@ test('runtimeStatus warns about a missing TTS credential or renderer before the 
   assert.equal(ready.tts.credential, true)
   assert.equal(ready.coverImage, true)
   assert.deepEqual(ready.blockers, [])
+  assert.equal(ready.publish.available, true)
 
   host.media.status = async () => ({ ttsConfigured: true, connection: { provider: 'bailian', providers: { bailian: { configured: false, source: null, writable: true } } }, renderers: { remotion: false }, providers: { legacy: { configured: false } } })
   const degraded = await host.runtimeStatus()
@@ -764,7 +800,7 @@ test('runtimeStatus warns about a missing TTS credential or renderer before the 
   const messages = degraded.blockers.map((item) => item.message).join(' ')
   assert.match(messages, /TTS 凭据/u)
   assert.match(messages, /Remotion 不可用/u)
-  assert.ok(degraded.blockers.every((item) => item.depth === 'video'), 'a topic-only task is unaffected')
+  assert.ok(degraded.blockers.every((item) => item.depth === 'video'), 'a topic-only task is unaffected by the media chain')
 
   // Regression guard: `status().providers[p]` nests the credential one level
   // deeper than `status().connection.providers[p]`, which IS the credential
@@ -779,6 +815,253 @@ test('runtimeStatus warns about a missing TTS credential or renderer before the 
   const split = await host.runtimeStatus()
   assert.equal(split.tts.credential, true, 'reads connection.providers[p].configured, not the nested providers[p].credential')
   assert.deepEqual(split.blockers, [])
+})
+
+test('the publish blocker appears only when the publisher pack is not loaded', async (t) => {
+  const { host } = await setup(t)
+  host.ctx = { get: () => null }
+  const status = await host.runtimeStatus()
+  assert.equal(status.publish.available, false)
+  // Tagged with the publish depth so the form can hide it from a task that
+  // never reaches that step.
+  assert.deepEqual(status.blockers, [{ depth: 'publish', message: '未加载「发布与账号管理」能力包，无法投递到平台。' }])
+})
+
+test('runtimeStatus reports publish targets and names the reason none are usable', async (t) => {
+  const { host, fake } = await setup(t)
+  fake.publisher.listAccounts = async () => [
+    { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', label: '已登录', platform: 'douyin', platformLabel: '抖音', status: 'active', adapterReady: true },
+    { id: 'ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee', label: '未登录', platform: 'douyin', platformLabel: '抖音', status: 'expired', adapterReady: true },
+    { id: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee', label: '未适配', platform: 'wechat', platformLabel: '视频号', status: 'active', adapterReady: false },
+  ]
+  const mixed = await host.runtimeStatus()
+  assert.equal(mixed.publish.available, true)
+  // Only platforms with a working adapter are offered; the unadapted 视频号
+  // account is not a target the form could ever deliver to.
+  assert.deepEqual(mixed.publish.accounts.map((item) => item.label), ['已登录', '未登录'])
+
+  // Nothing signed in on an adapted platform: the form must say so rather than
+  // letting the round render a video and then fail at the handover.
+  fake.publisher.listAccounts = async () => [
+    { id: 'ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee', label: '未登录', platform: 'douyin', platformLabel: '抖音', status: 'expired', adapterReady: true },
+    { id: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee', label: '未适配', platform: 'wechat', platformLabel: '视频号', status: 'active', adapterReady: false },
+  ]
+  const unusable = await host.runtimeStatus()
+  assert.equal(unusable.publish.available, false)
+  assert.match(unusable.publish.reason, /没有已登录的平台账号/u)
+  assert.deepEqual(unusable.blockers, [{ depth: 'publish', message: unusable.publish.reason }])
+})
+
+test('a publish task whose platform account vanished is disabled on read', async (t) => {
+  const { host, currentAgent, fake, file } = await setup(t)
+  const created = await createTask(host, currentAgent, {
+    depth: 'publish',
+    publish: { accountIds: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], submitMode: 'confirm' },
+  })
+  assert.equal(created.depth, 'publish')
+  assert.deepEqual(created.publish.accountIds, ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'])
+
+  const stored = JSON.parse(await readFile(file, 'utf8'))
+  assert.equal(stored.schedules[0].publish.accountIds.length, 1)
+  // The account is gone on the next read; the task must disable itself with a
+  // reason instead of failing every round after rendering a video.
+  fake.publisher.listAccounts = async () => []
+  const reloaded = await host.listSchedules(currentAgent)
+  const task = reloaded.schedules.find((item) => item.id === created.id)
+  assert.equal(task.enabled, false)
+  assert.match(task.disabledReason, /发布账号已被删除/u)
+})
+
+test('an unloaded publisher pack does not disable a publish task on disk', async (t) => {
+  const { host, currentAgent } = await setup(t)
+  const created = await createTask(host, currentAgent, {
+    depth: 'publish',
+    publish: { accountIds: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], submitMode: 'confirm' },
+  })
+  // Unloading the pack means the account list cannot be judged, not that the
+  // account was deleted. Permanently switching the task off here would leave it
+  // mysteriously disabled after the pack is loaded again.
+  host.ctx = { get: () => null }
+  const reloaded = await host.listSchedules(currentAgent)
+  const task = reloaded.schedules.find((item) => item.id === created.id)
+  assert.equal(task.enabled, true)
+  assert.equal(task.disabledReason, null)
+  assert.deepEqual(task.publish.accountIds, ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'])
+})
+
+/* ------------------------------- publish stage ---------------------------- */
+
+test('a publish round hands the cut over and reports it as awaiting, not published', async (t) => {
+  const { host, currentAgent, fake } = await setup(t, { awaitSubmit: 'confirm' })
+  const created = await createTask(host, currentAgent, {
+    depth: 'publish',
+    publish: { accountIds: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], submitMode: 'confirm' },
+  })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+
+  assert.equal(run.status, 'completed')
+  const handed = fake.calls.filter((call) => call.name === 'startPublish')
+  assert.equal(handed.length, 1)
+  // Confirm mode must never authorise the platform's own submit button.
+  assert.equal(handed[0].request.submitMode, 'confirm')
+  assert.equal(handed[0].request.confirmAuto, false)
+  assert.equal(handed[0].request.trigger, 'schedule')
+
+  const item = run.items[0]
+  assert.equal(item.publishState, 'awaiting')
+  assert.match(item.publishAccount, /抖音/u)
+  // The closing message must not claim a publish a person still has to finish.
+  assert.match(run.message, /等待在浏览器窗口确认发布/u)
+  assert.doesNotMatch(run.message, /已发布/u)
+})
+
+test('an auto-submit publish round records the submitted state and the work link', async (t) => {
+  const { host, currentAgent, fake } = await setup(t, { awaitSubmit: 'auto' })
+  const created = await createTask(host, currentAgent, {
+    depth: 'publish',
+    publish: { accountIds: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], submitMode: 'auto' },
+  })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+
+  const handed = fake.calls.find((call) => call.name === 'startPublish')
+  assert.equal(handed.request.submitMode, 'auto')
+  // An unattended auto-submit is only legal because the depth authorised it.
+  assert.equal(handed.request.confirmAuto, true)
+  assert.equal(run.items[0].publishState, 'submitted')
+  assert.match(run.items[0].publishUrl, /creator\.douyin\.com/u)
+})
+
+test('a publish round fails the item when the platform handover fails', async (t) => {
+  const { host, currentAgent } = await setup(t, { failStep: 'publish' })
+  const created = await createTask(host, currentAgent, {
+    depth: 'publish',
+    publish: { accountIds: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], submitMode: 'confirm' },
+  })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+
+  assert.equal(run.status, 'failed')
+  assert.equal(run.items[0].publishState, 'failed')
+  assert.match(run.items[0].error, /平台投递失败/u)
+})
+
+test('a publish round without a usable platform account fails before rendering anything', async (t) => {
+  const { host, currentAgent, fake } = await setup(t)
+  // The fake publisher reports only an expired account.
+  fake.publisher.listAccounts = async () => [
+    { id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', label: '过期账号', platform: 'douyin', platformLabel: '抖音', status: 'expired', adapterReady: true },
+  ]
+  const created = await createTask(host, currentAgent, {
+    depth: 'publish',
+    publish: { accountIds: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], submitMode: 'confirm' },
+  })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+
+  assert.equal(run.status, 'failed')
+  assert.match(run.items[0].error, /发布账号均不可用/u)
+  assert.equal(fake.calls.filter((call) => call.name === 'startPublish').length, 0, 'no handover is attempted')
+})
+
+test('a publish round without the publisher pack fails with an actionable message', async (t) => {
+  const { host, currentAgent } = await setup(t)
+  // Simulate the pack not being loaded: the lazy lookup returns nothing.
+  host.ctx = { get: () => null }
+  const created = await createTask(host, currentAgent, {
+    depth: 'publish',
+    publish: { accountIds: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], submitMode: 'confirm' },
+  })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+
+  assert.equal(run.status, 'failed')
+  assert.match(run.items[0].error, /未加载「发布与账号管理」能力包/u)
+})
+
+test('the publish step runs after packaging and both appear in the stage lifeline', async (t) => {
+  const { host, currentAgent } = await setup(t)
+  const created = await createTask(host, currentAgent, {
+    depth: 'publish',
+    publish: { accountIds: ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'], submitMode: 'confirm' },
+  })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+
+  assert.deepEqual(
+    run.items[0].stages.map((stage) => stage.step),
+    ['topic', 'script', 'approve', 'voiceover', 'subtitles', 'video', 'packaging', 'publish'],
+  )
+  assert.equal(run.items[0].stages.at(-1).status, 'done')
+  assert.equal(run.items[0].reachedStep, 'publish')
+})
+
+test('stepsForRun expands the publish depth end to end', () => {
+  assert.deepEqual(stepsForRun('publish'), DEPTH_STEPS.publish)
+  assert.deepEqual(stepsForRun('publish', false), ['topic', 'script', 'approve', 'voiceover', 'video', 'packaging', 'publish'])
+  assert.equal(finalStep('publish'), 'publish')
+  assert.equal(approvesScript('publish'), true)
+})
+
+test('the schedule schema carries the publish target and drops an unusable one', () => {
+  const base = {
+    schemaVersion: 3,
+    schedules: [{
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      name: '投递任务', enabled: true, accountId: null, days: [1], time: '21:00', angle: null,
+      sources: { sourceIds: ['baidu'], platforms: [], excludeSignalIds: [] },
+      depth: 'publish', perRunLimit: 1,
+      production: { orientation: 'landscape', subtitleEnabled: true, scriptTier: 'medium', voice: null, visualBrief: null },
+      publish: { accountIds: ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'], submitMode: 'auto' },
+      disabledReason: null, createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z', lastRunAt: null,
+    }],
+    runs: [],
+  }
+  const kept = scheduleFile(structuredClone(base), { validSourceIds: new Set(['baidu']), validAccountIds: new Set(), validPublishAccountIds: new Set(['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb']) })
+  assert.equal(kept.data.schedules[0].enabled, true)
+  assert.equal(kept.data.schedules[0].publish.submitMode, 'auto')
+  assert.equal(kept.changed, false)
+
+  const dropped = scheduleFile(structuredClone(base), { validSourceIds: new Set(['baidu']), validAccountIds: new Set(), validPublishAccountIds: new Set() })
+  assert.equal(dropped.data.schedules[0].enabled, false)
+  assert.match(dropped.data.schedules[0].disabledReason, /发布账号已被删除/u)
+  assert.deepEqual(dropped.data.schedules[0].publish.accountIds, [])
+  assert.equal(dropped.changed, true)
+
+  // Existence is what is judged here, not current usability: an account that is
+  // merely signed out must survive, because that is fixable without editing the
+  // task. Only the account id being absent counts as deleted.
+  const existsButSignedOut = scheduleFile(structuredClone(base), { validSourceIds: new Set(['baidu']), validAccountIds: new Set(), validPublishAccountIds: new Set(['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb']) })
+  assert.equal(existsButSignedOut.data.schedules[0].enabled, true)
+  assert.equal(existsButSignedOut.changed, false)
+
+  // `null` means the publisher pack is not loaded, so the target cannot be
+  // judged: keep the selection and leave the task enabled.
+  const unjudgeable = scheduleFile(structuredClone(base), { validSourceIds: new Set(['baidu']), validAccountIds: new Set(), validPublishAccountIds: null })
+  assert.equal(unjudgeable.data.schedules[0].enabled, true)
+  assert.deepEqual(unjudgeable.data.schedules[0].publish.accountIds, ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'])
+  assert.equal(unjudgeable.changed, false)
+
+  // A task with no publish target at all keeps working exactly as before.
+  const legacy = structuredClone(base)
+  delete legacy.schedules[0].publish
+  const withoutTarget = scheduleFile(legacy, { validSourceIds: new Set(['baidu']), validAccountIds: new Set(), validPublishAccountIds: new Set() })
+  assert.equal(withoutTarget.data.schedules[0].publish, null)
+  assert.equal(withoutTarget.data.schedules[0].enabled, true)
+})
+
+test('an unknown submit mode falls back to the safe confirm handover', () => {
+  const parsed = parseScheduleRequest({
+    name: 'x', days: [1], time: '21:00', depth: 'publish',
+    sources: { sourceIds: ['baidu'] },
+    publish: { accountIds: ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'], submitMode: 'whatever' },
+  })
+  assert.equal(parsed.publish.submitMode, 'confirm')
+  assert.throws(() => parseScheduleRequest({
+    name: 'x', days: [1], time: '21:00', depth: 'publish',
+    sources: { sourceIds: ['baidu'] }, publish: { accountIds: ['not-a-uuid'] },
+  }), /发布账号标识/u)
 })
 
 test('the scheduler starts due rounds detached and refuses a second one in the same workspace', async (t) => {
@@ -955,4 +1238,98 @@ test('run history retains more than 100 rounds and filters before paging lightwe
   await assert.rejects(host.listScheduleRuns(currentAgent, { offset: -1 }), /分页参数/u)
   await assert.rejects(host.listScheduleRuns(currentAgent, { limit: 51 }), /分页参数/u)
   await assert.rejects(host.listScheduleRuns(currentAgent, { status: 'invalid' }), /状态筛选/u)
+})
+
+test('a stage record that is briefly unreadable is retried instead of failing the round', async (t) => {
+  // 2026-10-08 实测：稿件 11:17:04.846 落盘成功（2197 字、completed），调度器 102ms
+  // 后查询却拿到「写稿生成记录不存在」，整轮报废。Windows 上 rename 目标被句柄打开
+  // 会 EPERM 重试，落地前那一瞬读者仍读到旧内容——查询方必须把它当未就绪，而非失败。
+  const { host, currentAgent } = await setup(t, { depth: 'script', missingRecordReads: 3 })
+  const created = await createTask(host, currentAgent, { depth: 'script' })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+
+  assert.equal(run.status, 'completed', 'a transient unreadable record must not fail the round')
+  assert.deepEqual(run.items[0].stages.map((stage) => stage.step), ['topic', 'script'])
+  assert.equal(run.items[0].stages[1].status, 'done')
+  assert.ok(run.items[0].scriptChars > 0, 'the script really was read after the record became visible')
+})
+
+test('a record that stays unreadable fails fast instead of burning the whole stage timeout', async (t) => {
+  // 2026-10-08 15:47 实测：写稿 15:50 就完成了，但并发任务把终态推过 40 条上限，
+  // 正在被本轮引用的记录被归一化 slice 掉 —— 此后每次查询都报「写稿生成记录不存在」。
+  // 那种「读不到」是永久性的，重试到 15 分钟超时纯属浪费（那一轮就白等了 15 分钟）。
+  // 现在按有界预算重试：前几次当作竞态兜底，超过预算立刻带着可执行的原因失败。
+  const { host, currentAgent } = await setup(t, { depth: 'script', missingRecordReads: 10_000 })
+  const created = await createTask(host, currentAgent, { depth: 'script' })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+
+  let run = null
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    run = (await host.scheduleRun(currentAgent, { runId })).run
+    if (run.status !== 'running') break
+  }
+  assert.equal(run.status, 'failed', 'a permanently unreadable record ends the round')
+  assert.match(run.error, /仍读不到/u, 'the error names the real cause instead of timing out silently')
+  assert.match(run.error, /重新执行本轮/u, 'and tells the operator what to do next')
+})
+
+test('a finished round can be deleted and lastRunAt falls back to the previous one', async (t) => {
+  const { cwd, file, fake } = await setup(t)
+  const scheduleId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const older = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  const newest = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+  await writeFile(file, JSON.stringify({
+    schemaVersion: SCHEDULE_SCHEMA,
+    schedules: [{ ...parseScheduleRequest({ name: '任务', days: [5], time: '21:00', depth: 'video', sources: { sourceIds: ['baidu'] } }), id: scheduleId, disabledReason: null, createdAt: at('2026-09-01'), updatedAt: at('2026-09-01'), lastRunAt: at('2026-09-11T21:00:00') }],
+    runs: [
+      { id: older, scheduleId, status: 'completed', trigger: 'automatic', triggeredAt: at('2026-09-10T21:00:00'), completedAt: at('2026-09-10T21:10:00'), elapsedMs: 600_000, sessionId: null, depth: 'video', step: 'video', message: '完成', error: null, refs: { topicGenerationId: null, scriptGenerationIds: [], mediaRunIds: [], publishTaskIds: [] }, items: [] },
+      { id: newest, scheduleId, status: 'failed', trigger: 'automatic', triggeredAt: at('2026-09-11T21:00:00'), completedAt: at('2026-09-11T21:05:00'), elapsedMs: 300_000, sessionId: null, depth: 'video', step: 'video', message: '失败', error: '渲染失败', refs: { topicGenerationId: null, scriptGenerationIds: [], mediaRunIds: [], publishTaskIds: [] }, items: [] },
+    ],
+  }))
+
+  const host = new SpokenVideoScheduleHost({ ...fake.hosts, workspacePath: cwd, pollIntervalMs: 2, tickIntervalMs: 60_000 })
+  t.after(() => host.stopAll())
+  const currentAgent = agent(cwd)
+
+  const result = await host.deleteScheduleRun(currentAgent, { runId: newest })
+  assert.equal(result.deleted, newest)
+  const data = JSON.parse(await readFile(file, 'utf8'))
+  assert.deepEqual(data.runs.map((run) => run.id), [older])
+  assert.equal(data.schedules[0].lastRunAt, at('2026-09-10T21:00:00'), 'lastRunAt rolls back to the newest surviving round')
+  await assert.rejects(host.deleteScheduleRun(currentAgent, { runId: newest }), /执行记录不存在/u)
+})
+
+test('deleting the only round clears lastRunAt instead of leaving a dangling stamp', async (t) => {
+  const { cwd, file, fake } = await setup(t)
+  const scheduleId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const only = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+  await writeFile(file, JSON.stringify({
+    schemaVersion: SCHEDULE_SCHEMA,
+    schedules: [{ ...parseScheduleRequest({ name: '任务', days: [5], time: '21:00', depth: 'topic', sources: { sourceIds: ['baidu'] } }), id: scheduleId, disabledReason: null, createdAt: at('2026-09-01'), updatedAt: at('2026-09-01'), lastRunAt: at('2026-09-11T21:00:00') }],
+    runs: [{ id: only, scheduleId, status: 'failed', trigger: 'automatic', triggeredAt: at('2026-09-11T21:00:00'), completedAt: at('2026-09-11T21:05:00'), elapsedMs: 300_000, sessionId: null, depth: 'topic', step: 'topic', message: '失败', error: '写稿失败', refs: { topicGenerationId: null, scriptGenerationIds: [], mediaRunIds: [], publishTaskIds: [] }, items: [] }],
+  }))
+
+  const host = new SpokenVideoScheduleHost({ ...fake.hosts, workspacePath: cwd, pollIntervalMs: 2, tickIntervalMs: 60_000 })
+  t.after(() => host.stopAll())
+
+  await host.deleteScheduleRun(agent(cwd), { runId: only })
+  const data = JSON.parse(await readFile(file, 'utf8'))
+  assert.equal(data.runs.length, 0)
+  assert.equal(data.schedules[0].lastRunAt, null, 'no surviving round means no stamp')
+})
+
+test('a round that is currently executing cannot be deleted', async (t) => {
+  const { host, currentAgent, fake } = await setup(t, { depth: 'script', neverDone: 'script' })
+  const created = await createTask(host, currentAgent, { depth: 'script' })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+
+  await assert.rejects(host.deleteScheduleRun(currentAgent, { runId }), /正在执行/u)
+
+  host.stopAll()
+  for (let attempt = 0; attempt < 500 && host.active.size; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
+  }
+  assert.ok(fake, 'the fixture ran')
 })

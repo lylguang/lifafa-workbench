@@ -102,6 +102,19 @@ function websocketEndpoint(value) {
   return parsed.toString().replace(/\/$/u, '')
 }
 
+/** Loopback endpoints are this machine's own bridge: it serves any bearer token. */
+export function isLoopbackEndpoint(value) {
+  if (typeof value !== 'string' || !value.trim()) return false
+  let parsed
+  try {
+    parsed = new URL(value.trim())
+  } catch {
+    return false
+  }
+  const host = parsed.hostname.toLowerCase()
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost')
+}
+
 /** Reads only operator-owned environment configuration. Browser input never supplies an endpoint or credential. */
 export function mediaServiceConfig(environment = process.env) {
   const baseUrl = endpoint(environment.LWB_SPOKEN_VIDEO_TTS_BASE_URL || environment.TTS_SERVICE_BASE_URL)
@@ -181,7 +194,7 @@ export function mediaCredentialRef(provider) {
 export function normalizeRenderRequest(value) {
   const input = object(value ?? {}, '视频渲染请求')
   const renderer = optionalText(input.renderer, '渲染器', 40) || 'remotion'
-  if (!['remotion', 'local-ffmpeg'].includes(renderer)) throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '渲染器只支持 remotion 或 local-ffmpeg。')
+  if (!['remotion', 'local-ffmpeg', 'whiteboard'].includes(renderer)) throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '渲染器只支持 remotion、local-ffmpeg 或 whiteboard。')
   const orientation = oneOf(input.orientation, '视频方向', VIDEO_ORIENTATIONS, 'landscape')
   const requestedBrief = optionalText(input.visualBrief, '画面制作说明', 6000)
   const backgroundMusicInput = input.backgroundMusic == null ? null : object(input.backgroundMusic, '背景音乐')

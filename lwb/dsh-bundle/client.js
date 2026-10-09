@@ -632,6 +632,7 @@ window.__ModuleLoader__.load({
       .lwb-plain-button,.lwb-primary-button,.lwb-danger-button { min-height:32px; padding:0 11px; border:1px solid #d7e0e9; border-radius:6px; background:#fff; color:#4f6071; font-size:var(--lwb-text-base,14px); font-weight:600; cursor:pointer; } .lwb-primary-button { border-color:var(--lwb-blue); color:#fff; background:var(--lwb-blue); } .lwb-danger-button { border-color:#dba8a8; color:#a44949; background:#fff7f7; }
       .lwb-pack-tabs { display:flex; gap:4px; margin-bottom:14px; } .lwb-pack-tab { min-height:32px; padding:0 12px; border:1px solid transparent; border-radius:6px; color:#6e7c8a; background:transparent; cursor:pointer; } .lwb-pack-tab[data-active="true"] { border-color:#d6e5f9; color:var(--lwb-blue); background:var(--lwb-blue-soft); } .lwb-market-controls { display:grid; grid-template-columns:minmax(220px,1fr) 142px 142px; gap:9px; margin-bottom:16px; } .lwb-market-search { width:100%; height:34px; padding:0 10px; border:1px solid #d8e2ec; border-radius:6px; outline:0; color:var(--lwb-ink); background:var(--lwb-surface); font-size:var(--lwb-text-base,14px); } .lwb-market-search:focus { border-color:var(--lwb-blue); box-shadow:0 0 0 2px var(--lwb-blue-soft); } .lwb-pack-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(248px,1fr)); gap:13px; } .lwb-pack-card { display:flex; min-height:258px; flex-direction:column; padding:17px; cursor:pointer; } .lwb-pack-card:hover { border-color:#b9d4f4; box-shadow:0 5px 17px rgba(39,78,123,.09); } .lwb-pack-card-top { display:flex; align-items:flex-start; justify-content:space-between; gap:15px; } .lwb-pack-title { display:flex; min-width:0; align-items:center; gap:11px; } .lwb-pack-title > div { min-width:0; } .lwb-pack-icon { width:37px; height:37px; flex:none; font-size:var(--lwb-text-heading,20px); } .lwb-pack-title h3 { overflow:hidden; margin:0; font-size:var(--lwb-text-lg,16px); text-overflow:ellipsis; white-space:nowrap; } .lwb-pack-title p { margin:4px 0 0; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); } .lwb-pack-card > p { margin:14px 0; color:#657586; font-size:var(--lwb-text-base,14px); line-height:1.6; } .lwb-pack-menu { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px; } .lwb-menu-pill { padding:4px 7px; border-radius:4px; color:#617183; background:#f2f5f8; font-size:var(--lwb-text-xs,12px); } .lwb-pack-actions { margin-top:auto; } .lwb-pack-card-note { min-height:16px; margin:0 0 10px; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); }
       .lwb-pack-empty { border:1px dashed #d6dee7; border-radius:7px; color:#82909e; background:#fbfcfd; font-size:var(--lwb-text-base,14px); }
+      .lwb-diagnostics { display:grid; gap:8px; width:min(560px,100%); margin-top:14px; padding:13px 15px; border:1px solid #d6dee7; border-radius:7px; background:var(--lwb-surface); text-align:left; } .lwb-diagnostics-head strong { color:var(--lwb-ink); } .lwb-diagnostics-fatal { margin:5px 0 0; color:#a54848; font-size:var(--lwb-text-sm,13px); } .lwb-diagnostics-item { display:flex; gap:9px; align-items:flex-start; padding:8px 10px; border:1px solid #e5e9ee; border-radius:6px; font-size:var(--lwb-text-sm,13px); } .lwb-diagnostics-item[data-passed="true"] strong { color:#1f7354; } .lwb-diagnostics-item[data-passed="false"] { border-color:#efcfcf; background:#fffaf9; } .lwb-diagnostics-item[data-passed="false"] strong { color:#a54848; } .lwb-diagnostics-item p { margin:0; color:#4d5e6f; line-height:1.5; } .lwb-diagnostics-item ul { margin:5px 0 0; padding-left:18px; color:#a54848; }
       .lwb-settings-list { display:block; overflow:hidden; } .lwb-settings-section { padding:13px 19px 7px; color:#7a8997; background:#fbfcfd; font-size:var(--lwb-text-xs,12px); font-weight:800; letter-spacing:.08em; } .lwb-setting-row { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:17px 19px; border-bottom:1px solid var(--lwb-line); } .lwb-setting-row:last-child { border-bottom:0; } .lwb-setting-copy > strong { display:block; font-size:var(--lwb-text-md,15px); } .lwb-setting-copy > span { display:block; margin-top:5px; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); line-height:1.5; } .lwb-select { min-width:110px; height:32px; padding:0 8px; border:1px solid #d7e0e9; border-radius:6px; color:#4f6071; background:#fff; font-size:var(--lwb-text-base,14px); } .lwb-field { display:grid; gap:6px; } .lwb-field label { color:#566879; font-size:var(--lwb-text-sm,13px); font-weight:700; } .lwb-input { width:100%; height:34px; padding:0 10px; border:1px solid #d8e2ec; border-radius:6px; outline:0; color:#40505f; background:#fff; font-size:var(--lwb-text-base,14px); } .lwb-input:focus,.lwb-select:focus { border-color:#9fc0f4; box-shadow:0 0 0 2px #eef5ff; } .lwb-form { display:grid; gap:14px; } .lwb-modal-title { margin:0; color:#253646; font-size:var(--lwb-text-heading,20px); } .lwb-modal-copy { margin:6px 0 0; color:#7a8997; font-size:var(--lwb-text-sm,13px); line-height:1.55; } .lwb-dialog-error { margin:0; padding:9px 10px; border:1px solid #efcfcf; border-radius:6px; color:#a54848; background:#fff7f7; font-size:var(--lwb-text-sm,13px); line-height:1.45; }
       .lwb-modal-backdrop { position:fixed; z-index:20; inset:0; display:grid; place-items:center; padding:24px; background:rgba(27,39,53,.28); pointer-events:auto; } .lwb-pack-drawer-backdrop { position:fixed; z-index:20; inset:0; display:flex; justify-content:flex-end; background:rgba(27,39,53,.28); pointer-events:auto; } .lwb-pack-detail { width:min(560px,100%); max-height:min(720px,calc(100vh - 48px)); overflow:auto; padding:21px; } .lwb-pack-drawer { width:min(510px,100%); height:100%; max-height:none; padding:24px; border-radius:0; box-shadow:-12px 0 32px rgba(20,34,49,.13); } .lwb-pack-detail-head { display:flex; align-items:flex-start; justify-content:space-between; gap:15px; margin-bottom:17px; } .lwb-pack-detail-head h2 { margin:0; font-size:var(--lwb-text-heading,20px); } .lwb-pack-detail-head p { margin:5px 0 0; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); } .lwb-detail-close { width:30px; height:30px; border:1px solid #d7e0e9; border-radius:6px; color:#647487; background:#fff; cursor:pointer; } .lwb-detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin-bottom:17px; } .lwb-detail-fact { padding:12px; border:1px solid #e5e9ee; border-radius:6px; background:#fbfcfd; } .lwb-detail-fact small { display:block; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); } .lwb-detail-fact strong { display:block; margin-top:5px; color:#334456; font-size:var(--lwb-text-base,14px); } .lwb-detail-section { padding:14px 0; border-top:1px solid var(--lwb-line); } .lwb-detail-section h3 { margin:0 0 10px; color:#5d6d7d; font-size:var(--lwb-text-sm,13px); letter-spacing:.04em; } .lwb-detail-menu { display:grid; gap:7px; } .lwb-detail-menu-row { display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid #e7ebef; border-radius:6px; color:#4d5e6f; background:#fff; font-size:var(--lwb-text-sm,13px); } .lwb-detail-menu-row b { color:var(--lwb-blue); font-size:var(--lwb-text-md,15px); } .lwb-workflow-list { display:grid; gap:7px; padding:0; margin:0; list-style:none; } .lwb-workflow-list li { display:flex; gap:8px; align-items:flex-start; color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); line-height:1.5; } .lwb-workflow-list i { color:var(--lwb-blue); font-style:normal; }
       .lwb-mobile-nav-trigger,.lwb-mobile-conversation-trigger,.lwb-mobile-nav-backdrop { display:none; }
@@ -1340,6 +1341,31 @@ window.__ModuleLoader__.load({
       const [category, setCategory] = React.useState('all');
       const [operation, setOperation] = React.useState(null);
       const [notice, setNotice] = React.useState(null);
+      // 一键检测：能力包列表出错或为空时，用户点「检测能力包」跑后端只读体检。
+      const [diagnostics, setDiagnostics] = React.useState(null);
+      const [diagnosticsBusy, setDiagnosticsBusy] = React.useState(false);
+      const runDiagnostics = async () => {
+        setDiagnosticsBusy(true);
+        try {
+          const response = await services?.connection?.rpc?.call?.('/api', 'lwbPacks/diagnostics', { args: {} });
+          if (!response?.ok) throw new Error(response?.error?.message || '检测服务不可用。');
+          setDiagnostics(response.value);
+          setNotice(null);
+        } catch (cause) {
+          setDiagnostics({ passed: false, checks: [], fatal: cause?.message || String(cause) });
+        } finally {
+          setDiagnosticsBusy(false);
+        }
+      };
+      const diagnosticsPanel = diagnostics && h('div', { className: 'lwb-diagnostics', role: 'region', 'aria-label': '能力包检测结果' },
+        h('div', { className: 'lwb-diagnostics-head' },
+          h('strong', null, diagnostics.passed ? '检测完成：未发现异常' : '检测完成：发现问题'),
+          diagnostics.fatal ? h('p', { className: 'lwb-diagnostics-fatal' }, `检测服务本身不可用：${diagnostics.fatal}。请确认工作台进程在运行。`) : null,
+        ),
+        diagnostics.checks?.map((check) => h('div', { key: check.name, className: 'lwb-diagnostics-item', 'data-passed': check.passed ? 'true' : 'false' },
+          h('strong', null, check.passed ? '✓' : '✕'), h('div', null, h('p', null, check.detail), check.broken?.length ? h('ul', null, check.broken.map((item) => h('li', { key: item.id }, `${item.id}：${item.error}`))) : null),
+        )),
+      );
       const packs = orderMarketplacePacks(market.packs);
       const categories = [...new Set(packs.map((pack) => pack.category).filter(Boolean))].sort((left, right) => left.localeCompare(right, 'zh-Hans-CN'));
       const normalizedQuery = query.trim().toLowerCase();
@@ -1402,7 +1428,11 @@ window.__ModuleLoader__.load({
         return h('div', { className: 'lwb-pack-empty' }, h('div', null, h('strong', null, copy.loadingPacks)));
       }
       if (market.phase === 'error') {
-        return h('div', { className: 'lwb-pack-empty' }, h('div', null, h('strong', null, copy.packCatalogFailed), h('p', null, market.error)));
+        return h('div', { className: 'lwb-pack-empty' }, h('div', null,
+          h('strong', null, copy.packCatalogFailed), h('p', null, market.error),
+          h('p', null, h('button', { type: 'button', className: 'lwb-primary-button', disabled: diagnosticsBusy, onClick: () => { void runDiagnostics(); } }, diagnosticsBusy ? '正在检测…' : '检测能力包')),
+          diagnosticsPanel,
+        ));
       }
       return h(React.Fragment, null,
         h('div', { className: 'lwb-market-controls' },
@@ -1420,7 +1450,10 @@ window.__ModuleLoader__.load({
             h('p', { className: 'lwb-pack-card-note' }, pack.error || `${copy.menuCount} ${pack.menus.length}`),
             h('div', { className: 'lwb-pack-actions' }, packAction(pack)),
           );
-        })) : h('div', { className: 'lwb-pack-empty' }, h('div', null, h('strong', null, packs.length ? copy.noMatchingPacks : copy.noLoadedPacks), h('p', null, copy.packsEmptyCopy))),
+        })) : h('div', { className: 'lwb-pack-empty' }, h('div', null, h('strong', null, packs.length ? copy.noMatchingPacks : copy.noLoadedPacks), h('p', null, copy.packsEmptyCopy),
+          !packs.length ? h('p', null, h('button', { type: 'button', className: 'lwb-primary-button', disabled: diagnosticsBusy, onClick: () => { void runDiagnostics(); } }, diagnosticsBusy ? '正在检测…' : '检测能力包')) : null,
+          !packs.length ? diagnosticsPanel : null,
+        )),
         detailPack && h(PackDetailDialog, {
           pack: packs.find((item) => item.id === detailPack.id) || detailPack,
           onClose: () => setDetailPack(null),

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,6 +10,7 @@ import { buildTechnicalReport, DEFAULT_VIDEO_VISUAL_BRIEF, DEFAULT_VOICE_PROFILE
 import { SpokenVideoProjectStore, SpokenVideoStoreError } from '../spoken-video-store.mjs'
 import { SpokenVideoMediaHost, parseRemotionRenderProgress } from '../spoken-video-media-host.mjs'
 import { remotionEncodingSettings, remotionRendererAvailable } from '../spoken-video-remotion.mjs'
+import { buildLineArtPlanPrompt, composeLineArtPrompt, LINE_ART_PLAN_SCHEMA, lineArtSeed, normalizeLineArtPlan } from '../spoken-video-whiteboard-art.mjs'
 
 function agent(cwd) { return { session: { header: { cwd } } } }
 
@@ -552,6 +554,187 @@ test('maps SciTiger insufficient points to an actionable user-facing error', asy
   assert.equal(finished.error, 'SciTiger 账户积分不足，请充值后重试，或切换到百炼 BYOK。')
   assert.equal(finished.subtitle.status, 'idle')
   assert.ok(!finished.error.includes('SPOKEN_VIDEO_MEDIA'))
+})
+
+test('blames the channel, not the voice, when the bridge rejects the credential', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const host = new SpokenVideoMediaHost({
+    projectsStore: new SpokenVideoProjectStore(),
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: 'sk-wrong-cloud-key' }),
+    // 远端云端：本机部署最典型的配置错误（没带 LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL 启动）。
+    environment: { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'https://link.scitiger.cn' },
+    fetch: async (url) => {
+      const parsed = new URL(String(url))
+      if (parsed.pathname === '/api/v1/media/audio-uploads') {
+        return new Response(JSON.stringify({ success: false, message: 'Invalid API key' }), { status: 401 })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    },
+  })
+  const started = await host.startAudioTask(currentAgent, {
+    text: '这是一段验证渠道误配提示的测试文稿。',
+    title: '渠道误配测试',
+    provider: 'scitiger',
+    subtitleEnabled: false,
+  })
+  const finished = await waitForAudioTask(host, currentAgent, started.id)
+  assert.equal(finished.status, 'failed')
+  // 关键回归：错误里不能再出现音色名，否则用户会去查音色而不是查渠道。
+  assert.ok(!finished.error.includes(DEFAULT_VOICE_PROFILE.name), `错误信息不应归咎音色：${finished.error}`)
+  assert.match(finished.error, /Invalid API key/u)
+  assert.match(finished.error, /启动工作台\.cmd/u)
+  assert.match(finished.error, /127\.0\.0\.1:8199/u)
+})
+
+test('explains a bridge-side auth failure against the bridge config centre', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const host = new SpokenVideoMediaHost({
+    projectsStore: new SpokenVideoProjectStore(),
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: 'sk-any' }),
+    // 本机桥接不校验 bearer，所以它的 401 只可能是桥接内部（小米 Key）的问题。
+    environment: { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'http://127.0.0.1:8199' },
+    fetch: async (url) => {
+      const parsed = new URL(String(url))
+      if (parsed.pathname === '/api/v1/tts/jobs') {
+        return new Response(JSON.stringify({ success: false, message: '小米 TTS 返回 401：Invalid API Key' }), { status: 200 })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    },
+  })
+  const started = await host.startAudioTask(currentAgent, {
+    text: '这是一段验证桥接内部认证失败的测试文稿。',
+    title: '桥接认证测试',
+    provider: 'scitiger',
+    voiceSource: 'preset',
+    voiceId: '茉莉',
+    subtitleEnabled: false,
+  })
+  const finished = await waitForAudioTask(host, currentAgent, started.id)
+  assert.equal(finished.status, 'failed')
+  assert.match(finished.error, /本机桥接拒绝了配音请求/u)
+  assert.match(finished.error, /桥接配置中心/u)
+  assert.ok(!finished.error.includes(DEFAULT_VOICE_PROFILE.name))
+})
+
+test('reports which endpoint the SciTiger channel resolves to', async () => {
+  const loopback = new SpokenVideoMediaHost({
+    projectsStore: new SpokenVideoProjectStore(),
+    credentials: credentialStore(),
+    environment: { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'http://127.0.0.1:8199' },
+  })
+  const localStatus = await loopback.status()
+  assert.equal(localStatus.providers.scitiger.loopback, true)
+  assert.equal(localStatus.providers.scitiger.label, '本机桥接')
+  assert.equal(localStatus.providers.scitiger.endpoint, 'http://127.0.0.1:8199')
+
+  const remote = new SpokenVideoMediaHost({
+    projectsStore: new SpokenVideoProjectStore(),
+    credentials: credentialStore(),
+    environment: { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'https://link.scitiger.cn' },
+  })
+  const remoteStatus = await remote.status()
+  assert.equal(remoteStatus.providers.scitiger.loopback, false)
+  assert.equal(remoteStatus.providers.scitiger.label, 'SciTiger 云端')
+  // 默认值（未设置环境变量）走远端，正是需要提示用户的那一种。
+  const fallback = new SpokenVideoMediaHost({ projectsStore: new SpokenVideoProjectStore(), credentials: credentialStore(), environment: {} })
+  assert.equal((await fallback.status()).providers.scitiger.loopback, false)
+})
+
+test('carries the bridge channel and style through an audio task and its retry', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await projectWithApprovedScript(currentAgent, store)
+  const outputFile = join(cwd, 'bridge-override.wav')
+  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.4', '-ac', '1', '-ar', '16000', outputFile], { stdio: 'ignore' })
+  const outputAudio = await readFile(outputFile)
+  const observed = { submit: null }
+  const host = new SpokenVideoMediaHost({
+    projectsStore: store,
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: 'sk-bridge-override' }),
+    environment: { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'http://127.0.0.1:8199' },
+    fetch: async (url, init = {}) => {
+      const parsed = new URL(String(url))
+      if (parsed.pathname === '/api/v1/tts/jobs' && init.method === 'POST') {
+        observed.submit = JSON.parse(init.body)
+        return new Response(JSON.stringify({ success: true, data: { job_id: 'tts_bridge_override' } }))
+      }
+      if (parsed.pathname === '/api/v1/tts/jobs/tts_bridge_override') {
+        return new Response(JSON.stringify({ success: true, data: { status: 'completed', result: { audio_url: 'http://127.0.0.1:8199/audio-files/bridge-override.wav' } } }))
+      }
+      if (parsed.pathname === '/audio-files/bridge-override.wav') return new Response(outputAudio)
+      throw new Error(`unexpected request: ${url}`)
+    },
+  })
+  const started = await host.startAudioTask(currentAgent, {
+    text: '这是一段验证桥接覆盖参数落盘的测试文稿。',
+    sourceProjectId: project.id,
+    provider: 'scitiger',
+    voiceSource: 'preset',
+    voiceId: '茉莉',
+    voiceName: '茉莉',
+    bridge: { channel: 'local', style: '温柔舒缓，适合情感共鸣。' },
+    subtitleEnabled: false,
+  })
+  const finished = await waitForAudioTask(host, currentAgent, started.id)
+  assert.equal(finished.status, 'succeeded', finished.error)
+  assert.equal(observed.submit.tts_provider, 'local')
+  assert.equal(observed.submit.style, '温柔舒缓，适合情感共鸣。')
+  // 冻结在任务里，失败重试才能原样重放。
+  const stored = await host.audioTask(currentAgent, { taskId: started.id })
+  assert.deepEqual(stored.input.bridge, { channel: 'local', style: '温柔舒缓，适合情感共鸣。' })
+})
+
+test('surfaces bridge segment stage/progress as execution events during long synthesis', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const outputFile = join(cwd, 'progress-output.wav')
+  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.4', '-ac', '1', '-ar', '16000', outputFile], { stdio: 'ignore' })
+  const outputAudio = await readFile(outputFile)
+  let polls = 0
+  const host = new SpokenVideoMediaHost({
+    projectsStore: store,
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: 'sk-progress' }),
+    environment: { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'https://scitiger.test' },
+    fetch: async (url) => {
+      const parsed = new URL(String(url))
+      if (parsed.pathname === '/api/v1/tts/jobs') {
+        return new Response(JSON.stringify({ success: true, data: { job_id: 'tts_progress' } }))
+      }
+      if (parsed.pathname === '/api/v1/tts/jobs/tts_progress') {
+        polls += 1
+        // 模拟排队 + 长文案分段合成：先排队，两次中间进度，最后完成。
+        if (polls === 1) return new Response(JSON.stringify({ success: true, data: { status: 'queued', queue_ahead: 2 } }))
+        if (polls === 2) return new Response(JSON.stringify({ success: true, data: { status: 'processing', stage: '分段合成 1/5', progress: 18 } }))
+        if (polls === 3) return new Response(JSON.stringify({ success: true, data: { status: 'processing', stage: '分段合成 3/5', progress: 54 } }))
+        return new Response(JSON.stringify({ success: true, data: { status: 'completed', result: { audio_url: 'https://media.test/progress.wav' } } }))
+      }
+      if (parsed.hostname === 'media.test') return new Response(outputAudio)
+      throw new Error(`unexpected request: ${url}`)
+    },
+  })
+  const started = await host.startAudioTask(currentAgent, {
+    text: '这是一段验证分段进度透传到执行记录的测试文稿。',
+    provider: 'scitiger',
+    voiceSource: 'preset',
+    voiceId: 'voice-progress',
+    subtitleEnabled: false,
+  })
+  const finished = await waitForAudioTask(host, currentAgent, started.id)
+  assert.equal(finished.status, 'succeeded', finished.error)
+  // 卡片进度：最后一次回调的阶段/百分比要留在摘要里。
+  assert.equal(finished.progress?.stage, '分段合成 3/5')
+  assert.equal(finished.progress?.progress, 54)
+  // 执行记录在原始落盘记录里（audioTask 摘要不带事件，详情抽屉走 executionDetail）。
+  const rawTasks = JSON.parse(await readFile(join(cwd, 'data', 'audio-tasks.json'), 'utf8'))
+  const raw = rawTasks.tasks.find((item) => item.id === started.id)
+  const labels = (raw?.executionEvents || []).map((event) => event.label)
+  assert.ok(labels.some((label) => label.includes('排队中（前面还有 2 个任务）')), labels.join(' | '))
+  assert.ok(labels.some((label) => label.includes('分段合成 1/5') && label.includes('18%')), labels.join(' | '))
+  assert.ok(labels.some((label) => label.includes('分段合成 3/5') && label.includes('54%')), labels.join(' | '))
 })
 
 test('retries a transient SciTiger audio download instead of failing the whole voiceover', async (t) => {
@@ -1317,11 +1500,120 @@ test('defaults a local render to landscape and passes ffprobe technical qc', asy
   const renderedProject = await store.get(currentAgent, { projectId: project.id })
   assert.equal(renderedProject.artifacts.video.data.video.width, 1920)
   assert.equal(renderedProject.artifacts.video.data.video.height, 1080)
+  // 关键回归：渲染必须自带技术质检产物。发布页只列 qc 通过的项目，
+  // 缺 qc 的成片会被静默隐藏（这正是白板成片看不到的根因）。
+  assert.equal(renderedProject.artifacts.qc?.data?.passed, true, '渲染任务必须内联提交 qc 产物')
+  assert.equal(renderedProject.completedStages.includes('qc'), true)
   const qc = await host.startTechnicalQc(currentAgent, { projectId: project.id, expectedRevision: renderedProject.revision })
   const qcRun = await waitForOperation(host, currentAgent, project.id, qc.id)
   assert.equal(qcRun.status, 'succeeded', qcRun.error)
   const checkedProject = await store.get(currentAgent, { projectId: project.id })
   assert.equal(checkedProject.artifacts.qc.data.passed, true)
+})
+
+test('composeLineArtPrompt bakes the visual spec and rejects empty scenes', () => {
+  const prompt = composeLineArtPrompt('a small monkey sitting on a rockery holding a banana')
+  assert.match(prompt, /#F5EBD7/u)
+  assert.match(prompt, /STRICTLY FORBIDDEN/u)
+  assert.match(prompt, /never words to write/u)
+  assert.throws(() => composeLineArtPrompt('   '), /画面视觉描述/u)
+})
+
+test('buildLineArtPlanPrompt forbids quoting narration and lists every scene', () => {
+  const prompt = buildLineArtPlanPrompt([
+    { index: 1, startMs: 0, endMs: 30_000, text: '第一幕旁白' },
+    { index: 2, startMs: 30_000, endMs: 60_000, text: '第二幕旁白' },
+  ])
+  assert.match(prompt, /NEVER copy/u)
+  assert.match(prompt, /Scene 1 \[0-30s\]: 第一幕旁白/u)
+  assert.match(prompt, /Scene 2 \[30-60s\]: 第二幕旁白/u)
+})
+
+test('normalizeLineArtPlan aligns by scene index and falls back for missing entries', () => {
+  const bySceneIndex = [{ sceneIndex: 1, text: '一' }, { sceneIndex: 2, text: '二' }, { sceneIndex: 3, text: '三' }]
+  const byIndex = [{ index: 1, text: '一' }, { index: 2, text: '二' }, { index: 3, text: '三' }]
+  for (const scenes of [bySceneIndex, byIndex]) {
+    const plan = normalizeLineArtPlan({ scenes: [{ index: 2, visual: 'a dog running' }, { index: 99, visual: 'ignored' }] }, scenes)
+    assert.equal(plan.length, 3)
+    assert.doesNotMatch(plan[0].visual, /一/u, 'fallback must not embed narration text')
+    assert.equal(plan[0].index, 1)
+    assert.equal(plan[1].visual, 'a dog running')
+    assert.match(plan[2].visual, /visual metaphor/u)
+  }
+  assert.equal(LINE_ART_PLAN_SCHEMA.properties.scenes.items.required.join(','), 'index,visual')
+})
+
+test('lineArtSeed is deterministic per scene and differs across scenes', () => {
+  assert.equal(lineArtSeed(1), lineArtSeed(1))
+  assert.notEqual(lineArtSeed(1), lineArtSeed(2))
+  assert.ok(lineArtSeed(1) > 0 && lineArtSeed(1) < 2 ** 31 - 1)
+})
+
+test('whiteboard line art plan refuses projects without subtitles', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await projectWithApprovedScript(currentAgent, store)
+  const host = new SpokenVideoMediaHost({ projectsStore: store })
+  await assert.rejects(
+    () => host.whiteboardLineArtPlan(currentAgent, { projectId: project.id }),
+    /必须先完成配音与字幕/u,
+  )
+})
+
+test('renders a whiteboard video with voiceover audio and passes technical qc', async (t) => {
+  if (!mediaBinariesAvailable()) { t.skip('ffmpeg or ffprobe is unavailable in this environment'); return }
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  let project = await projectWithApprovedScript(currentAgent, store)
+  const projectRoot = join(cwd, 'data', 'projects', project.id)
+  // 配音 1 秒；字幕覆盖 0-0.9 秒，单幕
+  const audioDirectory = join(projectRoot, 'media', 'voiceovers')
+  const audioFile = join(audioDirectory, 'whiteboard.wav')
+  await mkdir(audioDirectory, { recursive: true })
+  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100:duration=1', '-c:a', 'pcm_s16le', audioFile], { stdio: 'ignore' })
+  project = (await store.commitProduced(currentAgent, {
+    projectId: project.id, expectedRevision: project.revision, stage: 'voiceover', idempotencyKey: 'whiteboard-voice-0001', source: 'spoken-video/tts',
+    payload: { mode: 'tts', provider: 'test', settings: { rate: 1, volume: 1, pitch: 0 }, audio: { file: 'media/voiceovers/whiteboard.wav', mediaType: 'audio/wav', bytes: 88_278, durationSeconds: 1 } },
+  })).project
+  project = (await store.commitProduced(currentAgent, {
+    projectId: project.id, expectedRevision: project.revision, stage: 'subtitles', idempotencyKey: 'whiteboard-subtitles-0001', source: 'spoken-video/asr',
+    payload: { mode: 'asr', sourceAudioFile: 'media/voiceovers/whiteboard.wav', srtFile: 'media/subtitles/whiteboard.srt', srt: '1\n00:00:00,000 --> 00:00:00,900\n白板渲染测试' },
+  })).project
+
+  // 缺线稿：任务应失败并明确提示线稿约定
+  const host = new SpokenVideoMediaHost({ projectsStore: store })
+  const missingLineArt = await host.startVideoRender(currentAgent, { projectId: project.id, expectedRevision: project.revision, visualBrief: '白板测试。', renderer: 'whiteboard' })
+  const missingRun = await waitForOperation(host, currentAgent, project.id, missingLineArt.id)
+  assert.equal(missingRun.status, 'failed')
+  assert.match(missingRun.error, /media\/whiteboard/u)
+
+  // 放一张带墨迹的 16:9 纸底线稿：自动骨架标注 → 渲染 → 合成音轨
+  const lineArtDirectory = join(projectRoot, 'media', 'whiteboard')
+  await mkdir(lineArtDirectory, { recursive: true })
+  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'color=c=0xF5EBD7:s=1672x941:d=1', '-vf', 'drawbox=x=120:y=140:w=560:h=620:color=0x303030@1:t=6,drawbox=x=900:y=200:w=620:h=480:color=0x404040@1:t=4,drawbox=x=758:y=120:w=4:h=700:color=0x303030@1:t=fill', '-frames:v', '1', join(lineArtDirectory, 'scene-01.png')], { stdio: 'ignore' })
+
+  const render = await host.startVideoRender(currentAgent, { projectId: project.id, expectedRevision: project.revision, visualBrief: '白板测试。', renderer: 'whiteboard' })
+  const rendered = await waitForOperation(host, currentAgent, project.id, render.id, 300_000)
+  assert.equal(rendered.status, 'succeeded', rendered.error)
+  const renderedProject = await store.get(currentAgent, { projectId: project.id })
+  const video = renderedProject.artifacts.video.data
+  assert.equal(video.renderer, 'whiteboard')
+  assert.equal(video.video.width, 1920)
+  assert.equal(video.video.height, 1080)
+  assert.equal(video.video.hasAudio, true)
+  assert.equal(video.whiteboard.scenes, 1)
+  // 关键回归：白板渲染没有独立审片阶段，技术质检必须在渲染内联完成并提交。
+  // 缺 qc 时发布页（只列 qc.passed 的项目）会看不到这条成片。
+  assert.equal(renderedProject.artifacts.qc?.data?.passed, true, '白板渲染必须内联提交 qc 产物')
+  assert.equal(renderedProject.artifacts.qc.data.mode, 'automatic')
+
+  const qc = await host.startTechnicalQc(currentAgent, { projectId: project.id, expectedRevision: renderedProject.revision })
+  const qcRun = await waitForOperation(host, currentAgent, project.id, qc.id)
+  assert.equal(qcRun.status, 'succeeded', qcRun.error)
+  const checkedProject = await store.get(currentAgent, { projectId: project.id })
+  assert.equal(checkedProject.artifacts.qc.data.passed, true, JSON.stringify(checkedProject.artifacts.qc.data.issues))
 })
 
 test('runs the DSH Remotion creator, deterministic QC, and independent reviewer before committing', async (t) => {
@@ -1710,4 +2002,312 @@ test('audio tasks default to automatic subtitles, isolate ASR failures, and allo
     } else if (scenario === 'opt-out') assert.equal(asrCalls, 0)
     else assert.match(finished.subtitle.error, /fixture/u)
   }
+})
+
+test('both subtitle paths run the timeline guard, so a drifting cloud SRT cannot reach the video', async () => {
+  // 回归（2026-10-01《牡丹亭》）：守卫原先只装在视频路径 #generateSubtitles 上，
+  // 「配音 / 字幕」页走的 #runAudioTaskSubtitles 完全没有守卫。于是配音页产出的
+  // 漂移 SRT 会原样落进项目，而白板成片的场景切场与烧录字幕都从这份 SRT 推导——
+  // 实测字幕比语音滞后 6~10 秒。这条不变量必须在两条路径上都成立。
+  const source = await readFile(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  const videoPath = source.slice(source.indexOf('async #generateSubtitles('), source.indexOf('async #renderVideo('))
+  const audioPath = source.slice(source.indexOf('async #runAudioTaskSubtitles('), source.indexOf('async #syncAudioTaskSubtitles('))
+  assert.ok(videoPath.length > 0 && audioPath.length > 0, '两条字幕路径都必须存在')
+  assert.match(videoPath, /guardSubtitleTimeline\(\{ audioPath, srt:/u, '视频路径必须运行对齐守卫')
+  assert.match(audioPath, /guardSubtitleTimeline\(\{ audioPath, srt:/u, '配音页路径必须运行对齐守卫')
+  // 守卫结论要写进 diagnostics，否则线上无从判断这次是否修正过。
+  assert.match(audioPath, /result\.diagnostics = \{ \.\.\.\(result\.diagnostics \|\| \{\}\), alignmentGuard \}/u)
+})
+
+test('the guard corrects a subtitle track that lags the speech', async (t) => {
+  // 端到端跑真实守卫（含 VAD），输入复刻《牡丹亭》的漂移特征：文本全对、时间轴整体
+  // 滞后数秒。断言它判 corrected 并把 cue 拉回真实发声位置。
+  const { guardSubtitleTimeline, parseSrt } = await import('../spoken-video-subtitle-align.mjs')
+  const { mkdtemp: mk, writeFile: wf, rm: rmrf } = await import('node:fs/promises')
+  const { tmpdir: td } = await import('node:os')
+  const dir = await mk(join(td(), 'lwb-align-'))
+  t.after(() => rmrf(dir, { recursive: true, force: true }))
+  const audioPath = join(dir, 'voice.wav')
+  await wf(audioPath, 'placeholder')
+
+  // 合成 PCM：8 段语音（每段 2s，句间静音 1.5s）→ 真实开口时刻 0/3.5/7/10.5/14/17.5/21/24.5s。
+  // 守卫要求至少 6 条 cue 才评估，这里用 8 条贴近真实口播密度。
+  const SR = 8000
+  const truth = [0, 3.5, 7, 10.5, 14, 17.5, 21, 24.5]
+  const pcm = new Float32Array(28 * SR)
+  for (const start of truth) {
+    for (let i = Math.round(start * SR); i < Math.round((start + 2) * SR) && i < pcm.length; i++) {
+      pcm[i] = 0.35 * Math.sin((i / SR) * 2 * Math.PI * 220) * (0.6 + 0.4 * Math.sin((i / SR) * 30))
+    }
+  }
+  // 原始 SRT 每条都比真实开口晚 5 秒。
+  const lagging = truth.map((s, i) => `${i + 1}\n${srtStamp(s + 5)} --> ${srtStamp(s + 7)}\n第 ${i + 1} 句话。`).join('\n\n') + '\n'
+
+  const result = await guardSubtitleTimeline({
+    audioPath, srt: lagging, language: 'zh',
+    // decodePcm 的契约是直接返回 Float32Array（宿主用 ffmpeg 解 8k 单声道）。
+    decodePcm: async () => pcm,
+    probeAvailable: async () => false,
+  })
+  assert.equal(result.applied, true, `滞后的 SRT 必须被修正：${result.guard?.reason}`)
+  assert.equal(result.guard.verdict, 'corrected')
+  const corrected = parseSrt(result.srt)
+  assert.equal(corrected.length, truth.length, '修正不得改变 cue 条数')
+  // 修正后每条都应落回真实开口附近。此处 ASR 不可用、走纯 VAD 占比模型，
+  // 文档标注其固有误差约 1.5s（实测稳定偏 -1.5s），因此容差取 1.6s；
+  // 关键是它把原本 5s 的滞后压回秒级，且不再单调漂移。
+  for (let i = 0; i < truth.length; i++) {
+    assert.ok(Math.abs(corrected[i].start - truth[i]) <= 1.6,
+      `第 ${i + 1} 条应从 ${truth[i] + 5}s 修正到 ~${truth[i]}s，实际 ${corrected[i].start.toFixed(2)}s`)
+  }
+  // 修正必须整体前移（原 SRT 滞后），而不是原地不动。
+  assert.ok(corrected[corrected.length - 1].start < truth[truth.length - 1] + 5,
+    '修正后末条必须明显前移')
+})
+
+/** SRT 时间戳（HH:MM:SS,mmm）。 */
+function srtStamp(seconds) {
+  const ms = Math.max(0, Math.round(seconds * 1000))
+  const h = String(Math.floor(ms / 3600000)).padStart(2, '0')
+  const m = String(Math.floor((ms % 3600000) / 60000)).padStart(2, '0')
+  const s = String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')
+  return `${h}:${m}:${s},${String(ms % 1000).padStart(3, '0')}`
+}
+
+test('manual audio without a project can be adopted into an empty project on demand', async (t) => {
+  const { cwd, root, store, currentAgent, task, host } = await savedAudioFixture(t)
+  // 把任务改成无项目手动任务（模拟「新建配音任务」直贴文案）。
+  const manual = { ...task, id: 'manual-adopt', source: { kind: 'manual-text', projectId: null, title: '手动输入文稿', text: '这是手动粘贴的口播文稿，用于验证采纳链路。' }, projectSync: null, projectRevision: null }
+  await writeFile(join(root, 'audio-tasks.json'), JSON.stringify({ schemaVersion: 1, tasks: [task, manual] }))
+  // 目标项目只有 topic，没有稿件。
+  let target = await store.create(currentAgent, { title: '采纳目标' })
+  target = (await store.commit(currentAgent, { projectId: target.id, expectedRevision: target.revision, stage: 'topic', payload: { title: '采纳目标' }, idempotencyKey: 'adopt-topic-0001' })).project
+  const synced = await host.syncAudioTask(currentAgent, { taskId: 'manual-adopt', targetProjectId: target.id })
+  assert.equal(synced.status, 'succeeded', synced.projectSyncError || synced.error)
+  assert.equal(synced.projectSyncError, null, synced.projectSyncError)
+  const detail = await store.get(currentAgent, { projectId: target.id })
+  assert.match(detail.artifacts.script.data.body, /手动粘贴的口播文稿/u, '任务文稿应登记为项目稿件')
+  assert.ok(detail.completedStages.includes('voiceover'), '配音应挂到项目')
+  assert.ok(detail.completedStages.includes('subtitles'), '字幕应挂到项目')
+  assert.equal(synced.projectSync.projectId, target.id)
+})
+
+test('adopting into a project with a different script is rejected, not overwritten', async (t) => {
+  const { root, store, currentAgent, project, task, host } = await savedAudioFixture(t)
+  const manual = { ...task, id: 'manual-conflict', source: { kind: 'manual-text', projectId: null, title: '手动输入文稿', text: '与项目稿件完全不同的一段文本。' }, projectSync: null, projectRevision: null }
+  await writeFile(join(root, 'audio-tasks.json'), JSON.stringify({ schemaVersion: 1, tasks: [task, manual] }))
+  await assert.rejects(
+    host.syncAudioTask(currentAgent, { taskId: 'manual-conflict', targetProjectId: project.id }),
+    /已有不同稿件/u,
+  )
+})
+
+test('autoAdoptProjectId: manual voiceover lands in the chosen project right after synthesis', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  // 目标项目只有 topic，没有稿件（自动采纳要补 topic 之后的稿件）。
+  let target = await store.create(currentAgent, { title: '自动放目标' })
+  target = (await store.commit(currentAgent, { projectId: target.id, expectedRevision: target.revision, stage: 'topic', payload: { title: '自动放目标' }, idempotencyKey: 'auto-topic-0001' })).project
+  const outputFile = join(cwd, 'auto-adopt.wav')
+  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.4', '-ac', '1', '-ar', '16000', outputFile], { stdio: 'ignore' })
+  const outputAudio = await readFile(outputFile)
+  let polls = 0
+  const host = new SpokenVideoMediaHost({
+    projectsStore: store,
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: 'sk-auto' }),
+    environment: { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'https://scitiger.test' },
+    fetch: async (url, init = {}) => {
+      const parsed = new URL(String(url))
+      if (parsed.pathname === '/api/v1/media/audio-uploads') return new Response(JSON.stringify({ success: true, data: { asset_id: 'asset_auto' } }))
+      if (parsed.pathname === '/api/v1/tts/jobs' && init.method === 'POST') return new Response(JSON.stringify({ success: true, data: { job_id: 'tts_auto' } }))
+      if (parsed.pathname === '/api/v1/tts/jobs/tts_auto') {
+        polls += 1
+        if (polls === 1) return new Response(JSON.stringify({ success: true, data: { status: 'processing', stage: '分段合成 1/2', progress: 45 } }))
+        return new Response(JSON.stringify({ success: true, data: { status: 'completed', result: { audio_url: 'https://media.test/auto.wav' } } }))
+      }
+      if (parsed.pathname === '/api/v1/subtitle/jobs' && init.method === 'POST') return new Response(JSON.stringify({ success: true, data: { job_id: 'asr_auto' } }))
+      if (parsed.pathname === '/api/v1/subtitle/jobs/asr_auto') {
+        return new Response(JSON.stringify({ success: true, data: { status: 'completed', subtitle_srt: '1\n00:00:00,000 --> 00:00:01,000\n自动采纳字幕。' } }))
+      }
+      if (parsed.hostname === 'media.test') return new Response(outputAudio)
+      throw new Error(`unexpected request: ${url}`)
+    },
+  })
+  const started = await host.startAudioTask(currentAgent, {
+    text: '这是一段验证生成后自动放进项目的测试文稿。',
+    title: '自动放进项目',
+    provider: 'scitiger',
+    voiceSource: 'preset',
+    voiceId: 'voice-auto',
+    subtitleEnabled: true,
+    autoAdoptProjectId: target.id,
+  })
+  const finished = await waitForAudioTask(host, currentAgent, started.id)
+  assert.equal(finished.status, 'succeeded', finished.error)
+  assert.equal(finished.projectSyncError, null, finished.projectSyncError)
+  assert.equal(finished.projectSync?.projectId, target.id, '应自动挂到目标项目')
+  if (!finished.projectSync) {
+    const rawDebug = JSON.parse(await readFile(join(cwd, 'data', 'audio-tasks.json'), 'utf8')).tasks.find((item) => item.id === started.id)
+    console.log('DEBUG raw task:', JSON.stringify({ autoAdopt: rawDebug?.autoAdoptProjectId, kind: rawDebug?.source?.kind, err: rawDebug?.projectSyncError, events: (rawDebug?.executionEvents || []).map((e) => e.label) }, null, 1))
+  }
+  const detail = await store.get(currentAgent, { projectId: target.id })
+  assert.match(detail.artifacts.script.data.body, /自动放进项目/u, '任务文稿应登记为项目稿件')
+  assert.ok(detail.completedStages.includes('voiceover'))
+  // 字幕是异步任务，完成时由 #syncAudioTaskSubtitles 自动补挂；轮询等待。
+  const subtitleDeadline = Date.now() + 15_000
+  let subtitleSynced = false
+  while (Date.now() < subtitleDeadline) {
+    const current = await store.get(currentAgent, { projectId: target.id })
+    if (current.completedStages.includes('subtitles')) { subtitleSynced = true; break }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200))
+  }
+  if (!subtitleSynced) {
+    const rawDebug = JSON.parse(await readFile(join(cwd, 'data', 'audio-tasks.json'), 'utf8')).tasks.find((item) => item.id === started.id)
+    console.log('DEBUG task full:', JSON.stringify(rawDebug, null, 1).slice(0, 3000))
+  }
+  assert.ok(subtitleSynced, '字幕应在完成后自动补挂到项目')
+})
+
+test('autoAdoptProjectId rejects a project with a different script before wasting a synthesis', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await projectWithSavedScript(currentAgent, store)
+  await assert.rejects(
+    host_startAudioTask_reject(store, currentAgent, project.id),
+    /已有不同稿件/u,
+  )
+})
+async function host_startAudioTask_reject(store, agent, projectId) {
+  const host = new SpokenVideoMediaHost({ projectsStore: store })
+  return host.startAudioTask(agent, {
+    text: '与项目稿件完全不同的一段文本。',
+    provider: 'scitiger', voiceSource: 'preset', voiceId: 'v', autoAdoptProjectId: projectId, subtitleEnabled: false,
+  })
+}
+
+test('deleting a terminal audio task drops its record and its artifacts', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const host = new SpokenVideoMediaHost({ projectsStore: { async list() { return [] } } })
+  const tasks = [
+    { id: 'keep', status: 'succeeded', createdAt: '2026-10-08T00:00:01Z', source: { title: '留着', text: 'x' } },
+    { id: 'gone', status: 'failed', createdAt: '2026-10-08T00:00:02Z', source: { title: '删掉', text: 'x' } },
+  ]
+  await mkdir(join(cwd, 'data', 'audio-media', 'voiceovers'), { recursive: true })
+  await mkdir(join(cwd, 'data', 'audio-media', 'subtitles'), { recursive: true })
+  await writeFile(join(cwd, 'data', 'audio-tasks.json'), JSON.stringify({ schemaVersion: 1, tasks }))
+  const voice = join(cwd, 'data', 'audio-media', 'voiceovers', 'gone.wav')
+  const leftover = join(cwd, 'data', 'audio-media', 'voiceovers', 'gone.source.wav')
+  const kept = join(cwd, 'data', 'audio-media', 'voiceovers', 'keep.wav')
+  await writeFile(voice, 'audio')
+  await writeFile(leftover, 'source')
+  await writeFile(kept, 'keep')
+
+  const result = await host.deleteTasks(currentAgent, { taskType: 'audio', ids: ['gone'] })
+  assert.deepEqual(result.removed, ['gone'])
+  assert.deepEqual(result.missing, [])
+
+  const left = JSON.parse(await readFile(join(cwd, 'data', 'audio-tasks.json'), 'utf8'))
+  assert.deepEqual(left.tasks.map((item) => item.id), ['keep'], 'only the targeted record is removed')
+  assert.equal(existsSync(voice), false, 'the voiceover file is cleaned up')
+  assert.equal(existsSync(leftover), false, 'the rate/volume intermediate source is cleaned up too')
+  assert.equal(existsSync(kept), true, 'another task keeps its own audio')
+})
+
+test('a queued or running audio task cannot be deleted', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const host = new SpokenVideoMediaHost({ projectsStore: { async list() { return [] } } })
+  await mkdir(join(cwd, 'data'), { recursive: true })
+  await writeFile(join(cwd, 'data', 'audio-tasks.json'), JSON.stringify({
+    schemaVersion: 1,
+    tasks: [
+      { id: 'live', status: 'running', createdAt: '2026-10-08T00:00:01Z', source: { title: '正在跑', text: 'x' } },
+      { id: 'waiting', status: 'queued', createdAt: '2026-10-08T00:00:02Z', source: { title: '排队中', text: 'x' } },
+      { id: 'done', status: 'failed', createdAt: '2026-10-08T00:00:03Z', source: { title: '已结束', text: 'x' } },
+    ],
+  }))
+
+  // Running is refused on its own; queued is refused even when selected alongside a
+  // deletable one, so a batch click can never half-apply.
+  await assert.rejects(host.deleteTasks(currentAgent, { taskType: 'audio', ids: ['live'] }), /进行中/u)
+  await assert.rejects(host.deleteTasks(currentAgent, { taskType: 'audio', ids: ['done', 'waiting'] }), /排队/u)
+  const untouched = JSON.parse(await readFile(join(cwd, 'data', 'audio-tasks.json'), 'utf8'))
+  assert.deepEqual(untouched.tasks.map((item) => item.id), ['live', 'waiting', 'done'], 'a rejected batch writes nothing')
+
+  const ok = await host.deleteTasks(currentAgent, { taskType: 'audio', ids: ['done'] })
+  assert.deepEqual(ok.removed, ['done'])
+})
+
+test('deleting an absent audio task reports it as missing instead of failing', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const host = new SpokenVideoMediaHost({ projectsStore: { async list() { return [] } } })
+  await mkdir(join(cwd, 'data'), { recursive: true })
+  await writeFile(join(cwd, 'data', 'audio-tasks.json'), JSON.stringify({ schemaVersion: 1, tasks: [] }))
+  const result = await host.deleteTasks(currentAgent, { taskType: 'audio', ids: ['never-existed'] })
+  assert.deepEqual(result.removed, [])
+  assert.deepEqual(result.missing, ['never-existed'])
+})
+
+test('deleting a video task removes the render workspace, the finished file and its qc run', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const projectId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+  const host = new SpokenVideoMediaHost({
+    projectsStore: { async list() { return [{ id: projectId, title: '项目' }] } },
+  })
+  const media = join(cwd, 'data', 'projects', projectId, 'media')
+  await mkdir(join(media, 'video-agent', 'v-run', 'outputs'), { recursive: true })
+  await mkdir(join(media, 'videos'), { recursive: true })
+  await writeFile(join(media, 'videos', 'v-run.mp4'), 'movie')
+  await writeFile(join(media, 'videos', 'other.mp4'), 'keep')
+  await writeFile(join(media, 'video-agent', 'v-run', 'outputs', 'final.mp4'), 'work')
+  await writeFile(join(media, 'runs.json'), JSON.stringify({
+    schemaVersion: 1,
+    runs: [
+      { id: 'v-run', type: 'video', status: 'failed', createdAt: '2026-10-08T00:00:01Z' },
+      { id: 'v-other', type: 'video', status: 'succeeded', createdAt: '2026-10-08T00:00:02Z' },
+      { id: 'q-run', type: 'qc', status: 'succeeded', createdAt: '2026-10-08T00:00:03Z', input: { videoTaskId: 'v-run' } },
+      { id: 'q-keep', type: 'qc', status: 'succeeded', createdAt: '2026-10-08T00:00:04Z', input: { videoTaskId: 'v-other' } },
+    ],
+  }))
+
+  const result = await host.deleteTasks(currentAgent, { taskType: 'video', ids: ['v-run'] })
+  assert.deepEqual(result.removed, ['v-run'])
+
+  const runs = JSON.parse(await readFile(join(media, 'runs.json'), 'utf8'))
+  assert.deepEqual(runs.runs.map((run) => run.id), ['v-other', 'q-keep'], 'the qc run hanging off the deleted video goes with it')
+  assert.equal(existsSync(join(media, 'videos', 'v-run.mp4')), false, 'the finished mp4 is cleaned up')
+  assert.equal(existsSync(join(media, 'video-agent', 'v-run')), false, 'the render workspace is cleaned up')
+  assert.equal(existsSync(join(media, 'videos', 'other.mp4')), true, 'another task keeps its file')
+})
+
+test('a running video task cannot be deleted', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const projectId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+  const host = new SpokenVideoMediaHost({
+    projectsStore: { async list() { return [{ id: projectId, title: '项目' }] } },
+  })
+  const media = join(cwd, 'data', 'projects', projectId, 'media')
+  await mkdir(media, { recursive: true })
+  await writeFile(join(media, 'runs.json'), JSON.stringify({
+    schemaVersion: 1,
+    runs: [{ id: 'v-live', type: 'video', status: 'running', createdAt: '2026-10-08T00:00:01Z' }],
+  }))
+  await assert.rejects(host.deleteTasks(currentAgent, { taskType: 'video', ids: ['v-live'] }), /排队|进行中/u)
+  const runs = JSON.parse(await readFile(join(media, 'runs.json'), 'utf8'))
+  assert.equal(runs.runs.length, 1, 'the running record stays')
+})
+
+test('deleteTasks rejects an unknown task type and an oversized batch', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const host = new SpokenVideoMediaHost({ projectsStore: { async list() { return [] } } })
+  await assert.rejects(host.deleteTasks(currentAgent, { taskType: 'subtitle', ids: ['a'] }), /audio 或 video/u)
+  const many = Array.from({ length: 51 }, (_, index) => `id-${index}`)
+  await assert.rejects(host.deleteTasks(currentAgent, { taskType: 'audio', ids: many }), /最多删除 50/u)
 })

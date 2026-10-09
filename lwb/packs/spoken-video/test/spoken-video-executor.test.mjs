@@ -10,10 +10,16 @@ function executorHarness(reasons) {
   let resolveResult
   const followups = []
   const result = new Promise((resolve) => { resolveResult = resolve })
-  const session = { id: 'creator-session-1', events: [] }
+  const log = []
+  // 真实 harness 的 Session 没有公开 events 数组，只暴露 seq 与 snapshotEvents(fromSeq)。
+  const session = {
+    id: 'creator-session-1',
+    get seq() { return log.length },
+    snapshotEvents: (fromSeq = 0) => log.slice(fromSeq),
+  }
   const emitTurnEnd = (turn, reason) => {
     const event = { seq: turn, time: Date.now(), type: 'turn/end', data: { turn, reason: { kind: reason } } }
-    session.events.push(event)
+    log.push(event)
     const before = followups.length
     sessionListener?.(session, event)
     if (reason !== 'max-tokens' || followups.length === before) { idleWaiter?.(); idleWaiter = null }

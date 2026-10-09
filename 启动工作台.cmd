@@ -48,5 +48,20 @@ rem Fallback browser when the headless shell is unavailable.
 set "LWB_REMOTION_BROWSER_EXECUTABLE=C:\Program Files\Google\Chrome\Application\chrome.exe"
 set "LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL=http://127.0.0.1:8199"
 set "LWB_SPOKEN_VIDEO_BAILIAN_IMAGE_BASE_URL=http://127.0.0.1:8199"
-npm run dev -- --port 4173
+rem Extra args (e.g. --trusted-host <domain> for tunnel access) pass through to the harness CLI.
+rem
+rem The harness prints an authenticated URL (http://127.0.0.1:4173/?token=...) that
+rem mints a session cookie. It exists only in process memory and changes on every
+rem restart, so a browser opened at the bare origin gets
+rem "dsh web authentication required". Capture it to a file so a new browser (or
+rem a new machine profile) can be pointed at the right URL without digging through
+rem this console window. 双击「打开工作台.cmd」即可用它。
+set "LWB_ACCESS_URL_FILE=E:\lifa-scratch\workbench-url.txt"
+if not exist "E:\lifa-scratch" mkdir "E:\lifa-scratch"
+if exist "%LWB_ACCESS_URL_FILE%" del "%LWB_ACCESS_URL_FILE%"
+rem Tee the launcher's stdout so the token line lands in the file as it is printed.
+rem Write it as ASCII (the URL is pure ASCII) on purpose: a UTF-8 BOM would be read by
+rem cmd as a stray character and glued onto the front of the URL, breaking the open
+rem (2026-10-08 实测：文件里出现过 "锘?ttp://..."，双击打开直接失败）。
+powershell -NoProfile -Command "$env:LWB_ACCESS_URL_FILE='%LWB_ACCESS_URL_FILE%'; & node lwb/dsh-launcher.mjs --port 4173 %* 2>&1 | ForEach-Object { $line = $_; Write-Host $line; if ($line -match 'http://127\.0\.0\.1:4173/\?token=\S+') { [System.IO.File]::WriteAllText($env:LWB_ACCESS_URL_FILE, ($line -replace '^.*?(http://)', '$1'), [System.Text.Encoding]::ASCII) } }"
 pause

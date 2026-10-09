@@ -107,9 +107,10 @@ async function writeJsonFile(path, value) {
  * the execution identity, and the run audit trail.
  *
  * Two deliberate boundaries:
- * - Publishing is never automated. `packaging` is both the deepest depth and
- *   the state machine's last stage, so a finished round leaves the operator a
- *   ready-to-publish project and nothing more.
+ * - The `publish` depth is the only one that leaves the machine, and it stops
+ *   at the platform's own submit button unless the task explicitly asked for
+ *   auto-submit. A confirm-mode round reports `awaiting`, never `published`,
+ *   because a person still has to finish it.
  * - Automation never widens a permission boundary. Delegated children already
  *   run with approval policy `never` under a workspace-write sandbox, exactly
  *   as they do when a person clicks the same button.
@@ -213,10 +214,17 @@ export class SpokenVideoScheduleHost {
    * is dropped and a task left with nothing runnable — or whose account was
    * hard deleted — is disabled with an explicit reason, so a vanished
    * reference can never make the whole file unreadable.
+   *
+   * Platform accounts live in the publisher pack's own workspace, so they are
+   * read through its host rather than from a file here. When that pack is not
+   * loaded the answer is `null` — "cannot be judged" — so a task is NOT
+   * disabled on disk just because the pack was unloaded; the round itself
+   * fails with an actionable message if it reaches the publish step.
    */
   async references(paths) {
     const validSourceIds = new Set()
     const validAccountIds = new Set()
+    let validPublishAccountIds = null
     try {
       const signals = await readJsonFile(join(paths.root, 'signals.json'), () => ({ sources: [] }))
       for (const source of Array.isArray(signals?.sources) ? signals.sources : []) {
@@ -229,7 +237,20 @@ export class SpokenVideoScheduleHost {
         if (typeof account?.id === 'string' && account.status === 'active') validAccountIds.add(account.id)
       }
     } catch { /* same */ }
-    return { validSourceIds, validAccountIds }
+    const publisher = this.#service('publisherHost')
+    if (publisher?.listAccounts) {
+      try {
+        validPublishAccountIds = new Set()
+        for (const account of await publisher.listAccounts()) {
+          // Existence only. Whether an account is currently usable — signed in,
+          // platform adapted — is a temporary condition the operator can fix,
+          // so it is checked when the round runs and reported as a blocker on
+          // the form, never by switching the task off on disk.
+          if (typeof account?.id === 'string') validPublishAccountIds.add(account.id)
+        }
+      } catch { validPublishAccountIds = null /* unreadable: treat as unjudgeable, not as deleted */ }
+    }
+    return { validSourceIds, validAccountIds, validPublishAccountIds }
   }
 
   async readFile(paths) {
@@ -269,13 +290,43 @@ export class SpokenVideoScheduleHost {
     const automationAvailable = this.context
       ? (await this.executionStatus?.())?.configured === true
       : this.#automationAvailable()
+    const publishTargets = await this.#publishTargets()
     return {
       automationAvailable,
       remotion: media?.renderers?.remotion === true,
       tts: { configured: media?.ttsConfigured === true, provider, credential: ttsCredential },
       coverImage: publish?.configured === true,
+      publish: publishTargets,
       // Deepest depth the current environment can actually reach end to end.
-      blockers: this.#runtimeBlockers(media, publish, ttsCredential, automationAvailable),
+      blockers: this.#runtimeBlockers(media, publish, ttsCredential, automationAvailable, publishTargets),
+    }
+  }
+
+  /** Platform accounts a round could actually deliver to, or the reason it cannot. */
+  async #publishTargets() {
+    const publisher = this.#service('publisherHost')
+    if (!publisher?.listAccounts) {
+      return { available: false, accounts: [], reason: '未加载「发布与账号管理」能力包，无法投递到平台。' }
+    }
+    try {
+      const accounts = await publisher.listAccounts()
+      const usable = accounts
+        .filter((account) => account.adapterReady === true)
+        .map((account) => ({
+          id: account.id,
+          label: account.label,
+          platform: account.platform,
+          platformLabel: account.platformLabel || account.platform,
+          status: account.status,
+        }))
+      const signedIn = usable.filter((account) => account.status === 'active')
+      return {
+        available: signedIn.length > 0,
+        accounts: usable,
+        reason: signedIn.length > 0 ? null : '没有已登录的平台账号，请先在「发布与账号管理 → 账号」中扫码登录。',
+      }
+    } catch (error) {
+      return { available: false, accounts: [], reason: `读取平台账号失败：${error instanceof Error ? error.message : String(error)}` }
     }
   }
 
@@ -286,7 +337,7 @@ export class SpokenVideoScheduleHost {
     return Boolean(agents?.create && agentPresets?.mount && agentDefaultModel?.currentSelection)
   }
 
-  #runtimeBlockers(media, publish, ttsCredential, automationAvailable) {
+  #runtimeBlockers(media, publish, ttsCredential, automationAvailable, publishTargets) {
     const blockers = []
     if (!automationAvailable) blockers.push({ depth: 'topic', message: this.context ? 'DSH 尚未选择默认模型，请在“设置 → 系统设置 → 模型”中完成配置。' : '当前运行环境不提供 Agent 服务，自动化不可用。' })
     if (!media) blockers.push({ depth: 'video', message: '媒体服务不可用，无法配音或渲染。' })
@@ -295,6 +346,10 @@ export class SpokenVideoScheduleHost {
         blockers.push({ depth: 'video', message: '未配置 TTS 凭据，配音阶段会失败。' })
       }
       if (media.renderers?.remotion !== true) blockers.push({ depth: 'video', message: 'Remotion 不可用，无法渲染成片。' })
+    }
+    // Surfaced on the form so a publish task is not saved with no way to deliver.
+    if (publishTargets && publishTargets.available !== true) {
+      blockers.push({ depth: 'publish', message: publishTargets.reason || '没有可用的平台账号，投递阶段会失败。' })
     }
     return blockers
   }
@@ -472,6 +527,36 @@ export class SpokenVideoScheduleHost {
   }
 
   /**
+   * 删除单轮执行记录。用户清失败轮次用：runs 没有容量上限也不会自动淘汰，
+   * 失败的轮次会一直堆在「执行记录」里（内容安排本身可以删，但那是连任务一起删）。
+   *
+   * 删完必须修正 `schedule.lastRunAt`——它被删掉那轮的时间戳如果还留着，界面上
+   * 「上次运行」会指向一条已经不存在的记录。回退到剩余最新的一轮，删空则置空。
+   */
+  async deleteScheduleRun(agent, request) {
+    const runId = String(request?.runId || '').trim()
+    if (!runId) invalid('执行记录标识不能为空。')
+    const paths = await this.paths(agent)
+    const activeEntry = this.active.get(runId)
+    if (activeEntry && activeEntry.workspace === paths.workspace) {
+      fail('SPOKEN_VIDEO_SCHEDULE_BUSY', '该轮正在执行，请先停止再删除。')
+    }
+    return this.mutate(paths, (data) => {
+      const index = data.runs.findIndex((run) => run.id === runId)
+      if (index === -1) fail('SPOKEN_VIDEO_SCHEDULE_NOT_FOUND', '执行记录不存在。')
+      const [removed] = data.runs.splice(index, 1)
+      const schedule = data.schedules.find((candidate) => candidate.id === removed.scheduleId)
+      if (schedule && schedule.lastRunAt === removed.triggeredAt) {
+        const latest = data.runs
+          .filter((run) => run.scheduleId === schedule.id)
+          .reduce((newest, run) => (!newest || String(run.triggeredAt) > String(newest.triggeredAt) ? run : newest), null)
+        schedule.lastRunAt = latest ? latest.triggeredAt : null
+      }
+      return { deleted: runId, scheduleId: removed.scheduleId, lastRunAt: schedule ? schedule.lastRunAt : null }
+    })
+  }
+
+  /**
    * Reserve the slot and start the round. The stamp and the running record are
    * written BEFORE any stage starts, so the next thirty second tick can never
    * launch the same slot twice even though a round takes many minutes.
@@ -579,9 +664,36 @@ export class SpokenVideoScheduleHost {
    */
   async #poll(step, signal, read, isDone) {
     const deadline = Date.now() + STEP_TIMEOUT_MS[step]
+    // 「暂时读不到」与「永远读不到」必须分开。写盘走「临时文件 + 原子 rename」，
+    // rename 目标被任意句符打开就 EPERM 重试（见 writeJson）——落地前那一瞬读者会
+    // 读到旧内容，这是 2026-10-08 11:17 那次 102ms 竞态的成因，重试几次即可。
+    //
+    // 但还有另一种「读不到」：记录被容量上限淘汰后，每次查询都报「不存在」——那是
+    // 永久性的，重试到超时也没用（2026-10-08 15:47 白等了 15 分钟）。所以前几次按
+    // 「可能是竞态」重试，超过预算就认定它不会自己好。
+    //
+    // 只对「查不到记录」这一类重试：其它错误（发布器点不到按钮、鉴权失败…）重试
+    // 只会把真因藏起来——2026-10-08 23:19 那轮就吃过这个亏：发布任务真实错误是
+    // 「点『发布』按钮超时 45 秒」，却被套上「写稿记录被挤出队列、请重新执行」，
+    // 把排查方向带偏了整整一轮。
+    const RETRYABLE = /不存在|丢失/u
+    const BUDGET = 5
+    let missed = 0
     for (;;) {
       signal.throwIfAborted()
-      const value = await read()
+      let value
+      try {
+        value = await read()
+      } catch (error) {
+        if (!RETRYABLE.test(String(error?.message || ''))) throw error
+        missed += 1
+        if (missed >= BUDGET) {
+          throw new Error(`${error.message}（已重试 ${BUDGET} 次仍读不到记录；${STEP_LABEL[step]}阶段的记录有保留上限，并发任务可能已把它挤出去——请重新执行本轮。）`)
+        }
+        await this.#sleep(signal)
+        continue
+      }
+      missed = 0
       if (isDone(value)) return value
       if (Date.now() > deadline) {
         fail('SPOKEN_VIDEO_SCHEDULE_TIMEOUT', `${STEP_LABEL[step]}超过 ${Math.round(STEP_TIMEOUT_MS[step] / 60_000)} 分钟仍未完成。`)
@@ -662,6 +774,9 @@ export class SpokenVideoScheduleHost {
         orientation: rest.includes('video') ? schedule.production.orientation : null,
         qcPassed: false,
         coverState: null,
+        publishState: null,
+        publishAccount: null,
+        publishUrl: null,
         error: null,
         stages: emptyStages(steps).map((stage) => (stage.step === 'topic'
           ? { ...stage, status: 'done', startedAt, completedAt: topicDoneAt, refId: generation.id, message: `候选「${project.title}」· 依据 ${project.signalCount} 条信号` }
@@ -691,11 +806,16 @@ export class SpokenVideoScheduleHost {
     const done = items.filter((item) => item.status === 'completed').length
     const status = reduceRunStatus(items, cancelled)
     const last = finalStep(schedule.depth, schedule.production.subtitleEnabled)
+    // A confirm-mode round finishes its steps but leaves the platform's submit
+    // button to a person. Saying "已发布" there would be a lie the audit trail
+    // then repeats, so the closing message reports the handover instead.
+    const awaiting = items.filter((item) => item.publishState === 'awaiting').length
     await this.#finish(paths, runId, startedAt, status, last,
       cancelled ? '本轮已按操作者要求停止，已完成的阶段产物保留。'
-        : status === 'completed' ? `本轮完成，${done} 条已推进到「${DEPTH_LABEL[schedule.depth]}」。`
-          : status === 'partial' ? `本轮部分完成：${done}/${items.length} 条推进到「${DEPTH_LABEL[schedule.depth]}」。`
-            : '本轮全部失败，请展开各条查看原因。',
+        : awaiting ? `本轮完成，${awaiting} 条已投递到平台并填好资料，等待在浏览器窗口确认发布。`
+          : status === 'completed' ? `本轮完成，${done} 条已推进到「${DEPTH_LABEL[schedule.depth]}」。`
+            : status === 'partial' ? `本轮部分完成：${done}/${items.length} 条推进到「${DEPTH_LABEL[schedule.depth]}」。`
+              : '本轮全部失败，请展开各条查看原因。',
       cancelled ? null : items.find((item) => item.error)?.error || null)
   }
 
@@ -775,6 +895,7 @@ export class SpokenVideoScheduleHost {
     if (step === 'subtitles') return this.#stageVoiceover(agent, schedule, projectId, 'subtitles', signal, paths, runId)
     if (step === 'video') return this.#stageVideo(agent, schedule, projectId, signal, paths, runId)
     if (step === 'packaging') return this.#stagePackaging(agent, projectId, signal, paths, runId)
+    if (step === 'publish') return this.#stagePublish(schedule, projectId, signal, paths, runId)
     throw new Error(`未知的自动化阶段：${step}`)
   }
 
@@ -900,6 +1021,68 @@ export class SpokenVideoScheduleHost {
       : coverState === 'both' ? '，横竖封面已生成'
         : `，封面${coverState === 'partial' ? '单侧' : ''}生成失败：${errors.landscape || errors.portrait || '未知原因'}`
     return { refId: started.id, message: `发布资料已生成${coverNote}` }
+  }
+
+  /**
+   * Hand the finished cut to the publisher pack. This is the one step that
+   * leaves the machine, so the default submit mode stops before the platform's
+   * own submit button and the item is recorded as `awaiting` rather than
+   * `submitted` — the round is not allowed to claim a publish that a person
+   * still has to finish.
+   *
+   * The first account in the target list wins; a round sends one cut to one
+   * account, matching how the manual publish page works. Fanning a single cut
+   * out to several accounts is a deliberate product decision, not a default.
+   */
+  async #stagePublish(schedule, projectId, signal, paths, runId) {
+    const target = schedule.publish
+    if (!target || !target.accountIds.length) throw new Error('该任务未配置发布账号，无法投递到平台。')
+    const publisher = this.#service('publisherHost')
+    if (!publisher?.startPublish) throw new Error('未加载「发布与账号管理」能力包，无法投递到平台。')
+    const accounts = await publisher.listAccounts()
+    const account = target.accountIds
+      .map((id) => accounts.find((item) => item.id === id))
+      .find((item) => item && item.status === 'active' && item.adapterReady === true)
+    if (!account) throw new Error('所选发布账号均不可用（未登录或平台未适配），请重新选择发布目标。')
+
+    // The publisher owns the qc and packaging gates; a failure here is its
+    // message, not a second copy of those rules.
+    const job = await publisher.startPublish({
+      projectId,
+      accountId: account.id,
+      submitMode: target.submitMode === 'auto' ? 'auto' : 'confirm',
+      // Automation has already crossed every other confirmation gate by virtue
+      // of the depth; this flag is what makes an unattended auto-submit legal.
+      confirmAuto: target.submitMode === 'auto',
+      trigger: 'schedule',
+    })
+    await this.#pushRef(paths, runId, 'publishJobIds', job.id)
+    await this.#setStage(paths, runId, projectId, 'publish', { refId: job.id })
+    const done = await this.#poll('publish', signal,
+      () => publisher.job(job.id),
+      (item) => !['queued', 'running'].includes(item.status))
+
+    if (done.status === 'failed' || done.status === 'cancelled') {
+      await this.#patchItem(paths, runId, projectId, (item) => {
+        item.publishState = 'failed'
+        item.publishAccount = account.label
+      })
+      throw new Error(done.error || '平台投递失败。')
+    }
+    // `awaiting-confirm` means the cut is uploaded and filled in, waiting for a
+    // person to press submit in the browser window.
+    const awaiting = done.status === 'awaiting-confirm'
+    await this.#patchItem(paths, runId, projectId, (item) => {
+      item.publishState = awaiting ? 'awaiting' : 'submitted'
+      item.publishAccount = `${account.platformLabel || account.platform}·${account.label}`
+      item.publishUrl = done.proof?.remoteUrl || null
+    })
+    return {
+      refId: job.id,
+      message: awaiting
+        ? `已投递到${account.label}，视频与资料已填好，等待在浏览器窗口确认发布`
+        : `已发布到${account.label}`,
+    }
   }
 
   async #pollMedia(agent, step, signal, paths, runId, projectId, mediaRunId) {

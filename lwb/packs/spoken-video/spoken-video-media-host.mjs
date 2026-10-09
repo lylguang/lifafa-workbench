@@ -1,16 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { execFile, spawn } from 'node:child_process'
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { spokenVideoDataPath } from './spoken-video-paths.mjs'
+import { guardSubtitleTimeline } from './spoken-video-subtitle-align.mjs'
+import { buildLineArtPlanPrompt, checkImageEngine, generateLineArtImage, LINE_ART_PLAN_SCHEMA, normalizeLineArtPlan, whiteboardBridgeUrl } from './spoken-video-whiteboard-art.mjs'
 import { executionEvent, executionTransition } from './spoken-video-execution.mjs'
 import WebSocket from 'ws'
 import {
   buildTechnicalReport,
   DEFAULT_VOICE_PROFILE,
+  isLoopbackEndpoint,
   MEDIA_OPERATION_STATES,
   MEDIA_OPERATION_TYPES,
   mediaServiceConfig,
@@ -28,6 +31,8 @@ import {
 } from './spoken-video-media.mjs'
 import { appendDshSessionTrace, dshChildStarted, ensureDshTrace, projectDshSessionEvent, startDshTraceSession } from './spoken-video-dsh-trace.mjs'
 import {
+  evaluateAgentProjectComposition,
+  evaluateAgentProjectFrames,
   inspectSpokenVideoAgentProject,
   prepareSpokenVideoAgentProject,
   remotionRendererAvailable,
@@ -80,12 +85,60 @@ function mediaErrorMessage(error) {
   return String(error instanceof Error ? error.message : error).replace(/^Error \[[A-Z0-9_]+\]\s*/u, '')
 }
 
-function providerFailure(label, detail) {
+// 手动任务的默认标题取文稿第一行非空内容（截 24 字）：通篇都叫「手动输入文稿」
+// 时，多条任务在列表里无法分辨（2026-10-02 用户在同步弹层里认不出自己要的那条）。
+function manualTitleFromText(value) {
+  const firstLine = String(value || '').split('\n').map((line) => line.trim()).find(Boolean) || ''
+  if (!firstLine) return '手动输入文稿'
+  const chars = [...firstLine]
+  return chars.length <= 24 ? firstLine : `${chars.slice(0, 24).join('')}…`
+}
+
+// 静态预检通过后真实求值一遍入口工程：求值失败（TDZ、坏导入等运行时错误）归位成
+// 可修复 finding 并入报告，让创作 Agent 在自己的修复环里修掉，而不是等渲染命令
+// 失败把几十分钟的整轮报废。只在静态预检通过时调用，repairable 恒为真。
+//
+// 两道门依次跑：compositions 只验加载期（读 composition 元数据，不渲染任何一帧），
+// 组件体里写在动画分支的坏引用它一律放行——2026-10-08 的 `a4 is not defined` 就是
+// 这么漏到渲染才炸的。所以再跑一道抽帧门，每场景渲一帧把那段代码逼出来。
+async function mergeRuntimeEvalFailure(report, workspace, signal) {
+  const failure = await evaluateAgentProjectComposition(workspace, { signal })
+    ?? await evaluateAgentProjectFrames(workspace, { signal })
+  if (!failure) return
+  report.passed = false
+  report.repairable = true
+  report.findings.push(failure)
+  report.failures.push(`${failure.file}:${failure.line}:${failure.column} ${failure.message}`)
+}
+
+/** Provider wording for a rejected credential, across the endpoints we call. */
+const AUTH_FAILURE_DETAIL = /(?:invalid[ _-]*api[ _-]*key|incorrect api key|unauthorized|authentication failed|api[ _-]*key[ _-]*provided)/iu
+
+function providerFailure(label, detail, endpoint = null) {
   if (label.startsWith('SciTiger') && /(?:insufficient[ _-]*points|积分不足|余额不足)/iu.test(detail)) {
     return new SpokenVideoMediaError(
       'SPOKEN_VIDEO_MEDIA_INSUFFICIENT_POINTS',
       'SciTiger 账户积分不足，请充值后重试，或切换到百炼 BYOK。',
     )
+  }
+  // 认证失败不能只说"失败"：本机部署最常见的成因是渠道没指向本机桥接，
+  // 请求落到了真云端，而那里没有有效 Key。给出可执行的下一步，而不是让
+  // 用户去猜为什么"音色失败"。
+  if (AUTH_FAILURE_DETAIL.test(detail)) {
+    if (label.startsWith('SciTiger')) {
+      return new SpokenVideoMediaError(
+        'SPOKEN_VIDEO_MEDIA_CREDENTIAL_REJECTED',
+        isLoopbackEndpoint(endpoint)
+          ? `本机桥接拒绝了配音请求（${detail}）。请打开桥接配置中心 http://127.0.0.1:8199/ 检查配音方式与小米 API Key。`
+          : `配音服务返回「${detail}」。当前渠道指向远端 SciTiger 云端，但本机部署应走本机桥接：请用「启动工作台.cmd」启动（它会把渠道指到 http://127.0.0.1:8199），或在「连接配置」里更新 SciTiger API Key。`,
+      )
+    }
+    if (label.startsWith('百炼')) {
+      return new SpokenVideoMediaError(
+        'SPOKEN_VIDEO_MEDIA_CREDENTIAL_REJECTED',
+        `百炼拒绝了当前 API Key（${detail}）。请在「连接配置」更新百炼 API Key，或把「配音服务」切换到本机桥接的云端/本地合成。`,
+      )
+    }
   }
   return new SpokenVideoMediaError('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', `${label}失败：${detail}`)
 }
@@ -370,6 +423,7 @@ function audioTaskSummary(task) {
     startedAt: task.startedAt || null,
     completedAt: task.completedAt || null,
     error: task.error || null,
+    progress: task.progressInfo || null,
     projectSync: task.projectSync || null,
     projectSyncError: task.projectSyncError || null,
     subtitleSyncError: task.subtitleSyncError || null,
@@ -385,6 +439,8 @@ function audioTaskSummary(task) {
       voiceSource: task.input.voiceSource || null,
       voiceId: task.input.voiceId || null,
       voiceName: task.input.voiceName || null,
+      // 桥接覆盖要随任务回传：任务卡要显示用的哪种合成，失败重试要原样重放。
+      bridge: task.input.bridge || null,
       rate: task.input.rate ?? null,
       volume: task.input.volume ?? null,
       subtitleEnabled: task.input.subtitleEnabled === true,
@@ -789,7 +845,9 @@ function commandError(error, label) {
 
 function ffmpegSubtitleFilter(file) {
   const escaped = file.replace(/\\/gu, '\\\\').replace(/:/gu, '\\:').replace(/'/gu, "\\'")
-  return `subtitles=filename='${escaped}':force_style='FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00131F32,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=180'`
+  // libass 默认 PlayRes 是 384x288，MarginV 按 288 的高度换算：原先的 180 等于
+  // 距底 62%，字幕被顶到画面上半部；30 ≈ 距底 10%，才是常规的底部字幕位置。
+  return `subtitles=filename='${escaped}':force_style='FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00131F32,BorderStyle=1,Outline=3,Shadow=0,Alignment=2,MarginV=30'`
 }
 
 function portableRelative(root, file) {
@@ -819,6 +877,31 @@ async function extractVideoReviewFrames(videoPath, outputDir, durationSeconds, s
   const failure = results.find((result) => result.status === 'rejected')
   if (failure) throw failure.reason
   return { timestamps, frameFiles }
+}
+
+// 接触表：把成片均匀采样拼成一张 4 列网格图（帧数随时长 8–20 张，480px 宽），
+// 供审片 Agent 一眼扫全片节奏与时序问题。逐帧 PNG 仍是精确证据，接触表是全局补充，
+// 生成失败不阻塞审片（返回 null 即跳过）。
+async function renderVideoContactSheet(videoPath, outputDir, durationSeconds, signal) {
+  try {
+    await mkdir(outputDir, { recursive: true, mode: 0o700 })
+    const duration = Math.max(0.2, Number(durationSeconds) || 0.2)
+    const count = Math.max(8, Math.min(20, Math.round(duration / 2.5) * 2))
+    const cols = 4
+    const rows = Math.ceil(count / cols)
+    const file = join(outputDir, 'contact-sheet.png')
+    await execFileAsync('ffmpeg', [
+      '-v', 'error', '-y', '-i', videoPath,
+      '-vf', `fps=${count}/${duration.toFixed(3)},scale=480:-2,tile=${cols}x${rows}:padding=8:margin=8:color=0x404040`,
+      '-frames:v', '1', file,
+    ], { signal, maxBuffer: 1024 * 1024 * 4 })
+    const info = await stat(file)
+    if (!info.isFile() || info.size < 1024) throw new Error('接触表文件为空')
+    return { file, count }
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error
+    return null
+  }
 }
 
 async function normalizedMainFrame(file, orientation, signal) {
@@ -865,7 +948,7 @@ async function measureVisualVariation(frameFiles, orientation, durationSeconds, 
  * only sees durable operation summaries and bounded media reads through the gateway.
  */
 export class SpokenVideoMediaHost {
-  constructor({ background = (work) => work, signal, projectsStore, credentials, connectionSettings, videoCreator, videoReviewer, fetch = globalThis.fetch, environment = process.env } = {}) {
+  constructor({ background = (work) => work, signal, projectsStore, credentials, connectionSettings, videoCreator, videoReviewer, lineArtPlanner, fetch = globalThis.fetch, environment = process.env } = {}) {
     if (!projectsStore) throw new Error('SpokenVideoMediaHost requires projectsStore.')
     this.background = background
     this.signal = signal
@@ -874,6 +957,7 @@ export class SpokenVideoMediaHost {
     this.connectionSettings = connectionSettings || null
     this.videoCreator = typeof videoCreator === 'function' ? videoCreator : null
     this.videoReviewer = typeof videoReviewer === 'function' ? videoReviewer : null
+    this.lineArtPlanner = typeof lineArtPlanner === 'function' ? lineArtPlanner : null
     this.fetch = fetch
     this.environment = environment
     this.queues = new Map()
@@ -891,18 +975,28 @@ export class SpokenVideoMediaHost {
     const connection = await this.connection()
     const referenceVoiceConfigured = await defaultVoiceReference().then(() => true).catch(() => false)
     const remotionAvailable = await remotionRendererAvailable()
+    // 把渠道实际指向哪里告诉界面：本机桥接 vs 远端云端。用户遇到
+    // "Invalid API key" 时，第一眼就能看出请求打到了哪个地址。
+    const scitigerLoopback = isLoopbackEndpoint(config.scitigerBaseUrl)
     return {
       ttsConfigured: true,
       ttsEndpoint: config.baseUrl ? new URL(config.baseUrl).origin : null,
       defaultVoice: { id: DEFAULT_VOICE_PROFILE.id, name: DEFAULT_VOICE_PROFILE.name },
       providers: {
         bailian: { configured: true, referenceVoiceConfigured, label: '使用自己的百炼账户', credential: connection.providers.bailian },
-        scitiger: { configured: config.scitigerConfigured, referenceVoiceConfigured, label: 'SciTiger 云端', credential: connection.providers.scitiger },
+        scitiger: {
+          configured: config.scitigerConfigured,
+          referenceVoiceConfigured,
+          label: scitigerLoopback ? '本机桥接' : 'SciTiger 云端',
+          endpoint: config.scitigerBaseUrl,
+          loopback: scitigerLoopback,
+          credential: connection.providers.scitiger,
+        },
         legacy: { configured: config.configured, referenceVoiceConfigured: false, label: '兼容 TTS 服务' },
       },
       connection,
       renderer: 'remotion',
-      renderers: { remotion: remotionAvailable, 'local-ffmpeg': true },
+      renderers: { remotion: remotionAvailable, 'local-ffmpeg': true, whiteboard: true },
       mediaReadLimitBytes: MAX_MEDIA_BYTES,
       voiceReferenceMaxBytes: MAX_VOICE_REFERENCE_BYTES,
       videoBgmMaxBytes: MAX_VIDEO_BGM_BYTES,
@@ -1128,6 +1222,149 @@ export class SpokenVideoMediaHost {
     }
   }
 
+  /**
+   * 删除已结束的媒体任务（配音/字幕与视频）及其磁盘产物。
+   *
+   * 为什么需要它：两个记录文件都是滚动数组——配音保留末 240 条、每个项目的视频
+   * runs 保留末 80 条，写入时还会再截一次（`audioTasksFile` / `runsFile` 的
+   * `.slice`）。失败的条目会被一路保留直到被新记录挤下去，用户既没法清理占空间的
+   * 失败产物，也只能一条条点「重试」。
+   *
+   * 只允许删终态（succeeded / failed）：queued 与 running 正在写产物，删掉会让
+   * 正在跑的流程落空。`this.activeRunIds` 是进程内的真实运行态，与落盘的 status
+   * 可能短暂不一致（刚启动还没落盘），所以两边都要查。
+   */
+  async deleteTasks(agent, request) {
+    const input = object(request, '删除媒体任务请求')
+    const taskType = text(input.taskType, '任务类型', 16)
+    if (taskType !== 'audio' && taskType !== 'video') fail('SPOKEN_VIDEO_MEDIA_TASK_TYPE_INVALID', '任务类型只能是 audio 或 video。')
+    const rawIds = Array.isArray(input.ids) ? input.ids : [input.id]
+    const ids = [...new Set(rawIds.map((value) => text(value, '任务标识', 64)))]
+    if (!ids.length) fail('SPOKEN_VIDEO_MEDIA_TASK_ID_INVALID', '没有选中要删除的任务。')
+    if (ids.length > 50) fail('SPOKEN_VIDEO_MEDIA_TASK_TOO_MANY', '单次最多删除 50 个任务。')
+    return taskType === 'audio' ? this.#deleteAudioTasks(agent, ids) : this.#deleteVideoTasks(agent, ids)
+  }
+
+  async #deleteAudioTasks(agent, ids) {
+    const root = await audioTasksRootFor(agent)
+    const wanted = new Set(ids)
+    const collected = []
+    await this.#mutateAudioTaskFile(root, (file) => {
+      // 运行中先拦下：正在写产物的条目删了会让流程落空，且用户通常想先看到结果。
+      const running = file.tasks.filter((task) => wanted.has(task.id) && ['queued', 'running'].includes(task.status))
+      if (running.length) {
+        fail('SPOKEN_VIDEO_MEDIA_BUSY', `任务「${running[0].source?.title || running[0].id}」还在${running[0].status === 'queued' ? '排队' : '进行中'}，请等它结束或先停止再删除。`)
+      }
+      const kept = file.tasks.filter((task) => !wanted.has(task.id))
+      for (const task of file.tasks) if (wanted.has(task.id)) collected.push(task)
+      return { ...file, tasks: kept }
+    })
+    await this.#removeAudioArtifacts(root, collected)
+    const removed = collected.map((task) => task.id)
+    return { removed, missing: ids.filter((id) => !removed.includes(id)) }
+  }
+
+  /**
+   * 清理配音任务产物：配音音频、字幕、该任务上传的参考音频。
+   * 逐个文件独立删除并吞掉「本来就不存在」——产物可能已被上一轮重试或人工清理，
+   * 那不该让整次删除失败。
+   */
+  async #removeAudioArtifacts(root, tasks) {
+    for (const task of tasks) {
+      const files = new Set()
+      // 配音音频按 taskId 命名，格式随请求（wav/mp3/m4a/ogg）——用户可能在重试时
+      // 改过格式，旧格式的残留同样要清，所以四种变体一起删，不只删记录里那一个。
+      for (const extension of ['wav', 'mp3', 'm4a', 'ogg']) {
+        files.add(`audio-media/voiceovers/${task.id}.${extension}`)
+      }
+      // 调过语速/音量时还会留一份中间源文件。
+      files.add(`audio-media/voiceovers/${task.id}.source.wav`)
+      // 记录里登记的产物路径优先，它才是真正写出来的那个。
+      for (const value of [task.result?.audioFile, task.subtitle?.current?.file]) {
+        if (typeof value !== 'string' || !value) continue
+        try { files.add(this.#audioTaskRelativePath(value, '音频任务媒体')) } catch { /* 越界的路径不碰 */ }
+      }
+      for (const relative of files) {
+        try {
+          const target = await safeMediaTarget(root, relative, '音频任务媒体')
+          await unlink(target).catch(() => {})
+        } catch { /* 路径不合法时跳过，不影响其余文件 */ }
+      }
+    }
+  }
+
+  async #deleteVideoTasks(agent, ids) {
+    const wanted = new Set(ids)
+    const projects = await this.projectsStore.list(agent)
+    const removed = []
+    const missing = []
+    for (const project of projects) {
+      const root = await projectRootFor(agent, project.id)
+      const collected = []
+      await this.#mutateRunsFile(root, (file) => {
+        const hits = file.runs.filter((run) => wanted.has(run.id))
+        if (hits.some((run) => ['queued', 'running'].includes(run.status) || this.activeRunIds.has(run.id))) {
+          fail('SPOKEN_VIDEO_MEDIA_BUSY', '选中的任务还在排队或进行中，请等它结束或先停止再删除。')
+        }
+        for (const run of hits) collected.push(run)
+        return { ...file, runs: file.runs.filter((run) => !wanted.has(run.id)) }
+      })
+      await this.#removeVideoArtifacts(root, collected)
+      for (const run of collected) {
+        removed.push(run.id)
+        // 视频任务可能挂着独立的质检任务，删掉它否则它会变成指向空任务的孤儿。
+        await this.#removeQcRuns(root, run.id)
+      }
+    }
+    for (const id of ids) if (!removed.includes(id)) missing.push(id)
+    return { removed, missing }
+  }
+
+  /**
+   * 删除渲染产物，成片（`media/videos/<runId>.mp4`，动辄几百 MB）才是占空间的大头，
+   * 工作区（`media/video-agent/<runId>`，含 inputs/public/outputs 与 webpack 缓存）
+   * 与白板中间目录一并清掉。字幕成片侧的 `media/videos/<runId>.srt` 同理。
+   */
+  async #removeVideoArtifacts(root, runs) {
+    for (const run of runs) {
+      if (run.type !== 'video') continue
+      const files = [`media/videos/${run.id}.mp4`, `media/videos/${run.id}.srt`]
+      for (const relative of files) {
+        try {
+          const target = await safeMediaTarget(root, relative, '视频任务媒体')
+          await unlink(target).catch(() => {})
+        } catch { /* 路径不合法时跳过 */ }
+      }
+      for (const relative of [`media/video-agent/${run.id}`, `media/videos/${run.id}-whiteboard`]) {
+        try {
+          const target = await safeMediaTarget(root, relative, '视频任务媒体')
+          await rm(target, { recursive: true, force: true })
+        } catch { /* 目录不存在或路径不合法时跳过 */ }
+      }
+    }
+  }
+
+  /** 连带删除挂在某视频任务上的独立质检记录（`input.videoTaskId` 指向它）。 */
+  async #removeQcRuns(root, videoTaskId) {
+    await this.#mutateRunsFile(root, (file) => {
+      const kept = file.runs.filter((run) => !(run.type === 'qc' && run.input?.videoTaskId === videoTaskId))
+      return kept.length === file.runs.length ? file : { ...file, runs: kept }
+    })
+  }
+
+  async #mutateRunsFile(root, mutate) {
+    const previous = this.runWrites.get(root) || Promise.resolve()
+    const work = previous.then(async () => {
+      const file = await readRuns(root)
+      const next = runsFile(mutate(file))
+      await writeRuns(root, next)
+      return next
+    })
+    const tail = work.catch(() => {})
+    this.runWrites.set(root, tail)
+    try { return await work } finally { if (this.runWrites.get(root) === tail) this.runWrites.delete(root) }
+  }
+
   async listAudioTasks(agent, request = {}) {
     const input = object(request, '音频任务列表请求')
     const accountId = typeof input.accountId === 'string' && input.accountId.trim() ? projectId(input.accountId) : null
@@ -1176,7 +1413,7 @@ export class SpokenVideoMediaHost {
     const input = object(request, '新建配音任务请求')
     const textSnapshot = text(input.text, '文本内容', 60_000)
     const sourceProjectId = typeof input.sourceProjectId === 'string' && input.sourceProjectId.trim() ? projectId(input.sourceProjectId) : null
-    let source = { kind: 'manual-text', projectId: null, projectTitle: null, title: typeof input.title === 'string' && input.title.trim() ? text(input.title, '文稿标题', 160) : '手动输入文稿', text: textSnapshot }
+    let source = { kind: 'manual-text', projectId: null, projectTitle: null, title: typeof input.title === 'string' && input.title.trim() ? text(input.title, '文稿标题', 160) : manualTitleFromText(textSnapshot), text: textSnapshot }
     let project = null
     if (sourceProjectId) {
       project = await this.projectsStore.get(agent, { projectId: sourceProjectId })
@@ -1193,6 +1430,17 @@ export class SpokenVideoMediaHost {
       data = { ...data, referenceAudio: await this.#freezeVoiceReference(root, id, data.referenceAudio) }
     }
     const task = { id, type: 'voiceover', status: 'queued', createdAt: now, source, input: data, projectRevision: project?.revision || null, subtitle: { status: 'idle' } }
+    // 纯手动任务的「生成后自动采纳」：提交时指定目标项目，配音+字幕都成功后由
+    // 执行尾部自动采纳进该项目（复用 syncAudioTask 的语义与校验），视频页立即可见。
+    const autoAdoptProjectId = !sourceProjectId && typeof input.autoAdoptProjectId === 'string' && input.autoAdoptProjectId.trim() ? input.autoAdoptProjectId.trim() : null
+    if (autoAdoptProjectId) {
+      // 提交时就校验项目可用（有不同稿件立即报错，不浪费一次配音）。
+      const target = await this.projectsStore.get(agent, { projectId: projectId(autoAdoptProjectId) })
+      if (target.artifacts?.script?.data?.body && target.artifacts.script.data.body.trim() !== textSnapshot.trim()) {
+        fail('SPOKEN_VIDEO_STAGE_BLOCKED', `「${target.title}」已有不同稿件，不能自动放进（会覆盖稿件）。请改选其他项目或不放。`)
+      }
+      task.autoAdoptProjectId = autoAdoptProjectId
+    }
     await this.#mutateAudioTaskFile(root, (file) => ({ ...file, tasks: [...file.tasks, task].slice(-AUDIO_TASK_LIMIT) }))
     this.activeAudioTaskRuns.add(`${task.id}:voiceover`)
     void this.background(this.#runAudioTask(agent, root, task.id).finally(() => this.activeAudioTaskRuns.delete(`${task.id}:voiceover`)))
@@ -1201,15 +1449,70 @@ export class SpokenVideoMediaHost {
 
   /** Reuse completed local media; never calls a model or media provider. */
   async syncAudioTask(agent, request) {
-    const id = text(object(request, '同步配音结果请求').taskId, '音频任务标识', 64)
+    const input = object(request, '同步配音结果请求')
+    const id = text(input.taskId, '音频任务标识', 64)
+    const targetProjectId = typeof input.targetProjectId === 'string' && input.targetProjectId.trim() ? projectId(input.targetProjectId) : null
     const root = await audioTasksRootFor(agent)
-    const task = (await readAudioTasks(root)).tasks.find((item) => item.id === id)
+    let task = (await readAudioTasks(root)).tasks.find((item) => item.id === id)
     if (!task) fail('SPOKEN_VIDEO_NOT_FOUND', '音频任务不存在。')
     if (task.status !== 'succeeded' || !task.result?.audio?.file) fail('SPOKEN_VIDEO_STAGE_BLOCKED', '请先完成配音。')
     if (['queued', 'running'].includes(task.subtitle?.status)) fail('SPOKEN_VIDEO_STAGE_BLOCKED', '字幕仍在生成，请完成后再同步。')
+    // 手动任务没有项目归属：允许用户指定目标项目，把音频+字幕「采纳」为该项目
+    // 的当前配音版本。项目还没有稿件时，先把任务文稿落成 topic+script（手动路径，
+    // 幂等键防重试重复提交）；已有稿件但与任务文稿不同时不静默覆盖——覆盖稿件是
+    // 另一个决定，请走项目内「生成配音」或新建项目。项目任务不受影响。
+    if (!task.source?.projectId && targetProjectId) {
+      const detail = await this.projectsStore.get(agent, { projectId: targetProjectId })
+      if (detail.artifacts?.script?.data?.body && detail.artifacts.script.data.body.trim() !== task.source.text?.trim()) {
+        fail('SPOKEN_VIDEO_STAGE_BLOCKED', `「${detail.title}」已有不同稿件。采纳会覆盖稿件与配音，请改用项目内「生成配音」，或新建一个项目后再同步本条音频。`)
+      }
+      let current = detail
+      if (!detail.artifacts?.topic) {
+        await this.projectsStore.commit(agent, {
+          projectId: targetProjectId, expectedRevision: current.revision, stage: 'topic', idempotencyKey: `audio-task-${task.id}-topic`,
+          payload: { title: task.source.title || '手动配音采纳', source: 'manual' },
+        })
+        current = await this.projectsStore.get(agent, { projectId: targetProjectId })
+      }
+      if (!current.artifacts?.script) {
+        await this.projectsStore.commit(agent, {
+          projectId: targetProjectId, expectedRevision: current.revision, stage: 'script', idempotencyKey: `audio-task-${task.id}-script`,
+          payload: { body: task.source.text || '' },
+        })
+        current = await this.projectsStore.get(agent, { projectId: targetProjectId })
+      }
+      task = await this.#adoptAudioTaskIntoProject(agent, root, task, targetProjectId)
+    }
     const synced = await this.#syncAudioTaskProject(agent, task)
     if (synced) await this.#syncAudioTaskSubtitles(agent, synced)
     return this.audioTask(agent, { taskId: id })
+  }
+
+  /** 把无项目任务「采纳」进目标项目：稿件缺失时补 topic+script（幂等），已有不同稿件则拒绝。 */
+  async #adoptAudioTaskIntoProject(agent, root, task, targetProjectId) {
+    const detail = await this.projectsStore.get(agent, { projectId: targetProjectId })
+    if (detail.artifacts?.script?.data?.body && detail.artifacts.script.data.body.trim() !== task.source.text?.trim()) {
+      fail('SPOKEN_VIDEO_STAGE_BLOCKED', `「${detail.title}」已有不同稿件。采纳会覆盖稿件与配音，请改用项目内「生成配音」，或新建一个项目后再同步本条音频。`)
+    }
+    let current = detail
+    if (!detail.artifacts?.topic) {
+      await this.projectsStore.commit(agent, {
+        projectId: targetProjectId, expectedRevision: current.revision, stage: 'topic', idempotencyKey: `audio-task-${task.id}-topic`,
+        payload: { title: task.source.title || '手动配音采纳', source: 'manual' },
+      })
+      current = await this.projectsStore.get(agent, { projectId: targetProjectId })
+    }
+    if (!current.artifacts?.script) {
+      await this.projectsStore.commit(agent, {
+        projectId: targetProjectId, expectedRevision: current.revision, stage: 'script', idempotencyKey: `audio-task-${task.id}-script`,
+        payload: { body: task.source.text || '' },
+      })
+      current = await this.projectsStore.get(agent, { projectId: targetProjectId })
+    }
+    return this.#mutateAudioTask(root, task.id, (current2) => ({
+      ...current2,
+      source: { ...current2.source, kind: 'adopted-by-project', projectId: targetProjectId, projectTitle: current.title, scriptRevision: current.artifacts.script.revision },
+    }))
   }
 
   async startAudioTaskSubtitles(agent, request) {
@@ -1511,12 +1814,27 @@ export class SpokenVideoMediaHost {
       const audio = { file: written.relativePath, mediaType: mediaTypeForFormat(outputFormat), bytes: written.bytes, durationSeconds: probe.durationSeconds || generated.durationSeconds || null, sampleRate: probe.sampleRate }
       task = await this.#mutateAudioTask(root, task.id, (current) => ({ ...current, result: { audio, provider: generated.provider, taskId: generated.taskId || null, voiceId: generated.voiceId || current.input.voiceId || null } }))
       await this.#syncAudioTaskProject(agent, task, { replace: true })
-      await this.#mutateAudioTask(root, task.id, (current) => ({ ...current, status: 'succeeded', completedAt: new Date().toISOString() }))
+      // autoAdopt 任务把「落 succeeded」推迟到采纳之后：对用户「生成=已在项目里」
+      // 是一个原子事实，轮询者不应看到「成功但未同步」的中间态。
+      if (!task.autoAdoptProjectId) await this.#mutateAudioTask(root, task.id, (current) => ({ ...current, status: 'succeeded', completedAt: new Date().toISOString() }))
     } catch (error) {
       const message = mediaErrorMessage(error)
       await this.#mutateAudioTask(root, taskId, (current) => ({ ...current, status: 'failed', completedAt: new Date().toISOString(), error: message.slice(0, 2000) }))
       return
     } finally { this.runSecrets.delete(taskId) }
+    // 「生成后自动放进项目」：在状态落 succeeded 之前完成采纳——对用户这是一个
+    // 原子动作（生成=进项目）。字幕提交放它后面（异步），字幕完成时的补挂会接上。
+    if (task.autoAdoptProjectId && !task.source?.projectId) {
+      try {
+        task = await this.#adoptAudioTaskIntoProject(agent, root, task, task.autoAdoptProjectId)
+        const synced = await this.#syncAudioTaskProject(agent, task, { replace: true })
+        if (!synced) throw new Error((await readAudioTasks(root)).tasks.find((item) => item.id === taskId)?.projectSyncError || '原因未知')
+      } catch (error) {
+        // 采纳失败不吞掉配音成果：任务仍成功，错误写 projectSyncError 供手动重试。
+        await this.#mutateAudioTask(root, taskId, (current) => ({ ...current, projectSyncError: `自动放进项目失败（音频已保留）：${String(error?.message || error).slice(0, 400)}` }))
+      }
+      await this.#mutateAudioTask(root, taskId, (current) => ({ ...current, status: 'succeeded', completedAt: new Date().toISOString() }))
+    }
     // Audio is already durable and successful. Subtitle submission and execution
     // have their own failure boundary, so ASR cannot invalidate usable audio.
     if (task.input.subtitleEnabled) {
@@ -1525,6 +1843,13 @@ export class SpokenVideoMediaHost {
       } catch (error) {
         await this.#mutateAudioTask(root, taskId, (current) => ({ ...current, subtitle: { ...current.subtitle, status: 'failed', completedAt: new Date().toISOString(), error: String(error?.message || error).slice(0, 2000) } }))
       }
+    }
+    // 字幕若已先完成（mock/缓存路径可能秒完），主动补挂一次；仍在跑则由完成时的补挂接手。
+    if (task.source?.projectId) {
+      try {
+        task = await this.#mutateAudioTask(root, taskId, (current) => current)
+        if (task.subtitle?.current?.srt) await this.#syncAudioTaskSubtitles(agent, task)
+      } catch { /* 补挂失败已由 #syncAudioTaskSubtitles 落 subtitleSyncError */ }
     }
   }
 
@@ -1573,6 +1898,22 @@ export class SpokenVideoMediaHost {
         const completed = await this.#poll(config, `/api/v1/subtitles/tasks/${encodeURIComponent(externalTaskId)}`, '字幕对齐')
         result = { taskId: externalTaskId, subtitle: subtitleResult(completed), diagnostics: completed.diagnostics || null }
       }
+      // 与视频路径同源的对齐守卫：云端 ASR 的时间轴可能与真实音频脱节（文本全对、
+      // 时间轴滞后 4-10 秒且各段不均匀，实测 2026-10-01《牡丹亭》）。守卫把 cue 与
+      // 音频的实际语音分布对齐，漂移成立就改用重对齐后的 SRT。
+      //
+      // 这里原先没有守卫，是「配音 / 字幕」页产出的字幕唯一会绕过对齐的路径——而
+      // 白板成片的场景切场与烧录字幕都从这份 SRT 推导，于是错位被原样带进成片。
+      // 守卫任何异常都只记录，绝不阻塞字幕产出。
+      let alignmentGuard
+      try {
+        const guarded = await guardSubtitleTimeline({ audioPath, srt: result.subtitle.srt, language: input.language, signal: this.signal })
+        alignmentGuard = guarded.guard
+        if (guarded.applied) result.subtitle = { ...result.subtitle, srt: guarded.srt, cueCount: guarded.guard?.cueCount ?? result.subtitle.cueCount }
+      } catch (error) {
+        alignmentGuard = { applied: false, method: 'none', reason: `对齐守卫异常：${error?.message || error}` }
+      }
+      result.diagnostics = { ...(result.diagnostics || {}), alignmentGuard }
       await this.#audioEvent(root, task.id, '识别完成，校验并保存时间轴', { taskId: result.taskId, cueCount: result.subtitle.cueCount, diagnostics: result.diagnostics })
       const file = `audio-media/subtitles/${task.id}-${subtitleId}.srt`
       await this.#writeAudioTaskFile(root, file, result.subtitle.srt)
@@ -1586,6 +1927,25 @@ export class SpokenVideoMediaHost {
   }
 
   async #syncAudioTaskSubtitles(agent, task) {
+    if (!task.subtitle?.current?.srt || !task.source?.projectId) return
+    // 自动采纳与字幕完成是两条并行的后台链：字幕先完成时 projectSync 可能还没写入，
+    // 主动补挂与完成补挂也可能相撞（revision 冲突）。短退避重试吞掉这类时序差，
+    // 真正的冲突（稿件/配音被换掉）重试也不会好，照常落 subtitleSyncError。
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await this.#syncAudioTaskSubtitlesOnce(agent, task)
+        return
+      } catch (error) {
+        if (attempt >= 4) {
+          await this.#mutateAudioTask(await audioTasksRootFor(agent), task.id, (current) => ({ ...current, subtitleSyncError: `字幕已保存，同步项目失败：${String(error?.message || error).slice(0, 500)}` }))
+          return
+        }
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 400 * attempt))
+      }
+    }
+  }
+
+  async #syncAudioTaskSubtitlesOnce(agent, task) {
     if (!task.subtitle?.current?.srt || !task.source?.projectId) return
     try {
       if (!task.projectSync) fail('SPOKEN_VIDEO_STAGE_BLOCKED', '配音尚未同步到项目，请先同步配音结果。')
@@ -1602,7 +1962,7 @@ export class SpokenVideoMediaHost {
       }
       await this.#mutateAudioTask(await audioTasksRootFor(agent), task.id, (current) => ({ ...current, subtitleSyncError: null }))
     } catch (error) {
-      await this.#mutateAudioTask(await audioTasksRootFor(agent), task.id, (current) => ({ ...current, subtitleSyncError: `字幕已保存，同步项目失败：${String(error?.message || error).slice(0, 500)}` }))
+      throw error
     }
   }
 
@@ -1739,7 +2099,7 @@ export class SpokenVideoMediaHost {
     }
     if (!response.ok) {
       const detail = stringAt(body, ['message'], ['error', 'message']) || `HTTP ${response.status}`
-      throw providerFailure(label, detail)
+      throw providerFailure(label, detail, url)
     }
     return body
   }
@@ -1990,11 +2350,16 @@ export class SpokenVideoMediaHost {
     }
   }
 
-  #scitigerData(body, label) {
+  #scitigerData(body, label, endpoint = null) {
     if (body?.success === true && body.data && typeof body.data === 'object') return body.data
     if (body?.code === 200 && body.data && typeof body.data === 'object') return body.data
     const detail = stringAt(body, ['message'], ['error', 'message']) || `${label}没有返回有效数据。`
-    throw providerFailure(label, detail)
+    throw providerFailure(label, detail, endpoint)
+  }
+
+  /** SciTiger replies share one error shape; resolve the endpoint so auth failures can be explained. */
+  #scitigerResponse(body, label) {
+    return this.#scitigerData(body, label, mediaServiceConfig(this.environment).scitigerBaseUrl)
   }
 
   async #scitigerJson(run, path, init, label) {
@@ -2004,14 +2369,29 @@ export class SpokenVideoMediaHost {
     return this.#externalJson(`${config.scitigerBaseUrl}${path}`, { ...request, headers: { ...this.#scitigerHeaders(run, json), ...headers } }, label)
   }
 
-  async #scitigerPoll(run, path, label) {
+  async #scitigerPoll(run, path, label, onProgress = null) {
     const started = Date.now()
+    let lastProgressKey = ''
     while (Date.now() - started < MAX_POLL_MS) {
-      const data = this.#scitigerData(await this.#scitigerJson(run, path, { method: 'GET' }, `${label}状态查询`), `${label}状态查询`)
+      const data = this.#scitigerResponse(await this.#scitigerJson(run, path, { method: 'GET' }, `${label}状态查询`), `${label}状态查询`)
       const state = String(data.status || data.job_status || '').trim().toLowerCase()
       if (['completed', 'succeeded', 'success'].includes(state)) return data
       if (['failed', 'cancelled', 'canceled'].includes(state)) fail('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', `${label}任务${state}：${stringAt(data, ['error_message'], ['error', 'message']) || '没有返回原因'}`)
       if (!['queued', 'pending', 'processing', 'running', 'in_progress'].includes(state)) fail('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', `${label}返回了未知任务状态。`)
+      // 桥接会随轮询返回 stage/progress（如「分段合成 2/5 · 36%」）与 queue_ahead
+      // （入队快照）；仅在变化时回调，长文案分段合成要好几分钟，不透传进度会被当成卡死。
+      if (onProgress) {
+        const stage = typeof data.stage === 'string' && data.stage.trim() ? data.stage.trim() : null
+        const rawProgress = Number(data.progress)
+        const progress = Number.isFinite(rawProgress) ? Math.max(0, Math.min(100, Math.round(rawProgress))) : null
+        const rawAhead = Number(data.queue_ahead)
+        const queueAhead = Number.isFinite(rawAhead) ? Math.max(0, Math.round(rawAhead)) : null
+        const key = `${stage ?? ''}@${progress ?? ''}@${queueAhead ?? ''}`
+        if (key !== lastProgressKey) {
+          lastProgressKey = key
+          await Promise.resolve(onProgress({ stage, progress, queueAhead })).catch(() => {})
+        }
+      }
       await delay(POLL_INTERVAL_MS)
     }
     fail('SPOKEN_VIDEO_MEDIA_SERVICE_TIMEOUT', `${label}任务在 ${MAX_POLL_MS / 60_000} 分钟内未完成。`)
@@ -2019,11 +2399,13 @@ export class SpokenVideoMediaHost {
 
   async #scitigerVoiceover(root, run, script, input) {
     const reference = ['system', 'reference', 'upload'].includes(input.voiceSource) ? await this.#voiceReference(root, input) : null
-    const submitted = this.#scitigerData(await this.#scitigerJson(run, '/api/v1/tts/jobs', {
+    const submitted = this.#scitigerResponse(await this.#scitigerJson(run, '/api/v1/tts/jobs', {
       method: 'POST',
       body: JSON.stringify({
         text: script,
-        ...(reference ? { reference_audio_asset_id: await this.#scitigerUploadAudio(run, reference.audio, reference.path, reference.name) } : { voice_source: input.voiceSource, ...(input.voiceId ? { voice_id: input.voiceId } : {}) }),
+        // 上传标签是给桥接日志看的，用参考音频的名字会让失败信息变成
+        // 「Tiffy - 自信失败：…」，把渠道/凭证问题误报成音色问题。
+        ...(reference ? { reference_audio_asset_id: await this.#scitigerUploadAudio(run, reference.audio, reference.path, 'SciTiger 参考音频上传') } : { voice_source: input.voiceSource, ...(input.voiceId ? { voice_id: input.voiceId } : {}) }),
         output_format: input.outputFormat || 'wav',
         voice_settings: { rate: input.rate, volume: input.volume, pitch: input.pitch },
         ...(input.bridge?.channel ? { tts_provider: input.bridge.channel } : {}),
@@ -2032,7 +2414,17 @@ export class SpokenVideoMediaHost {
     }, 'SciTiger TTS 提交'), 'SciTiger TTS 提交')
     const taskId = stringAt(submitted, ['job_id'], ['task_id'], ['id'])
     if (!taskId) fail('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', 'SciTiger TTS 没有返回任务标识。')
-    const completed = await this.#scitigerPoll(run, `/api/v1/tts/jobs/${encodeURIComponent(taskId)}`, 'SciTiger TTS')
+    const completed = await this.#scitigerPoll(run, `/api/v1/tts/jobs/${encodeURIComponent(taskId)}`, 'SciTiger TTS', async ({ stage, progress, queueAhead }) => {
+      const queued = !stage && Number.isFinite(queueAhead) && queueAhead > 0
+      const stageText = queued ? `排队中（前面还有 ${queueAhead} 个任务）` : (stage || '处理中')
+      const label = queued ? stageText : `配音进行中：${stageText}${progress == null ? '' : ` · ${progress}%`}`
+      await this.#mutateAudioTask(root, run.id, (task) => {
+        // 卡片要一眼看到「分段合成 3/5 · 54%」，执行记录要留下完整轨迹，一次落盘。
+        task.progressInfo = { stage: stageText, progress: queued || progress == null ? null : progress, updatedAt: new Date().toISOString() }
+        executionEvent(task, label, { actor: '媒体处理' })
+        return task
+      })
+    })
     const audioUrl = stringAt(completed, ['result', 'audio_url'], ['audio_url'], ['result', 'url'], ['url'])
     if (!audioUrl) fail('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', 'SciTiger TTS 没有返回完整音频地址。')
     return { provider: 'scitiger', taskId, voiceId: input.voiceId || null, voiceName: reference?.name || input.voiceName || null, audio: await this.#downloadWithRetry(audioUrl, 'SciTiger 配音', this.#scitigerHeaders(run, false)) }
@@ -2157,7 +2549,7 @@ export class SpokenVideoMediaHost {
     const form = new FormData()
     form.append('file', new Blob([audio], { type: mediaTypeForFormat(extension) }), `audio.${extension}`)
     const body = await this.#scitigerJson(run, '/api/v1/media/audio-uploads', { method: 'POST', body: form, json: false }, label)
-    const data = this.#scitigerData(body, label)
+    const data = this.#scitigerResponse(body, label)
     const assetId = stringAt(data, ['asset_id'], ['assetId'])
     if (!assetId) fail('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', `${label}没有返回资产标识。`)
     return assetId
@@ -2165,7 +2557,7 @@ export class SpokenVideoMediaHost {
 
   async #scitigerSubtitles(run, audio, audioPath, script, input) {
     const assetId = await this.#scitigerUploadAudio(run, audio, audioPath)
-    const submitted = this.#scitigerData(await this.#scitigerJson(run, '/api/v1/subtitle/jobs', {
+    const submitted = this.#scitigerResponse(await this.#scitigerJson(run, '/api/v1/subtitle/jobs', {
       method: 'POST',
       body: JSON.stringify({
         audio_asset_id: assetId,
@@ -2391,6 +2783,17 @@ export class SpokenVideoMediaHost {
       result = { taskId, subtitle: subtitleResult(completed), diagnostics: completed.diagnostics || null }
     }
     const { taskId, subtitle } = result
+    // 云端 ASR 的时间轴可能与真实音频脱节（实测滞后 4-6 秒且各段不均匀，文本却全对）。
+    // 守卫把 cue 与音频语音分布对齐：漂移成立就改用重对齐后的 SRT；守卫自身异常只记录，不阻塞字幕产出。
+    let alignmentGuard
+    try {
+      const guarded = await guardSubtitleTimeline({ audioPath, srt: subtitle.srt, language: run.input.language, signal: this.signal })
+      alignmentGuard = guarded.guard
+      if (guarded.applied) subtitle.srt = guarded.srt
+    } catch (error) {
+      alignmentGuard = { applied: false, method: 'none', reason: `对齐守卫异常：${error?.message || error}` }
+    }
+    result.diagnostics = { ...(result.diagnostics || {}), alignmentGuard }
     const relativePath = `media/subtitles/${run.id}.srt`
     await this.#write(root, relativePath, subtitle.srt)
     await this.#mutateRun(root, run.id, (current) => { executionEvent(current, '识别完成，时间轴字幕已保存', { actor: '字幕服务', detail: { taskId, cueCount: subtitle.cueCount } }); return { ...current, result: { taskId, srt: subtitle.srt, srtFile: relativePath, cueCount: subtitle.cueCount, diagnostics: result.diagnostics || null } } })
@@ -2410,6 +2813,7 @@ export class SpokenVideoMediaHost {
 
   async #renderVideo(agent, root, run) {
     if (run.input.renderer === 'local-ffmpeg') return this.#renderLegacyVideo(agent, root, run)
+    if (run.input.renderer === 'whiteboard') return this.#renderWhiteboardVideo(agent, root, run)
     return this.#renderAiDirectorVideo(agent, root, run)
   }
 
@@ -2489,7 +2893,422 @@ export class SpokenVideoMediaHost {
         video: { file: videoFile, mediaType: 'video/mp4', bytes: info.size, durationSeconds: probe.durationSeconds, width: probe.width, height: probe.height, fps: probe.fps, hasAudio: probe.hasAudio },
       },
     })
-    return { project: committed.project, artifact: committed.artifact, video: { file: videoFile, ...probe, bytes: info.size } }
+    // 与白板路径同理：本地渲染没有独立审片阶段，技术质检必须内联提交，
+    // 否则成片不会出现在发布页。
+    const qc = await this.#commitInlineTechnicalQc(agent, run, committed, { audioPath, subtitles, subtitleEnabled, orientation })
+    return { project: qc.project, artifact: committed.artifact, video: { file: videoFile, ...probe, bytes: info.size }, qc: { passed: true, artifact: qc.artifact, technical: qc.technical } }
+  }
+
+  // ── 白板手绘渲染器：确定性管线，复用白板能力包自带的本地引擎 ──
+  //
+  // 字幕时间轴是白板动画「第几秒画哪个元素」的唯一依据（startMs 查表），所以与
+  // Remotion 路径同理：即使不烧录字幕，也必须有字幕产物，否则直接拒绝。
+  // 线稿约定：项目 media/whiteboard/ 下每幕一张 scene-*.png（16:9，暖米黄纸底）。
+  // 同名 .annotation.json 可省略——缺省时按字幕 cue 自动生成标注骨架（startMs 精确
+  // 对齐字幕，区域为等分占位；精调可在白板包预览台完成或手工放置标注文件）。
+  //
+  // 成片必须补配音音轨：白板引擎只输出无声视频流，音频在这里用 ffmpeg 合成，
+  // 同时把画面规格化到 QC 要求的 1920x1080 / 1080x1920、30fps。
+
+  // ── 白板线稿生成：按字幕分幕出线稿，落到 media/whiteboard/ 供渲染消费 ──
+  //
+  // 设计取舍：生成是「可失败的资产准备」，不塞进渲染 run——一张废图不值得
+  // 重跑 7 分钟渲染。前端拿到 plan 后批量/单张触发生成，缩略图人工确认后再
+  // 提交视频任务（对应白板 skill 的「线稿确认关卡」）。
+  // 文件命名 scene-NN-story.png：与渲染分支的幕号匹配约定一致。
+
+  #lineArtJobs = new Map()
+
+  /**
+   * 线稿分镜师（DSH 结构化执行器）：把每幕旁白转成「画什么」的英文视觉描述。
+   * 旁白原文绝不能直接喂给生图模型——Qwen-Image 会把长中文旁白整段手写到
+   * 画面上（2026-10-01 实测）。缺执行器时明确报错，而不是退化到翻车路径。
+   */
+  #requireLineArtPlanner() {
+    if (typeof this.lineArtPlanner !== 'function') {
+      throw fail('SPOKEN_VIDEO_WHITEBOARD_PLANNER_UNAVAILABLE', '线稿分镜师未配置（需要 DSH 模型支持），无法把旁白转成画面描述。请检查模型配置后重试。')
+    }
+    return this.lineArtPlanner
+  }
+
+  /**
+   * 线稿缩略图（320px JPEG base64）。plan 一次带回全部缩略图，浏览器不用拉
+   * 几 MB 的原图。压好的缩略图缓存在 media/whiteboard/.thumbs/，按源图 mtime
+   * 判断是否需要重压。
+   */
+  async #lineArtThumb(engineRoot, python, lineArtDir, fileName) {
+    const source = join(lineArtDir, fileName)
+    const thumbDir = join(lineArtDir, '.thumbs')
+    const target = join(thumbDir, `${fileName.replace(/\.[^.]+$/u, '')}.thumb.jpg`)
+    try {
+      const [sourceInfo, targetInfo] = await Promise.all([stat(source), stat(target).catch(() => null)])
+      if (targetInfo && targetInfo.mtimeMs >= sourceInfo.mtimeMs) {
+        const cached = await readFile(target)
+        return `data:image/jpeg;base64,${cached.toString('base64')}`
+      }
+    } catch { /* 缓存不可用则重压 */ }
+    await mkdir(join(lineArtDir, '.thumbs'), { recursive: true, mode: 0o700 })
+    const script = "import sys; from PIL import Image; im = Image.open(sys.argv[1]); im.thumbnail((320, 320)); im.convert('RGB').save(sys.argv[2], 'JPEG', quality=70)"
+    await execFilePromise(python, ['-c', script, source, target], { timeout: 30_000 })
+    const thumb = await readFile(target)
+    return `data:image/jpeg;base64,${thumb.toString('base64')}`
+  }
+
+  /** 视觉描述缓存文件路径与版本键。 */
+  async #lineArtDescriptionCache(agent, root, projectId) {
+    const detail = await this.projectsStore.get(agent, { projectId })
+    const key = `${detail.artifacts?.script?.revision || 0}-${detail.artifacts?.subtitles?.revision || 0}`
+    return { file: resolve(root, 'media', 'whiteboard', 'descriptions.json'), key }
+  }
+
+  /**
+   * 旁白 → 视觉描述。缓存命中直接用；稿件或字幕更新后自动重算。
+   * 返回 Map<幕号, 英文视觉描述>。
+   */
+  async #ensureLineArtDescriptions(agent, root, projectId, scenes) {
+    const planner = this.#requireLineArtPlanner()
+    const { file, key } = await this.#lineArtDescriptionCache(agent, root, projectId)
+    let cached = null
+    try {
+      cached = JSON.parse(await readFile(file, 'utf8'))
+    } catch { /* 无缓存或损坏，重新生成 */ }
+    if (cached?.key === key && Array.isArray(cached?.scenes)) {
+      return normalizeLineArtPlan(cached, scenes)
+        .reduce((map, item) => map.set(item.index, item.visual), new Map())
+    }
+
+    const raw = await planner({
+      prompt: buildLineArtPlanPrompt(scenes),
+      schema: LINE_ART_PLAN_SCHEMA,
+      agent,
+    })
+    const normalized = normalizeLineArtPlan(raw, scenes)
+    await mkdir(dirname(file), { recursive: true, mode: 0o700 })
+    await writeFile(file, `${JSON.stringify({ key, generatedAt: new Date().toISOString(), scenes: normalized }, null, 2)}\n`, { mode: 0o600 })
+    return normalized.reduce((map, item) => map.set(item.index, item.visual), new Map())
+  }
+
+  #sceneImageName(index) {
+    return `scene-${String(index).padStart(2, '0')}-story.png`
+  }
+
+  /** 幕号 → 线稿文件名。接受 scene-NN.png 与 scene-NN-*.png 两种手工命名。 */
+  async #matchSceneImages(lineArtDir, sceneCount) {
+    let names = []
+    try { names = await readdir(lineArtDir) } catch { names = [] }
+    const images = []
+    const missing = []
+    for (let index = 1; index <= sceneCount; index++) {
+      const nn = String(index).padStart(2, '0')
+      const exact = names.find((name) => new RegExp(`^scene-${nn}\\.(png|jpe?g)$`, 'iu').test(name))
+      const prefixed = names.find((name) => new RegExp(`^scene-${nn}-[^/]*\\.(png|jpe?g)$`, 'iu').test(name))
+      const found = exact || prefixed
+      if (found) images.push(found)
+      else missing.push(index)
+    }
+    if (missing.length) {
+      throw new Error(`media/whiteboard/ 缺少第 ${missing.join('、')} 幕的线稿（scene-${String(missing[0]).padStart(2, '0')}*.png，16:9 暖米黄纸底，画面不要出现文字）。`)
+    }
+    return images
+  }
+
+  /** 分幕规划 + 现有线稿清单 + 生图引擎状态。确定性只读，给前端画面板。 */
+  async whiteboardLineArtPlan(agent, request) {
+    const { root, subtitles } = await this.#whiteboardSubtitleContext(agent, request)
+    const engineRoot = this.#whiteboardEngineRoot()
+    const python = await this.#whiteboardPython(engineRoot)
+    // 分幕只读字幕内容，写到系统临时目录，用完即删，不进项目媒体目录
+    const planSrt = join(tmpdir(), `lwb-wb-plan-${randomUUID()}.srt`)
+    await writeFile(planSrt, subtitles.srt, { mode: 0o600 })
+    let parsed
+    try {
+      parsed = await this.#runWhiteboardScript(engineRoot, python, 'parse_srt.py', [planSrt])
+    } finally {
+      await unlink(planSrt).catch(() => {})
+    }
+    let scenes = null
+    try { scenes = JSON.parse(parsed.stdout).scenes }
+    catch { throw fail('SPOKEN_VIDEO_WHITEBOARD_FAILED', '字幕分幕输出无法解析。') }
+    if (!Array.isArray(scenes) || scenes.length === 0) throw fail('SPOKEN_VIDEO_WHITEBOARD_FAILED', '字幕没有解析出任何分幕。')
+
+    const lineArtDir = resolve(root, 'media/whiteboard')
+    let names = []
+    try { names = await readdir(lineArtDir) } catch { names = [] }
+    const items = []
+    for (const scene of scenes) {
+      const index = scene.sceneIndex
+      const nn = String(index).padStart(2, '0')
+      const found = names.find((name) => new RegExp(`^scene-${nn}(-[^/]*)?\\.(png|jpe?g)$`, 'iu').test(name))
+      let bytes = null
+      if (found) bytes = (await stat(join(lineArtDir, found))).size
+      items.push({
+        index,
+        startMs: scene.startMs,
+        endMs: scene.endMs,
+        durationMs: scene.sceneDurationMs,
+        text: scene.text,
+        file: found ? `media/whiteboard/${found}` : null,
+        fileName: found || null,
+        bytes,
+        thumb: found ? await this.#lineArtThumb(engineRoot, python, lineArtDir, found) : null,
+      })
+    }
+    const engine = await checkImageEngine(whiteboardBridgeUrl())
+    const generated = items.filter((item) => item.file).length
+    return {
+      scenes: items,
+      total: items.length,
+      generated,
+      missing: items.length - generated,
+      lineArtDir: 'media/whiteboard',
+      engine,
+      job: this.#lineArtJobs.get(`${request.projectId}`) || null,
+    }
+  }
+
+  /** 取该项目的字幕产物；没有就直接给出可操作的报错。 */
+  async #whiteboardSubtitleContext(agent, request) {
+    const projectId = request?.projectId
+    if (!projectId) throw fail('SPOKEN_VIDEO_INVALID_INPUT', '缺少项目标识。')
+    const root = await projectRootFor(agent, projectId)
+    const detail = await this.projectsStore.get(agent, { projectId })
+    const subtitles = detail.artifacts?.subtitles?.data || null
+    if (typeof subtitles?.srt !== 'string' || !subtitles.srt.trim()) {
+      throw fail('SPOKEN_VIDEO_STAGE_BLOCKED', '必须先完成配音与字幕，才能准备白板线稿：出场时间与画面内容都来自字幕时间轴。请在「配音与字幕」生成字幕后重试。')
+    }
+    return { root, subtitles, detail }
+  }
+
+  /**
+   * 批量生成缺失幕的线稿（后台任务）。scenes 指定幕号列表；缺省生成全部缺失幕。
+   * force=true 时连同已有线稿一起重新生成（覆盖 scene-NN-story.png，手工放置的
+   * 其他命名文件不受影响）。
+   */
+  async startWhiteboardLineArt(agent, request) {
+    const projectId = request?.projectId
+    if (!projectId) throw fail('SPOKEN_VIDEO_INVALID_INPUT', '缺少项目标识。')
+    const existing = this.#lineArtJobs.get(projectId)
+    if (existing && existing.phase === 'running') return { jobId: existing.jobId, reused: true, ...existing }
+
+    const { root } = await this.#whiteboardSubtitleContext(agent, request)
+    const plan = await this.whiteboardLineArtPlan(agent, { projectId })
+    const wanted = Array.isArray(request.scenes) && request.scenes.length
+      ? plan.scenes.filter((item) => request.scenes.includes(item.index))
+      : plan.scenes.filter((item) => !item.file || request.force)
+    const targets = request.force ? wanted : wanted.filter((item) => !item.file)
+    if (!targets.length) {
+      return { jobId: null, reused: false, skipped: true, total: 0, message: '线稿已齐全，没有需要生成的幕。' }
+    }
+
+    const engine = await checkImageEngine(whiteboardBridgeUrl())
+    if (!engine.reachable) {
+      throw fail('SPOKEN_VIDEO_WHITEBOARD_ENV', '本地媒体桥接未运行，无法生成线稿。请启动本地媒体桥接后重试。')
+    }
+    if (!engine.up) {
+      throw fail('SPOKEN_VIDEO_WHITEBOARD_ENV', '生图引擎未连接。请打开桥接配置中心（http://127.0.0.1:8199）点「一键启动」，引擎就绪后再生成线稿。')
+    }
+
+    // 旁白 → 视觉描述：结果缓存在 media/whiteboard/descriptions.json，键含稿件
+    // 与字幕的产物版本，任一更新都会自动重算。缺描述时先调分镜师（一次 LLM
+    // 调用出全部幕），生图只消费视觉描述，不消费旁白原文。
+    const descriptions = await this.#ensureLineArtDescriptions(agent, root, projectId, plan.scenes)
+
+    const lineArtDir = resolve(root, 'media/whiteboard')
+    await mkdir(lineArtDir, { recursive: true, mode: 0o700 })
+    const jobId = `lineart-${Date.now().toString(36)}`
+    const job = { jobId, projectId, phase: 'running', done: 0, total: targets.length, current: targets[0].index, failures: [], startedAt: new Date().toISOString() }
+    this.#lineArtJobs.set(projectId, job)
+
+    const work = (async () => {
+      for (const item of targets) {
+        if (this.signal?.aborted) throw fail('SPOKEN_VIDEO_MEDIA_CANCELLED', '线稿生成已取消。')
+        job.current = item.index
+        try {
+          const buffer = await generateLineArtImage({
+            visual: descriptions.get(item.index) || item.visual,
+            sceneIndex: item.index,
+            signal: this.signal,
+            onStage: (stage) => { job.stage = stage },
+          })
+          const fileName = this.#sceneImageName(item.index)
+          await writeFile(resolve(lineArtDir, fileName), buffer)
+          job.done += 1
+          job.results = [...(job.results || []), { index: item.index, fileName: `media/whiteboard/${fileName}`, bytes: buffer.length }]
+        } catch (error) {
+          if (this.signal?.aborted) throw error
+          job.failures.push({ index: item.index, error: String(error?.message || error).slice(0, 300) })
+        }
+      }
+      job.phase = job.failures.length && job.done === 0 ? 'failed' : 'completed'
+      job.completedAt = new Date().toISOString()
+    })().catch((error) => {
+      job.phase = this.signal?.aborted ? 'cancelled' : 'failed'
+      job.error = String(error?.message || error).slice(0, 500)
+    }).finally(() => {
+      if (this.#lineArtJobs.get(projectId) === job) setTimeout(() => this.#lineArtJobs.delete(projectId), 10 * 60 * 1000)
+    })
+    this.background ? this.background(work) : void work
+    return { jobId, reused: false, total: targets.length, scenes: targets.map((item) => item.index) }
+  }
+
+  whiteboardLineArtStatus(agent, request) {
+    const job = this.#lineArtJobs.get(request?.projectId)
+    return job || { phase: 'idle' }
+  }
+
+  #whiteboardEngineRoot() {
+    return process.env.LWB_WHITEBOARD_ENGINE_ROOT
+      || resolve(dirname(fileURLToPath(import.meta.url)), '..', 'whiteboard', 'engine')
+  }
+
+  async #whiteboardPython(engineRoot) {
+    const venvPython = process.platform === 'win32'
+      ? join(engineRoot, '.venv', 'Scripts', 'python.exe')
+      : join(engineRoot, '.venv', 'bin', 'python')
+    const candidates = [venvPython, process.platform === 'win32' ? 'python' : 'python3']
+    const probe = 'import cv2, numpy, PIL; print("WHITEBOARD_DEPS_OK")'
+    for (const python of candidates) {
+      try {
+        const { stdout } = await execFilePromise(python, ['-c', probe], { timeout: 30_000 })
+        if (stdout.includes('WHITEBOARD_DEPS_OK')) return python
+      } catch { /* 该解释器不可用，尝试下一个 */ }
+    }
+    throw fail('SPOKEN_VIDEO_WHITEBOARD_ENV', '白板渲染需要具备 OpenCV/NumPy/Pillow 的 Python 解释器；请在「白板手绘动画」包内先执行一次「准备环境」。')
+  }
+
+  async #runWhiteboardScript(engineRoot, python, script, args) {
+    try {
+      return await execFilePromise(python, [join(engineRoot, 'scripts', script), ...args], {
+        cwd: engineRoot,
+        maxBuffer: 16 * 1024 * 1024,
+        timeout: 60 * 60 * 1000,
+      })
+    } catch (error) {
+      throw commandError(error, `白板引擎 ${script}`)
+    }
+  }
+
+  async #renderWhiteboardVideo(agent, root, run) {
+    const detail = await this.projectsStore.get(agent, { projectId: run.projectId })
+    if (detail.revision !== run.expectedRevision) fail('SPOKEN_VIDEO_REVISION_CONFLICT', '上游已更新，已取消旧版本的视频渲染任务。')
+    const voiceover = detail.artifacts?.voiceover?.data
+    const subtitles = detail.artifacts?.subtitles?.data || null
+    const subtitleEnabled = run.input.subtitleEnabled !== false
+    const orientation = run.input.orientation === 'landscape' ? 'landscape' : 'portrait'
+    if (!voiceover?.audio?.file || (subtitleEnabled && typeof subtitles?.srt !== 'string')) fail('SPOKEN_VIDEO_STAGE_BLOCKED', subtitleEnabled ? '必须先完成配音与字幕，才能渲染白板视频。' : '必须先完成配音，才能渲染白板视频。')
+
+    // 线稿：按幕号精确匹配 scene-NN*.png（两位序号）。自动生成的线稿走
+    // startWhiteboardLineArt 落到同一目录，两边命名约定一致。
+    const lineArtDir = resolve(root, 'media/whiteboard')
+    const audioPath = await this.#file(root, voiceover.audio.file, '配音文件')
+    const audioProbe = await this.#probe(audioPath)
+    const srtFile = `media/videos/${run.id}.srt`
+    const srtPath = await this.#write(root, srtFile, subtitles.srt)
+
+    const engineRoot = this.#whiteboardEngineRoot()
+    const python = await this.#whiteboardPython(engineRoot)
+    const workDir = `media/videos/${run.id}-whiteboard`
+    const workPath = resolve(root, workDir)
+    await mkdir(workPath, { recursive: true, mode: 0o700 })
+
+    // 分幕：parse_srt 动态规划分幕，stdout JSON 取 scenes
+    const parsed = await this.#runWhiteboardScript(engineRoot, python, 'parse_srt.py', [srtPath])
+    let scenes = null
+    try { scenes = JSON.parse(parsed.stdout).scenes }
+    catch { throw fail('SPOKEN_VIDEO_WHITEBOARD_FAILED', '白板引擎字幕分幕输出无法解析。') }
+    if (!Array.isArray(scenes) || scenes.length === 0) fail('SPOKEN_VIDEO_WHITEBOARD_FAILED', '字幕没有解析出任何分幕。')
+
+    let images
+    try { images = await this.#matchSceneImages(lineArtDir, scenes.length) }
+    catch (error) { throw fail('SPOKEN_VIDEO_STAGE_BLOCKED', error.message) }
+
+    const sceneFiles = []
+    for (let index = 0; index < scenes.length; index++) {
+      const scene = scenes[index]
+      const image = images[index]
+      const imagePath = join(lineArtDir, image)
+      const imageProbe = await this.#probe(imagePath)
+      if (!imageProbe.width || !imageProbe.height) fail('SPOKEN_VIDEO_WHITEBOARD_FAILED', `无法读取线稿尺寸：${image}`)
+
+      // 标注：优先用线稿同名 .annotation.json；没有则按字幕时间轴自动生成骨架
+      const annotationName = image.replace(/\.[^.]+$/u, '.annotation.json')
+      let annotationPath = join(lineArtDir, annotationName)
+      try { await stat(annotationPath) }
+      catch {
+        annotationPath = join(workPath, annotationName)
+        await this.#runWhiteboardScript(engineRoot, python, 'plan_timeline.py', [
+          srtPath, '--scene', String(index + 1),
+          '--elements', '场景铺垫', '核心主体', '结果反应',
+          '--width', String(imageProbe.width), '--height', String(imageProbe.height),
+          '--output', annotationPath,
+        ])
+      }
+
+      // 末幕时长对齐配音结尾：字幕通常在最后一句语音处结束，配音尾部可能还有
+      // 静音；把差值补进末幕，保证成片与配音时长差落在 QC 的 2 秒线内。
+      const sceneDurationMs = index === scenes.length - 1 && audioProbe?.durationSeconds
+        ? Math.max(scene.sceneDurationMs, Math.round(audioProbe.durationSeconds * 1000) - scene.startMs)
+        : scene.sceneDurationMs
+
+      const sceneFile = join(workPath, `scene-${String(index + 1).padStart(2, '0')}.mp4`)
+      await this.#runWhiteboardScript(engineRoot, python, 'render_stream_whiteboard.py', [
+        imagePath, annotationPath, sceneFile,
+        '--fps', '30',
+        '--total-ms', String(sceneDurationMs),
+        '--cap-long-edge', orientation === 'landscape' ? '1080' : '720',
+      ])
+      sceneFiles.push(sceneFile)
+    }
+
+    // 多幕合并成无声全片
+    let silentVideo = sceneFiles[0]
+    if (sceneFiles.length > 1) {
+      silentVideo = join(workPath, 'merged.mp4')
+      await this.#runWhiteboardScript(engineRoot, python, 'merge_scenes.py', ['--inputs', ...sceneFiles, '--output', silentVideo])
+    }
+
+    // 合成：规格化尺寸（pad 色用白板纸底，避免黑边）+ 配音音轨 + 可选字幕烧录。
+    // 多幕的"画不完"超时会逐幕累积，成片可能比配音长数秒（实测 3.5s，超过 QC
+    // 的 2 秒线）：先克隆尾帧补足，再精确截到配音时长——尾部本就是凝视段，
+    // 截掉无损，成片与配音的时长差因此恒为 0。
+    const videoFile = `media/videos/${run.id}.mp4`
+    const videoPath = resolve(root, videoFile)
+    const target = orientation === 'landscape' ? '1920:1080' : '1080:1920'
+    const scalePad = `scale=${target}:force_original_aspect_ratio=decrease,pad=${target}:(ow-iw)/2:(oh-ih)/2:color=0xF6F1E3,tpad=stop_mode=clone:stop_duration=10`
+    const vf = subtitleEnabled ? `${scalePad},${ffmpegSubtitleFilter(resolve(root, srtFile))}` : scalePad
+    const audioDuration = audioProbe?.durationSeconds
+    try {
+      await execFileAsync('ffmpeg', [
+        '-y', '-i', silentVideo, '-i', audioPath, '-vf', vf,
+        '-map', '0:v:0', '-map', '1:a:0',
+        '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', '30',
+        '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart',
+        ...(audioDuration ? ['-t', String(audioDuration)] : []),
+        videoPath,
+      ], { signal: this.signal, maxBuffer: 1024 * 1024 * 4 })
+    } catch (error) {
+      throw commandError(error, '白板视频合成')
+    }
+
+    const info = await stat(videoPath)
+    if (!info.isFile() || info.size < 1024) fail('SPOKEN_VIDEO_MEDIA_COMMAND_FAILED', '视频渲染没有生成有效文件。')
+    const probe = await this.#probe(videoPath)
+    const committed = await this.projectsStore.commitProduced(agent, {
+      projectId: run.projectId,
+      expectedRevision: run.expectedRevision,
+      stage: 'video',
+      idempotencyKey: `media-${run.id}`,
+      source: 'spoken-video/whiteboard',
+      payload: {
+        mode: 'whiteboard', renderer: 'whiteboard', orientation, visualBrief: run.input.visualBrief, subtitleEnabled, sourceAudioFile: voiceover.audio.file, sourceSubtitleFile: subtitleEnabled ? subtitles.srtFile || null : null,
+        video: { file: videoFile, mediaType: 'video/mp4', bytes: info.size, durationSeconds: probe.durationSeconds, width: probe.width, height: probe.height, fps: probe.fps, hasAudio: probe.hasAudio },
+        whiteboard: { scenes: scenes.length, lineArtDir: 'media/whiteboard' },
+      },
+    })
+    // 白板路径没有独立审片阶段，技术质检在这里内联完成并提交 qc 产物；
+    // 否则成片没有 qc 兄弟产物，发布页（只列 qc.passed 的项目）会看不到它。
+    const qc = await this.#commitInlineTechnicalQc(agent, run, committed, { audioPath, subtitles, subtitleEnabled, orientation })
+    return { project: qc.project, artifact: committed.artifact, video: { file: videoFile, ...probe, bytes: info.size }, qc: { passed: true, artifact: qc.artifact, technical: qc.technical } }
   }
 
   async #renderAiDirectorVideo(agent, root, run) {
@@ -2532,6 +3351,7 @@ export class SpokenVideoMediaHost {
       validate: async () => {
         this.signal?.throwIfAborted()
         const report = await inspectSpokenVideoAgentProject(workspace)
+        if (report.passed) await mergeRuntimeEvalFailure(report, workspace, this.signal)
         await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: report.passed, failures: report.failures, findings: report.findings, creativeBytes: report.creativeBytes } })
         return report
       },
@@ -2583,6 +3403,7 @@ export class SpokenVideoMediaHost {
       await this.#setVideoPhase(root, run.id, 'technical-qc')
       const reviewFramesDir = join(workspace.projectDir, 'outputs', 'review-frames', `attempt-${attemptNumber}`)
       const sampled = await extractVideoReviewFrames(renderedPath, reviewFramesDir, videoProbe.durationSeconds || durationSeconds, this.signal)
+      const contactSheet = await renderVideoContactSheet(renderedPath, reviewFramesDir, videoProbe.durationSeconds || durationSeconds, this.signal)
       const variation = await measureVisualVariation(sampled.frameFiles, orientation, videoProbe.durationSeconds || durationSeconds, this.signal)
       const topology = buildTechnicalReport({ video: videoProbe, audio: audioProbe, subtitles, subtitleEnabled, orientation })
       const variationIssues = variation.passed ? [] : ['主画面变化不足，成片可能退化为静态画面或少量文字卡片。']
@@ -2594,6 +3415,7 @@ export class SpokenVideoMediaHost {
         variation,
         sampledFrames: sampled.frameFiles.map((file) => portableRelative(root, file)),
         sampledTimestamps: sampled.timestamps,
+        contactSheet: contactSheet ? portableRelative(root, contactSheet.file) : null,
       }
       const technicalReportPath = join(workspace.projectDir, 'outputs', `technical-qc-attempt-${attemptNumber}.json`)
       const canonicalTechnicalReportPath = join(workspace.projectDir, 'outputs', 'technical-qc.json')
@@ -2605,7 +3427,7 @@ export class SpokenVideoMediaHost {
       await this.#setVideoPhase(root, run.id, 'editorial-review')
       const reviewerRole = repairAttempt ? `reviewer-${attemptNumber}` : 'reviewer'
       const rawReview = await this.videoReviewer({
-        prompt: buildVideoReviewerPrompt({ runDir: workspace.projectDir, technicalReportFile: technicalReportPath, frameFiles: sampled.frameFiles, timestamps: sampled.timestamps }),
+        prompt: buildVideoReviewerPrompt({ runDir: workspace.projectDir, technicalReportFile: technicalReportPath, frameFiles: sampled.frameFiles, timestamps: sampled.timestamps, contactSheetFile: contactSheet?.file ?? null }),
         schema: VIDEO_REVIEW_SCHEMA,
         agent,
         onDshStarted: (started) => this.#recordRunDshStarted(root, run.id, reviewerRole, repairAttempt ? `独立复审 ${repairAttempt}/${VIDEO_EDITORIAL_REPAIR_MAX_ATTEMPTS}` : '独立审片', started),
@@ -2622,7 +3444,7 @@ export class SpokenVideoMediaHost {
         reviewReportFile: portableRelative(root, reviewReportPath),
         editorialRepair: { attempts: repairAttempt, maxAttempts: VIDEO_EDITORIAL_REPAIR_MAX_ATTEMPTS, history: editorialRepairHistory },
       })
-      return { renderedPath, renderedInfo, videoProbe, technical, sampled, review, reviewReportPath }
+      return { renderedPath, renderedInfo, videoProbe, technical, sampled, contactSheet, review, reviewReportPath }
     }
 
     let reviewed = await renderAndReview(0)
@@ -2642,6 +3464,7 @@ export class SpokenVideoMediaHost {
           review: reviewed.review,
           frameFiles: reviewed.sampled.frameFiles,
           timestamps: reviewed.sampled.timestamps,
+          contactSheetFile: reviewed.contactSheet?.file ?? null,
           attempt,
           maximum: VIDEO_EDITORIAL_REPAIR_MAX_ATTEMPTS,
         }),
@@ -2649,6 +3472,7 @@ export class SpokenVideoMediaHost {
         validate: async () => {
           this.signal?.throwIfAborted()
           const report = await inspectSpokenVideoAgentProject(workspace)
+          if (report.passed) await mergeRuntimeEvalFailure(report, workspace, this.signal)
           await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: report.passed, failures: report.failures, findings: report.findings, creativeBytes: report.creativeBytes } })
           return report
         },
@@ -2702,7 +3526,7 @@ export class SpokenVideoMediaHost {
     })
     const qcCommit = await this.projectsStore.commitProduced(agent, {
       projectId: run.projectId, expectedRevision: videoCommit.project.revision, stage: 'qc', idempotencyKey: `media-${run.id}-qc`, source: 'spoken-video/ai-review',
-      payload: { mode: 'ai-director', reportFile, reviewFile, passed: true, technical, review, sampledFrames: technical.sampledFrames },
+      payload: { mode: 'ai-director', reportFile, reviewFile, passed: true, technical, review, sampledFrames: technical.sampledFrames, contactSheet: technical.contactSheet },
     })
     await this.#setVideoPhase(root, run.id, 'completed', { committedRevision: qcCommit.project.revision })
     return {
@@ -2778,6 +3602,44 @@ export class SpokenVideoMediaHost {
       source: 'spoken-video/ffprobe',
       payload: { mode: 'automatic', reportFile, technical, passed: technical.passed },
     })
+    return { project: committed.project, artifact: committed.artifact, technical }
+  }
+
+  /**
+   * Deterministic technical QC run inline by the renderers that have no
+   * editorial-review stage (whiteboard, local-ffmpeg).
+   *
+   * Without this the video artifact lands with no `qc` sibling, and the publish
+   * shelf — which only lists projects whose `qc.passed === true` — silently
+   * hides a finished cut. The Remotion path commits its own richer QC
+   * (technical + independent review), so it does not come through here.
+   *
+   * QC runs against the committed video artifact rather than the freshly probed
+   * file so the report describes exactly what downstream stages will read.
+   */
+  async #commitInlineTechnicalQc(agent, run, committedVideo, { audioPath, subtitles, subtitleEnabled, orientation }) {
+    const detail = await this.projectsStore.get(agent, { projectId: run.projectId })
+    const video = detail.artifacts?.video?.data
+    if (!video?.video?.file) fail('SPOKEN_VIDEO_STAGE_BLOCKED', '缺少视频产物，不能进行技术质检。')
+    const [audioProbe, videoProbe] = await Promise.all([
+      this.#probe(audioPath),
+      this.#probe(await this.#file(await projectRootFor(agent, run.projectId), video.video.file, '视频文件')),
+    ])
+    const technical = buildTechnicalReport({ video: videoProbe, audio: audioProbe, subtitles, subtitleEnabled, orientation })
+    const root = await projectRootFor(agent, run.projectId)
+    const reportFile = `media/qc/${run.id}.json`
+    await this.#write(root, reportFile, `${JSON.stringify({ generatedAt: new Date().toISOString(), projectId: run.projectId, videoTaskId: run.id, ...technical }, null, 2)}\n`)
+    const committed = await this.projectsStore.commitProduced(agent, {
+      projectId: run.projectId,
+      expectedRevision: committedVideo.project.revision,
+      stage: 'qc',
+      idempotencyKey: `media-${run.id}-qc`,
+      source: 'spoken-video/ffprobe',
+      payload: { mode: 'automatic', reportFile, technical, passed: technical.passed },
+    })
+    if (!technical.passed) {
+      fail('SPOKEN_VIDEO_VIDEO_TECHNICAL_QC_FAILED', `成片未通过技术质检：${technical.issues.join(' ')}`)
+    }
     return { project: committed.project, artifact: committed.artifact, technical }
   }
 

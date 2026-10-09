@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "id": "whiteboard",
+  "packageName": "@scitiger-ai/lwb-whiteboard",
+  "name": "白板手绘动画",
+  "version": "0.1.0",
+  "description": "把 SRT 字幕转成暖米黄纸张底的白板手绘动画：按字幕叙事顺序逐区域落墨，笔尖连续走线、先线稿后上色，导出 MP4。",
+  "market": {
+    "category": "内容创作",
+    "tags": [
+      "白板动画",
+      "手绘视频",
+      "字幕驱动",
+      "SRT",
+      "MP4 导出"
+    ],
+    "workflow": [
+      "解析字幕分幕",
+      "确定配图策略",
+      "生成线稿",
+      "语义标注",
+      "预览调整",
+      "渲染成片"
+    ],
+    "icon": "视",
+    "introduction": "把知识讲解、课程口播或故事文案的字幕做成白板手绘视频：每个元素按字幕讲到的顺序依次画出来，笔尖沿线条连续落墨、先铺线稿再上色，最后停留在完整画面上。区域坐标、出场时间与字幕文本都可在预览台里拖拽微调。",
+    "workflowHint": "字幕决定分幕与出场顺序；每一步都可停下来确认，避免在分镜或线稿未定时浪费渲染成本。",
+    "gettingStarted": [
+      "本能力包依赖 Python 环境（OpenCV、NumPy、Pillow），首次使用会在工作区内自动准备。",
+      "线稿图由 AI 按统一的极简手绘规范生成，画面上不出现任何文字。",
+      "每个区域的出场时间来自字幕时间轴，可在预览台里对齐到具体字幕。",
+      "渲染为纯本机计算，不需要联网；1080p 大约每秒成片耗时 3 秒左右。",
+      "创作数据保存在专属工作区，卸载能力包会保留工作区和数据。"
+    ],
+    "features": [
+      {
+        "menuId": "scenes",
+        "title": "场景管理",
+        "description": "按字幕分幕，管理每一幕的线稿与标注。",
+        "icon": "video"
+      },
+      {
+        "menuId": "render",
+        "title": "渲染成片",
+        "description": "逐幕渲染白板动画并合并为完整视频。",
+        "icon": "pack"
+      }
+    ]
+  },
+  "menus": [
+    { "id": "scenes", "label": "场景", "glyph": "幕", "tone": "violet" },
+    { "id": "render", "label": "渲染", "glyph": "渲", "tone": "green" }
+  ]
+}

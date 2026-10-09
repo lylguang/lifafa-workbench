@@ -836,3 +836,54 @@ test('polish mode needs a saved script and analyzeScript produces a report', asy
   assert.equal(report.artifactType, 'script_quality_report')
   assert.ok(typeof report.qualityScore === 'number')
 })
+
+test('a script generation a running round is waiting on survives the 40-record window', async (t) => {
+  // 根因回归（2026-10-08 15:47 真实故障：写稿 15:50 完成，轮询却一直报「写稿生成记录
+  // 不存在」，白等到 16:04 超时）。归一化只保留终态末 40 条，写稿期间别的任务完成会
+  // 把终态推过 40，正在被本轮引用的那条就被 slice 掉——此后再也读不回来。
+  // 修法：把在跑轮次 refs.scriptGenerationIds 里的 id 一并保留。
+  const { workspace, store, currentAgent } = await setup(t)
+  const pinned = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+  const filler = (n) => ({
+    id: `f${String(n).padStart(7, '0')}-0000-4000-8000-000000000000`,
+    status: 'completed',
+    startedAt: `2026-09-30T00:00:${String(n % 60).padStart(2, '0')}Z`,
+  })
+  // pinned 排在最旧（窗口外），后面 45 条终态足以把它挤出末 40。
+  const generations = [
+    { id: pinned, status: 'completed', startedAt: '2026-09-01T00:00:00Z' },
+    ...Array.from({ length: 45 }, (_, i) => filler(i)),
+  ]
+  await mkdir(join(workspace, 'data'), { recursive: true })
+  await writeFile(join(workspace, 'data', 'script-generations.json'), JSON.stringify({ schemaVersion: 1, generations }))
+  // 声明有一轮正在跑，并引用了 pinned。
+  await writeFile(join(workspace, 'data', 'schedules.json'), JSON.stringify({
+    schemaVersion: 1,
+    schedules: [],
+    runs: [{ id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', status: 'running', refs: { scriptGenerationIds: [pinned] } }],
+  }))
+
+  const listed = await store.listScriptGenerations(currentAgent)
+  assert.ok(listed.some((item) => item.id === pinned), 'the record the running round waits on must stay queryable')
+  const record = await store.scriptGenerationStatus(currentAgent, { id: pinned })
+  assert.equal(record.status, 'completed', 'and readable by id, not merely present in the list')
+  // 未被引用的老记录照常淘汰，窗口不会因此无限增长。
+  assert.equal(listed.some((item) => item.id === filler(0).id), false, 'unreferenced old records still fall out')
+  assert.ok(listed.length <= 41, 'the window stays bounded')
+})
+
+test('without a running round the window still drops the oldest records', async (t) => {
+  // 上条的对照：保护只对「在跑轮次引用得到」的记录生效，普通历史照常淘汰。
+  const { workspace, store, currentAgent } = await setup(t)
+  const generations = Array.from({ length: 45 }, (_, n) => ({
+    id: `g${String(n).padStart(7, '0')}-0000-4000-8000-000000000000`,
+    status: 'completed',
+    startedAt: `2026-09-30T00:00:${String(n % 60).padStart(2, '0')}Z`,
+  }))
+  await mkdir(join(workspace, 'data'), { recursive: true })
+  await writeFile(join(workspace, 'data', 'script-generations.json'), JSON.stringify({ schemaVersion: 1, generations }))
+  const listed = await store.listScriptGenerations(currentAgent)
+  assert.equal(listed.length, 40, 'the terminal window is still 40 when nothing pins a record')
+  assert.equal(listed.some((item) => item.id === generations[0].id), false, 'the oldest is dropped')
+  assert.ok(listed.some((item) => item.id === generations[44].id), 'the newest is kept')
+})

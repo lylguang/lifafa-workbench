@@ -1,0 +1,31 @@
+{
+  "name": "@scitiger-ai/lwb-publisher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Platform account management and automatic publishing capability pack for Lifafa Workbench",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./lwb-pack.json": "./lwb-pack.json",
+    "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "workspace:*",
+    "@deepseek-ai/dsh-tools": "workspace:*",
+    "@deepseek-ai/dsh-typert-protocol": "workspace:*",
+    "@scitiger-ai/lwb-pack-sdk": "workspace:*"
+  },
+  "dependencies": {
+    "playwright-core": "^1.63.0"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@scitiger-ai/lwb-dsh-bundle"
+      ]
+    }
+  }
+}

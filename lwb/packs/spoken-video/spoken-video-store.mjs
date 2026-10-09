@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { lstat, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, realpath, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { spokenVideoDataPath } from './spoken-video-paths.mjs'
 import { validateSrt } from './spoken-video-subtitles.mjs'
@@ -481,6 +481,11 @@ function producedStageData(stage, payload) {
     const plan = visualPlan(input.visualPlan)
     const planSource = optionalText(input.visualPlanSource, '视觉方案来源', 40)
     if (planSource && !['dsh', 'deterministic-fallback'].includes(planSource)) throw failure('SPOKEN_VIDEO_INVALID_INPUT', '视觉方案来源无效。')
+    const whiteboardInput = input.whiteboard === undefined || input.whiteboard === null ? null : object(input.whiteboard, '白板渲染信息')
+    const whiteboard = whiteboardInput ? {
+      scenes: optionalInteger(whiteboardInput.scenes, '白板渲染幕数', 1, 200) ?? 1,
+      lineArtDir: text(whiteboardInput.lineArtDir, '白板线稿目录', 200),
+    } : null
     const fallback = input.fallback === undefined || input.fallback === null ? null : object(input.fallback, '渲染降级信息')
     const remotion = input.remotion === undefined || input.remotion === null ? null : object(input.remotion, 'Remotion Agent 产物')
     const preflight = remotion?.preflight === undefined || remotion?.preflight === null ? null : object(remotion.preflight, 'Remotion 预检')
@@ -509,6 +514,7 @@ function producedStageData(stage, payload) {
       } : null,
       bgmVolume: backgroundMusic ? optionalNumber(input.bgmVolume, 'BGM 音量', 0, 0.5) ?? 0.12 : null,
       ...(plan ? { visualPlan: plan } : {}), ...(planSource ? { visualPlanSource: planSource } : {}),
+      ...(whiteboard ? { whiteboard } : {}),
       ...(fallback ? { fallback: { from: text(fallback.from, '渲染降级来源', 40), reason: text(fallback.reason, '渲染降级原因', 500) } } : {}),
       ...(remotion?.projectDir ? { remotion: {
         projectDir: agentWorkspacePath(remotion.projectDir, 'Remotion 项目目录'),
@@ -729,6 +735,37 @@ export class SpokenVideoProjectStore {
     return projectSummary(project)
   }
 
+  /**
+   * Permanently delete a project and everything it owns: stage artifacts,
+   * generated media (voiceover, subtitles, video, BGM, line art) and the
+   * project's own media run records.
+   *
+   * The whole project directory is removed, so the safety check is that the
+   * directory is a real directory inside the owned projects root and is not a
+   * symlink — a symlinked entry must never be followed out of the workspace.
+   * Deletion is by id only and never falls back to a glob or prefix match.
+   */
+  async remove(agent, request) {
+    const input = object(request, '删除项目请求')
+    const ids = Array.isArray(input.projectIds)
+      ? [...new Set(input.projectIds.map((value) => projectId(value)))]
+      : [projectId(input.projectId)]
+    if (!ids.length) throw failure('SPOKEN_VIDEO_INVALID_INPUT', '请至少选择一个要删除的项目。')
+    if (ids.length > 50) throw failure('SPOKEN_VIDEO_INVALID_INPUT', '单次最多删除 50 个项目。')
+    const workspace = await workspaceForAgent(agent)
+    const root = await projectsDirectory(workspace, false)
+    const removed = []
+    const missing = []
+    for (const id of ids) {
+      const target = root ? join(root, id) : null
+      const info = target ? await lstat(target).catch(() => null) : null
+      if (!info?.isDirectory() || info.isSymbolicLink() || !pathInside(root, target)) { missing.push(id); continue }
+      await rm(target, { recursive: true, force: true })
+      removed.push(id)
+    }
+    return { removed, missing }
+  }
+
   async get(agent, request) {
     const workspace = await workspaceForAgent(agent)
     const { root, project } = await readProject(workspace, projectId(object(request, '读取项目请求').projectId))
@@ -912,6 +949,48 @@ export class SpokenVideoProjectStore {
     } finally {
       if (this.writes.get(writeKey) === tail) this.writes.delete(writeKey)
     }
+  }
+
+  /**
+   * Pipeline board feed: every project with its current pipeline stage and the
+   * page that owns its next action, so the board can show "where it is / what
+   * next" in one look. Stage is derived from the same gates the work pages use
+   * (script approval currency, subtitle completion, qc.passed), keeping the
+   * board consistent with what each page would display. Read-only.
+   */
+  async pipelineOverview(agent) {
+    const projects = await this.list(agent)
+    const items = projects.map((project) => {
+      const stages = new Set(project.completedStages)
+      const approved = project.scriptApproval?.current === true
+      const qcPassed = stages.has('qc')
+      // The page that owns the project's next action, aligned with each work
+      // page's own filter so "board says scripts" ⇒ the script page lists it.
+      let stage, page
+      if (!stages.has('script') || !approved) { stage = stages.has('script') ? 'script-review' : stages.has('topic') ? 'script-pending' : 'topic'; page = 'scripts' }
+      else if (!stages.has('voiceover') || !stages.has('subtitles')) { stage = 'voiceover'; page = 'audio-captions' }
+      else if (!qcPassed) { stage = 'video'; page = 'video-preview' }
+      else { stage = 'publish'; page = 'publish' }
+      return {
+        id: project.id,
+        title: project.title,
+        updatedAt: project.updatedAt,
+        stage,
+        page,
+        account: project.account ?? null,
+        stages: {
+          topic: stages.has('topic'),
+          script: approved,
+          voiceover: stages.has('voiceover'),
+          subtitles: stages.has('subtitles'),
+          video: stages.has('video'),
+          qc: qcPassed,
+        },
+      }
+    })
+    const order = { 'script-pending': 0, 'script-review': 1, topic: 2, voiceover: 3, video: 4, publish: 5 }
+    items.sort((a, b) => (order[a.stage] - order[b.stage]) || String(b.updatedAt).localeCompare(String(a.updatedAt)))
+    return { items, total: items.length }
   }
 
   /**

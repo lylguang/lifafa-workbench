@@ -102,7 +102,7 @@ export function buildVideoCreatorRepairPrompt({ runDir, report, attempt, maximum
   ].join('\n\n')
 }
 
-export function buildVideoEditorialRepairPrompt({ runDir, review, frameFiles, timestamps, attempt, maximum }) {
+export function buildVideoEditorialRepairPrompt({ runDir, review, frameFiles, timestamps, contactSheetFile, attempt, maximum }) {
   const evidence = (Array.isArray(review?.reviewEvidence) ? review.reviewEvidence : []).slice(0, 8).map((item) => ({
     timestampSeconds: item.timestampSeconds,
     observedMainVisual: clipped(item.observedMainVisual, 600),
@@ -117,7 +117,7 @@ export function buildVideoEditorialRepairPrompt({ runDir, review, frameFiles, ti
     `独立审片未通过，正在进行定向视觉修复（${attempt}/${maximum}）。`,
     `任务工作目录：${runDir}`,
     '继续现有 Remotion 工程。先读取 task.json、inputs/draft.json 和 src/CreativeVideo.tsx，再查看下面列出的本轮成片抽帧。只允许修改 src/CreativeVideo.tsx；不得修改字幕、配音、受保护外壳、预检器或输入文件。',
-    `本轮抽帧：\n${frameFiles.map((file, index) => `- ${timestamps[index]} 秒：${file}`).join('\n')}`,
+    `本轮抽帧：\n${frameFiles.map((file, index) => `- ${timestamps[index]} 秒：${file}`).join('\n')}${contactSheetFile ? `\n全片接触表（4 列网格、时间从左到右从上到下递增）：${contactSheetFile}` : ''}`,
     `审片结果：\n${JSON.stringify({ score: review?.score, summary: clipped(review?.summary, 1000), findings, reviewEvidence: evidence }, null, 2)}`,
     '逐项修复 blocker 和 major 问题。问题涉及重复版式时，必须改变对应段落的视觉表达和空间结构，不能只换颜色或文字；问题涉及大面积无意义留白时，应重新分配主体尺度和垂直构图；问题涉及压叠、悬空连线或关系不可读时，应修正布局与元素生命周期。保留已经有效的场景，不要无关重做整片。',
     // 修复轮最容易按下葫芦浮起瓢：补了空白又造成出界/重叠。给出去重后的硬性自检。
@@ -127,13 +127,16 @@ export function buildVideoEditorialRepairPrompt({ runDir, review, frameFiles, ti
   ].join('\n\n')
 }
 
-export function buildVideoReviewerPrompt({ runDir, technicalReportFile, frameFiles, timestamps }) {
+export function buildVideoReviewerPrompt({ runDir, technicalReportFile, frameFiles, timestamps, contactSheetFile }) {
+  const contactSheetLine = contactSheetFile
+    ? `\n另外还有一张全片接触表（contact sheet）：${contactSheetFile}。它把全片按时间均匀采样拼成 4 列网格（从左到右、从上到下时间递增），用于纵览全片节奏、场景变化和重复版式；网格缩略图较小，只用于发现整体节奏与版式重复问题，精确判断仍以下面的逐帧图片为准。`
+    : ''
   return [
     '你是独立的视频成片审核 Agent，不是创作者。你与创作会话相互独立，不得修改任何文件、不得重新渲染、不得替创作者解释问题。',
     `任务工作目录：${runDir}`,
-    `先读取 task.json、inputs/draft.json、${technicalReportFile}，再逐张查看以下从最终成片提取的全帧图片：\n${frameFiles.map((file, index) => `- ${timestamps[index]} 秒：${file}`).join('\n')}`,
+    `先读取 task.json、inputs/draft.json、${technicalReportFile}，再逐张查看以下从最终成片提取的全帧图片：\n${frameFiles.map((file, index) => `- ${timestamps[index]} 秒：${file}`).join('\n')}${contactSheetLine}`,
     '技术报告是音轨、尺寸、帧率、时长和画面变化的确定性事实，不得用主观判断推翻。若技术报告未通过，technicalPass 必须为 false。',
-    '重点审核：主画面是否忠实对应稿件；是否具有清楚的视觉叙事与场景变化；机制、对比、数字和结论是否被视觉化；是否退化成文字卡片；横竖屏构图、字幕安全区、可读性和信息密度是否合格。',
+    '重点审核：主画面是否忠实对应稿件；是否具有清楚的视觉叙事与场景变化；机制、对比、数字和结论是否被视觉化；是否退化成文字卡片；横竖屏构图、字幕安全区、可读性和信息密度是否合格。若有接触表，先用它纵览全片：场景时长是否失衡、连续多帧版式雷同、节奏是否前紧后松这类全局问题优先从接触表发现，再回到对应时间点的全帧图确认。',
     // 创作侧被硬性禁止使用外部素材与实拍，审片不能拿它的缺失当缺陷，否则无论怎么画都永远不通过。
     '本片的画面语言只有一种：用 React/CSS/SVG 程序化绘制图形、图表、流程与示意界面。创作侧被明确禁止依赖外部素材、远程 URL、抓取网络图片或改用实拍，因此"没有实拍镜头/真实场景/人物/产品截图"是既定前提，不是缺陷，不得据此判定 editorialPass=false，也不得在 findings 里作为问题提出。评审"是否退化成文字卡片"时应看信息是否被结构化：真正的判据是 —— 画面有没有承担解释作用的图形关系（流程、对比、状态变化、条件分支、对象隐喻），而不是有没有照片。仅有装饰性色块配大段文字才算退化。',
     '抽帧是均匀采样，可能正好落在某个场景的入场动画过程中。判断"内容缺失"前先确认：若该画面处于场景起始的极早期（入场动画未完成），且相邻时间点能看到完整内容，属于入场节奏问题而非内容缺失，应按"入场过早/过慢"描述并给出时间点，不要描述为空白卡片或半成品。',

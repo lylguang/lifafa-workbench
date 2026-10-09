@@ -70,6 +70,21 @@ test('editorial repair prompt is evidence-bound and keeps the protected shell in
   assert.match(prompt, /不得修改字幕/u)
   assert.match(prompt, /不要删除有问题的内容/u)
   assert.match(prompt, /不要自行渲染完整成片/u)
+  assert.doesNotMatch(prompt, /contact-sheet/u)
+})
+
+test('editorial repair prompt carries the contact sheet so repairs see the whole-film rhythm', () => {
+  const prompt = buildVideoEditorialRepairPrompt({
+    runDir: '/tmp/video-agent/run-1',
+    attempt: 1,
+    maximum: 2,
+    frameFiles: ['/tmp/video-agent/run-1/outputs/frame-1.png'],
+    timestamps: [12.5],
+    contactSheetFile: '/tmp/video-agent/run-1/outputs/review-frames/attempt-1/contact-sheet.png',
+    review: { score: 62, summary: '节奏前紧后松。', findings: [], reviewEvidence: [] },
+  })
+  assert.match(prompt, /接触表/u)
+  assert.match(prompt, /contact-sheet\.png/u)
 })
 
 test('reviewer prompt is independent, evidence-bound, and read-only', () => {
@@ -84,7 +99,23 @@ test('reviewer prompt is independent, evidence-bound, and read-only', () => {
   assert.match(prompt, /0\.5 秒/u)
   assert.match(prompt, /4\.5 秒/u)
   assert.match(prompt, /有界定向修复/u)
+  // 无接触表时允许出现通用指引（"若有接触表"），但不得给出任何具体接触表路径。
+  assert.doesNotMatch(prompt, /contact-sheet/u)
   assert.doesNotThrow(() => assertObjectJsonSchema(VIDEO_REVIEW_SCHEMA))
+})
+
+test('reviewer prompt includes the contact sheet for pacing overview and points back to full frames', () => {
+  const prompt = buildVideoReviewerPrompt({
+    runDir: '/tmp/video-agent/run-1',
+    technicalReportFile: '/tmp/video-agent/run-1/outputs/technical-qc.json',
+    frameFiles: ['/tmp/video-agent/run-1/outputs/frame-1.png'],
+    timestamps: [0.5],
+    contactSheetFile: '/tmp/video-agent/run-1/outputs/review-frames/attempt-1/contact-sheet.png',
+  })
+  assert.match(prompt, /接触表/u)
+  assert.match(prompt, /4 列网格/u)
+  assert.match(prompt, /只用于发现整体节奏与版式重复问题/u)
+  assert.match(prompt, /精确判断仍以下面的逐帧图片为准/u)
 })
 
 test('normalizes review evidence to sampled frames and enforces every release gate', () => {

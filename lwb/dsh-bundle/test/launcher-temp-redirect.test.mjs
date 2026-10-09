@@ -54,8 +54,43 @@ test('launcher still starts when the target directory cannot be created', async 
 
 test('the launcher passes the redirected environment to the DSH child process', async () => {
   const source = await readFile(launcherPath, 'utf8')
-  assert.match(source, /env: applyTempRedirect\(\{ \.\.\.process\.env, DSH_HOME \}\)/u)
+  // 重定向必须仍然包住整个 env；桥接地址是往里加的额外键，不能取代它。
+  assert.match(source, /env: applyTempRedirect\(\{\s*\.\.\.process\.env,\s*DSH_HOME,/u)
   assert.doesNotMatch(source, /env: \{ \.\.\.process\.env, DSH_HOME \}/u)
+})
+
+// launcher 顶层会真的启动工作台，这里同样只抽取函数在沙箱里验证取舍。
+async function loadResolveScitigerBaseUrl(fetchImpl) {
+  const source = await readFile(launcherPath, 'utf8')
+  const start = source.indexOf('const LOCAL_BRIDGE_URL =')
+  const end = source.indexOf('async function syncProfile(', start)
+  assert.ok(start >= 0 && end > start, 'launcher must keep the bridge probe helper extractable')
+  const sandbox = { fetch: fetchImpl, AbortSignal, console }
+  vm.runInNewContext(`${source.slice(start, end)}\n;globalThis.__h = { resolveScitigerBaseUrl, LOCAL_BRIDGE_URL }`, sandbox)
+  return sandbox.__h
+}
+
+test('launcher points the voiceover channel at the local bridge when one is running', async () => {
+  const calls = []
+  const { resolveScitigerBaseUrl, LOCAL_BRIDGE_URL } = await loadResolveScitigerBaseUrl(async (url) => {
+    calls.push(String(url))
+    return { ok: true }
+  })
+  assert.equal(await resolveScitigerBaseUrl({}), LOCAL_BRIDGE_URL)
+  assert.deepEqual(calls, [`${LOCAL_BRIDGE_URL}/health`])
+  // 显式配置永远优先，探测只是兜底。
+  assert.equal(await resolveScitigerBaseUrl({ LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'https://example.test' }), 'https://example.test')
+  assert.equal(await resolveScitigerBaseUrl({ SCITIGER_BASE_URL: 'https://fallback.test' }), 'https://fallback.test')
+})
+
+test('launcher leaves the channel unset when no bridge answers', async () => {
+  const unreachable = await loadResolveScitigerBaseUrl(async () => { throw new Error('ECONNREFUSED') })
+  assert.equal(await unreachable.resolveScitigerBaseUrl({}), undefined)
+  const unhealthy = await loadResolveScitigerBaseUrl(async () => ({ ok: false }))
+  assert.equal(await unhealthy.resolveScitigerBaseUrl({}), undefined)
+  // 空字符串与未设置同义，不能把渠道钉在一个空地址上。
+  const blank = await loadResolveScitigerBaseUrl(async () => ({ ok: true }))
+  assert.equal(await blank.resolveScitigerBaseUrl({ LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: '   ' }), blank.LOCAL_BRIDGE_URL)
 })
 
 test('the media bridge keeps ffmpeg scratch files off the system drive', async () => {

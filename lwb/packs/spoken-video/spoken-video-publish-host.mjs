@@ -2,7 +2,8 @@ import { executionEvent, executionTransition } from './spoken-video-execution.mj
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { lstat, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { spokenVideoDataPath } from './spoken-video-paths.mjs'
 import {
@@ -19,6 +20,7 @@ import {
   SpokenVideoPublishError,
 } from './spoken-video-publish.mjs'
 import { appendDshTrace, dshChildStarted, dshTrace, ensureDshTrace, projectDshSessionEvent } from './spoken-video-dsh-trace.mjs'
+import { overlayCoverHeadline } from './spoken-video-cover-text.mjs'
 
 const PROJECT_ID = /^[a-f0-9-]{36}$/iu
 const TASKS_FILE = 'publish-tasks.json'
@@ -268,17 +270,48 @@ export class SpokenVideoPublishHost {
     if (detail.artifacts?.qc?.data?.passed !== true) fail('SPOKEN_VIDEO_STAGE_BLOCKED', '只有质检通过的成片才能加入发布工作队列。')
     const root = await publishRootFor(agent)
     const settings = await this.status()
+    // 只要文案标签、不生成封面。封面要跑两次生图（各几十秒），而 16G 卡上封面生图与
+    // LongCat 不能同时驻留——渲染刚结束、显存还被 TTS 模型占着时自动生封面大概率失败，
+    // 留下一堆「封面待补」。文案标签是跑完就该有的必需品，封面留给用户在发布页手动补。
+    const skipCovers = input.skipCovers === true
     const task = {
       id: randomUUID(), projectId: id, projectTitle: detail.title, account: detail.account || null,
       status: 'queued', phase: 'agent', error: null, expectedRevision, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null,
       sourceSnapshot: { script: detail.artifacts?.script?.data, topic: detail.artifacts?.topic?.data, video: detail.artifacts?.video?.data },
-      imageProvider: settings.configured ? { provider: settings.provider, model: settings.model } : null, coverErrors: {},
+      imageProvider: skipCovers ? null : (settings.configured ? { provider: settings.provider, model: settings.model } : null),
+      skipCovers: skipCovers || undefined,
+      coverErrors: {},
       dsh: dshTrace(),
     }
     await this.#serial(root, async () => { const data = await readTasks(root); data.tasks.unshift(task); await writeTasks(root, data) })
     this.active.add(task.id)
     void this.background(this.#run(agent, root, task.id).finally(() => this.active.delete(task.id)))
     return taskSummary(task)
+  }
+
+  /**
+   * 成片通过质检后自动补一份发布文案（不含封面）。
+   *
+   * 为什么要有这个：发布资料原先只在用户点开发布页抽屉时才生成（client.js 里的
+   * autoTriggered effect），于是「视频跑完 → 打开发布页 → 显示未生成」成了常态，
+   * 用户第一反应是白跑了（2026-10-08 反馈：刚跑完的成片在发布页找不到）。
+   *
+   * 只做文案标签：封面吃显存，且渲染刚结束时容易抢不到（见 startPackaging 的
+   * skipCovers 说明）。已有 packaging、已在跑、没过质检的一律跳过，避免重复消耗。
+   */
+  async autoStartPackaging(agent, request) {
+    const input = object(request, '自动发布资料请求')
+    const id = projectId(input.projectId)
+    const detail = await this.projectsStore.get(agent, { projectId: id })
+    if (detail.artifacts?.packaging) return { skipped: 'already-packaged' }
+    if (detail.artifacts?.qc?.data?.passed !== true) return { skipped: 'qc-not-passed' }
+    // 版本号是提交的前提；拿不到就等下一轮，不在这里跟人抢项目。
+    if (!Number.isSafeInteger(detail.revision) || detail.revision < 1) return { skipped: 'no-revision' }
+    const root = await publishRootFor(agent)
+    const tasks = await this.#recoverInterrupted(root)
+    if (tasks.some((task) => task.projectId === id && ['queued', 'running'].includes(task.status))) return { skipped: 'already-running' }
+    const task = await this.startPackaging(agent, { projectId: id, expectedRevision: detail.revision, skipCovers: true })
+    return { started: task.id }
   }
 
   async task(agent, request) {
@@ -398,7 +431,9 @@ export class SpokenVideoPublishHost {
     const baseUrl = provider === 'bailian' ? config.bailianBaseUrl : config.scitigerBaseUrl
     // DashScope's async image API uses a different route from synchronous multimodal generation.
     const generationPath = provider === 'bailian' ? 'image-generation/generation' : 'multimodal-generation/generation'
-    const body = publishImageRequest({ model: task.imageProvider.model, prompt, negativePrompt, size: kind === 'landscape' ? '1280*720' : '720*1280' })
+    // 竖版用 3:4 而不是 9:16：抖音、小红书的信息流封面都按 3:4 展示，9:16 生成的
+    // 上下会被裁掉约 25%，主体很容易被切到。按展示形态生成，主体天然落在必留区里。
+    const body = publishImageRequest({ model: task.imageProvider.model, prompt, negativePrompt, size: kind === 'landscape' ? '1280*720' : '1080*1440' })
     let result = await this.#json(`${baseUrl}/api/v1/services/aigc/${generationPath}`, { method: 'POST', headers: { Authorization: `Bearer ${resolved.value}`, 'Content-Type': 'application/json', ...(provider === 'bailian' ? { 'X-DashScope-Async': 'enable' } : {}) }, body: JSON.stringify(body) }, '封面生成服务')
     const remoteTaskId = imageTaskId(result)
     await this.#mutateTask(await publishRootFor(agent), task.id, (item) => { executionEvent(item, `${kind === 'landscape' ? '横版' : '竖版'}封面请求已提交`, { actor: '封面生图服务', detail: { taskId: remoteTaskId || null, model: task.imageProvider.model, prompt, negativePrompt } }) })
@@ -422,7 +457,55 @@ export class SpokenVideoPublishHost {
     const bytes = Buffer.from(await response.arrayBuffer())
     if (bytes.length > MAX_IMAGE_BYTES) fail('SPOKEN_VIDEO_PUBLISH_FILE_TOO_LARGE', '生成的封面超过 20 MiB。')
     const inspected = inspectPublishImage(bytes)
-    return this.#freezeCover(agent, task.projectId, kind, bytes, inspected, 'generated')
+    // 叠中文标题：底图由生图模型出（它写汉字必然乱码），标题由 ffmpeg drawtext 渲染。
+    // 失败不阻断——底图本身已是可用封面，标题只是增强。
+    const titled = await this.#overlayCoverTitle(agent, task, kind, bytes, inspected)
+    return this.#freezeCover(agent, task.projectId, kind, titled.bytes, titled.inspected, 'generated')
+  }
+
+  /**
+   * 给封面底图叠加发布标题。返回 { bytes, inspected }——叠字成功就用带字版本，
+   * 失败（缺字体、ffmpeg 报错、标题为空）原样返回底图，绝不因此让发布资料失败。
+   */
+  async #overlayCoverTitle(agent, task, kind, bytes, inspected) {
+    // 标题来源有三处，按可靠性排序：
+    // ① 项目里已保存的发布资料——「重生封面」任务本身只带封面提示词、不带文案，
+    //    但它提交时会重读 packaging，所以必须回项目去取（2026-10-08 实测漏了这条，
+    //    结果叠字被静默跳过，底图上没有标题）。
+    // ② 完整发布任务的结果；③ 任务快照里的标题。
+    let title = null
+    try {
+      const detail = await this.projectsStore.get(agent, { projectId: task.projectId })
+      title = detail?.artifacts?.packaging?.data?.content?.title || null
+    } catch { title = null }
+    if (!title) title = task.result?.content?.title || task.sourceSnapshot?.title || null
+    if (!title) return { bytes, inspected }
+    const width = inspected.width
+    const height = inspected.height
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return { bytes, inspected }
+    const scratch = await mkdtemp(join(tmpdir(), 'lwb-cover-'))
+    const source = join(scratch, 'base.png')
+    const output = join(scratch, 'titled.png')
+    try {
+      await writeFile(source, bytes)
+      const result = await overlayCoverHeadline(source, output, { kind, title, width, height })
+      if (!result.applied) {
+        await this.#mutateTask(await publishRootFor(agent), task.id, (item) => {
+          executionEvent(item, `${kind === 'landscape' ? '横版' : '竖版'}封面标题未叠加`, { actor: '封面排版', status: 'error', detail: result.reason || '未知原因，已保留无字底图' })
+        }).catch(() => {})
+        return { bytes, inspected }
+      }
+      const merged = await readFile(output)
+      const mergedInspected = inspectPublishImage(merged)
+      await this.#mutateTask(await publishRootFor(agent), task.id, (item) => {
+        executionEvent(item, `${kind === 'landscape' ? '横版' : '竖版'}封面已叠加标题`, { actor: '封面排版', detail: result.headline })
+      }).catch(() => {})
+      return { bytes: merged, inspected: mergedInspected }
+    } catch {
+      return { bytes, inspected }
+    } finally {
+      await rm(scratch, { recursive: true, force: true }).catch(() => {})
+    }
   }
 
   async #freezeCover(agent, id, kind, bytes, inspected, source) {

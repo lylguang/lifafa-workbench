@@ -78,6 +78,32 @@ async function ensureSymlink(linkPath, target) {
   await symlink(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir')
 }
 
+const LOCAL_BRIDGE_URL = 'http://127.0.0.1:8199'
+
+/**
+ * Point the SciTiger channel at this machine's media bridge.
+ *
+ * Without this the channel falls back to the real cloud endpoint, where the
+ * locally saved key does not exist — every voiceover then fails with
+ * "Invalid API key" even though the bridge is running and healthy. `启动工作台.cmd`
+ * sets the variable, but `npm run dev` (and every other entry point) does not,
+ * which made the failure depend on how the workbench happened to be started.
+ * Probing the bridge keeps the channel correct no matter how it was launched;
+ * an explicit operator override always wins.
+ */
+async function resolveScitigerBaseUrl(env) {
+  const configured = env.LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL || env.SCITIGER_BASE_URL
+  if (configured && configured.trim()) return configured
+  try {
+    const response = await fetch(`${LOCAL_BRIDGE_URL}/health`, { signal: AbortSignal.timeout(1500) })
+    if (response.ok) return LOCAL_BRIDGE_URL
+  } catch {
+    // Bridge not running: leave the variable unset so the media host reports
+    // the real cause instead of an unreachable loopback address.
+  }
+  return undefined
+}
+
 async function syncProfile() {
   if (!existsSync(DSH_DIR)) throw new Error(`Missing vendored DSH checkout: ${DSH_DIR}`)
   if (!existsSync(BUILT_CLI_ENTRY) && (!existsSync(SOURCE_CLI_ENTRY) || !existsSync(TSX_LOADER))) {
@@ -112,12 +138,19 @@ async function syncProfile() {
 
 await syncProfile()
 
+const scitigerBaseUrl = await resolveScitigerBaseUrl(process.env)
+if (scitigerBaseUrl) console.log(`[lwb] 配音/字幕渠道 -> ${scitigerBaseUrl}`)
+
 const cliArgs = existsSync(BUILT_CLI_ENTRY)
   ? [BUILT_CLI_ENTRY, '--profile', 'lwb', ...process.argv.slice(2)]
   : ['--import', TSX_LOADER, SOURCE_CLI_ENTRY, '--profile', 'lwb', ...process.argv.slice(2)]
 const child = spawn(process.execPath, cliArgs, {
   cwd: ROOT_DIR,
-  env: applyTempRedirect({ ...process.env, DSH_HOME }),
+  env: applyTempRedirect({
+    ...process.env,
+    DSH_HOME,
+    ...(scitigerBaseUrl ? { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: scitigerBaseUrl } : {}),
+  }),
   stdio: 'inherit',
 })
 

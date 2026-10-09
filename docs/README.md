@@ -18,6 +18,7 @@
 |---|---|
 | [贡献指南](../CONTRIBUTING.md) | 开发环境、验证、Issue 与 PR |
 | [能力包开发入门](develop-a-pack.md) | 最小独立包与注册、加载、卸载 |
+| [发布与账号管理能力包](38-publisher-pack.md) | 平台账号扫码登录、自动发布架构、安全边界与实测验证 |
 | [总体架构](01-architecture.md) | 工作台与 DSH、业务包的职责边界 |
 | [能力包契约](12-capability-packs.md) | 清单、host/client 贡献及当前口播流程 |
 | [工作区与执行作用域](29-pack-owned-workspaces.md) | 生命周期、默认模型复用、任务及凭据隔离 |

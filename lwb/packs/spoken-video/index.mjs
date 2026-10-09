@@ -106,7 +106,7 @@ function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinua
       }
       // The one-shot run begins immediately after publication. Replay the in-memory prefix so
       // the audit timeline cannot miss an early turn or step before the listener observes it.
-      const prefix = Array.isArray(run.localAgent?.session?.events) ? [...run.localAgent.session.events] : []
+      const prefix = run.localAgent?.session ? [...run.localAgent.session.snapshotEvents()] : []
       prefix.forEach((event) => observeEvent(run.localAgent.session, event))
       let result = await run.result
       await traceTail
@@ -130,7 +130,7 @@ function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinua
           if (report.passed || report.repairable !== true || attempt >= maximum) break
           const child = run.localAgent
           if (!child?.followup || !child?.whenIdle || !repairPrompt) break
-          const boundary = child.session.events.length
+          const boundary = child.session.seq
           await onDshRepair?.({ attempt: attempt + 1, maximum, failures: report.failures, childSessionId: String(run.id) })
           runSignal.throwIfAborted()
           child.followup(createUserMessage({
@@ -141,7 +141,7 @@ function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinua
           await traceTail
           runSignal.throwIfAborted()
           if (continuationFailure) throw continuationFailure
-          const events = child.session.events.slice(boundary)
+          const events = child.session.snapshotEvents(boundary)
           const end = events.findLast((event) => event.type === 'turn/end')
           if (end?.data?.reason?.kind !== 'completed') throw new Error(`视频修复未正常结束（${end?.data?.reason?.kind || 'unknown'}）`)
           result = { ...result, output: events.filter((event) => event.type === 'assistant/message').at(-1)?.data?.message?.content || [] }
@@ -195,6 +195,7 @@ export async function apply(ctx, config = {}) {
       continuationPrompt: buildVideoCreatorContinuationPrompt,
     }),
     videoReviewer: config.videoReviewer || createStructuredExecutor(ctx, ctx.subagents, 'spoken-video-video-reviewer'),
+    lineArtPlanner: config.lineArtPlanner || createStructuredExecutor(ctx, ctx.subagents, 'spoken-video-whiteboard-line-art'),
   })
   const publishConnectionSettings = ctx.settings.register(scope.settingsNamespace('publish'), PublishConnectionSettings, { base: {} })
   const publish = new SpokenVideoPublishHost({

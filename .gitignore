@@ -3,6 +3,17 @@ node_modules/
 vendor/
 .tooling/
 
+# Python 虚拟环境与字节码。白板动画引擎会在包目录内自建 .venv
+# （engine/scripts/prepare_env.py），顶层规则匹配不到嵌套路径，
+# 2026-10-09 打包核查时它带着 1952 个文件 / 252M 差点被提交。
+**/.venv/
+**/__pycache__/
+**/*.pyc
+
+# 测试与构建残留
+**/.tmp-*/
+.tmp/
+
 # Runtime state and local credentials
 .dsh/
 .env

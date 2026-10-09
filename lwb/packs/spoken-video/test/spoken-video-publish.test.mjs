@@ -17,6 +17,7 @@ import {
   publishImageCredentialRef,
   publishImageRequest,
 } from '../spoken-video-publish.mjs'
+import { coverHeadline, coverLayoutFor, wrapCoverHeadline } from '../spoken-video-cover-text.mjs'
 
 function agent(cwd) { return { session: { header: { cwd } } } }
 
@@ -352,7 +353,7 @@ test('configured credentials generate covers even when the legacy enabled switch
       assert.equal(init.headers['X-DashScope-Async'], 'enable')
       const body = JSON.parse(init.body)
       // The portrait request is rejected upstream; landscape succeeds.
-      if (body.parameters.size === '720*1280') return jsonResponse({ message: 'quota exhausted' }, 429)
+      if (body.parameters.size === '1080*1440') return jsonResponse({ message: 'quota exhausted' }, 429)
       return jsonResponse({ output: { task_id: 'cover-1', task_status: 'PENDING' } })
     }
     if (parsed.pathname.startsWith('/api/v1/tasks/')) {
@@ -412,7 +413,7 @@ test('SciTiger covers use synchronous multimodal generation without the DashScop
         sizes.push(size)
         return jsonResponse({ output: { choices: [{ message: { content: [{ image: `https://cdn.test/${size}.png` }] } }] } })
       }
-      assert.match(String(url), /^https:\/\/cdn\.test\/(1280\*720|720\*1280)\.png$/u)
+      assert.match(String(url), /^https:\/\/cdn\.test\/(1280\*720|1080\*1440)\.png$/u)
       const [width, height] = new URL(String(url)).pathname.slice(1, -4).split('*').map(Number)
       return imageResponse(png(width, height))
     },
@@ -421,10 +422,10 @@ test('SciTiger covers use synchronous multimodal generation without the DashScop
   const finished = await waitForTask(host, currentAgent, started.id)
   assert.equal(finished.status, 'succeeded')
   assert.deepEqual(finished.coverErrors, { landscape: null, portrait: null })
-  assert.deepEqual(sizes.sort(), ['1280*720', '720*1280'])
+  assert.deepEqual(sizes.sort(), ['1080*1440', '1280*720'])
   const detail = await store.get(currentAgent, { projectId: project.id })
   assert.equal(detail.artifacts.packaging.data.covers.landscape.width, 1280)
-  assert.equal(detail.artifacts.packaging.data.covers.portrait.height, 1280)
+  assert.equal(detail.artifacts.packaging.data.covers.portrait.height, 1440)
 })
 
 test('a missing selected-provider credential skips automatic covers without failing packaging', async (t) => {
@@ -816,4 +817,176 @@ test('publish thumbnails are small real frames and failed extraction can recover
   assert.ok(image.height > image.width, 'portrait aspect ratio is preserved')
   assert.equal((await host.readAsset(currentAgent, { projectId: project.id, kind: 'video' })).mediaType, 'video/mp4')
   await assert.rejects(host.readAsset(currentAgent, { projectId: project.id, kind: '../../outside' }), /类型无效/u)
+})
+
+test('autoStartPackaging fills in the publish copy and leaves the cover renderer alone', async (t) => {
+  // 2026-10-08：刚渲染完的成片在发布页显示「未生成」，用户以为白跑了。视频页现在会
+  // 自动补一次文案，但**不生成封面**——封面要跑两次生图，而 16G 卡上封面生图与 LongCat
+  // 不能同时驻留，渲染刚结束时显存还被占着，自动生封面大概率失败、留一堆「封面待补」。
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await projectAtQc(currentAgent, store)
+
+  const executed = []
+  const host = publishHost({
+    store,
+    executor: async () => { executed.push('agent'); return packagingResult({ title: '自动生成的标题' }) },
+    settings: { get: () => ({ enabled: true, provider: 'bailian', model: 'wanx' }) },
+    // 封面渲染器一旦被调用就让测试失败——这正是要守住的行为。
+    fetch: async () => { executed.push('cover'); throw new Error('封面渲染器不应被调用') },
+  })
+
+  const result = await host.autoStartPackaging(currentAgent, { projectId: project.id })
+  assert.ok(result.started, 'a qc-passed cut without packaging starts copy generation on its own')
+  const task = await waitForTask(host, currentAgent, result.started)
+  assert.equal(task.status, 'succeeded', task.error || '')
+
+  assert.deepEqual(executed, ['agent'], 'the agent ran and the cover renderer never did')
+  const detail = await store.get(currentAgent, { projectId: project.id })
+  assert.equal(detail.artifacts.packaging.data.content.title, '自动生成的标题')
+  assert.equal(detail.artifacts.packaging.data.covers.landscape, null, 'no cover was produced')
+  assert.equal(detail.artifacts.packaging.data.covers.portrait, null, 'no cover was produced')
+
+  // 幂等：已经有资料了就不再来第二次。
+  const again = await host.autoStartPackaging(currentAgent, { projectId: project.id })
+  assert.equal(again.skipped, 'already-packaged')
+  assert.deepEqual(executed, ['agent'], 'the second call did not re-run the agent')
+})
+
+test('autoStartPackaging leaves cuts that are not publishable yet alone', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  // 只有 topic 的项目：没过质检，也不该被自动生成发布资料。
+  const project = await store.create(currentAgent, { title: '还没质检' })
+  await store.commit(currentAgent, { projectId: project.id, expectedRevision: project.revision, stage: 'topic', payload: { title: '还没质检' }, idempotencyKey: 'auto-packaging-gate' })
+
+  let executorCalls = 0
+  const host = publishHost({ store, executor: async () => { executorCalls += 1; return packagingResult() } })
+
+  assert.equal((await host.autoStartPackaging(currentAgent, { projectId: project.id })).skipped, 'qc-not-passed')
+  assert.equal(executorCalls, 0, 'the agent was never asked for an unpublishable cut')
+})
+
+test('cover headline extraction prefers semantic boundaries over a hard cut', () => {
+  // 封面字要少（缩略图里 4-8 字才读得清），但按字数硬截会把词组切坏
+  //（「别再给 AI 甩一句『你换个攻略』」会变成「甩一句你换」）。这里钉住断句策略。
+  assert.equal(coverHeadline('同一个 AI 昨天还行、今天犯傻'), '同一个 AI 昨天还行')
+  // 冒号前的部分通常是钩子
+  assert.equal(coverHeadline('高速服务区充电排到99号：国庆开电车出门，到底卡在哪一步'), '高速服务区充电排到99号')
+  // 引号里的数字完整保留，不被切成「发1万」
+  assert.equal(coverHeadline('平台把成本压到「发1万单倒赔130」：河北电商这套玩法能不能学'), '发1万单倒赔130')
+  // 书名号、引号是噪音，去掉后不影响可读性
+  assert.equal(coverHeadline('杜丽娘为一场梦死去，又为一张画还魂：《牡丹亭》讲了什么'), '杜丽娘为一场梦死去')
+  // 引号内容太短、脱离上下文读不懂时不能用（「你换个攻略」只有 5 字）
+  assert.notEqual(coverHeadline('别再给 AI 甩一句「你换个攻略」：国庆自驾七天'), '你换个攻略')
+  // 空标题不炸
+  assert.equal(coverHeadline(''), '')
+  assert.equal(coverHeadline(null), '')
+})
+
+test('cover layout keeps the headline inside the platform safe area', () => {
+  // 抖音/小红书按 3:4 展示，9:16 封面上下会被裁约 25%；所以字必须落在顶部预留区里，
+  // 且不能大到压住底图主体。字号比例来自缩略图可读性（拇指大小下字高需占两位数百分比）。
+  const landscape = coverLayoutFor('landscape', 1280, 720)
+  const portrait = coverLayoutFor('portrait', 720, 1280)
+  for (const layout of [landscape, portrait]) {
+    assert.ok(layout.fontSize > 40, 'the headline must stay readable when the thumbnail is thumb-sized')
+    assert.ok(layout.top < 200, 'the headline sits in the reserved top band, not over the artwork')
+    assert.ok(layout.sideMargin > 0, 'it keeps a margin from both edges')
+  }
+  // 竖屏可视区域更窄，字号应更保守
+  assert.ok(portrait.fontSize / 1280 < landscape.fontSize / 720, 'portrait uses a relatively smaller headline')
+})
+
+test('headline wrapping respects the per-line budget and the line cap', () => {
+  assert.deepEqual(wrapCoverHeadline('一二三四五六七八九十', 5, 2), ['一二三四五', '六七八九十'])
+  // 超出行数上限的部分被丢掉，不该无限换行
+  assert.equal(wrapCoverHeadline('一二三四五六七八九十十一十二', 4, 2).length, 2)
+  assert.deepEqual(wrapCoverHeadline('', 5, 2), [])
+})
+
+test('the prompt asks the image model to leave a clean title band', () => {
+  // 标题是程序叠的，底图必须留出位置且不含任何伪文字——否则叠完字会出现
+  // 「真标题 + 残留的示意横线」这种像乱码的东西（2026-10-08 实测过）。
+  const prompt = buildPublishPrompt({ project: { title: '测试', artifacts: {} } })
+  assert.match(prompt, /留出一块\*\*纯色、低频、无任何图形元素\*\*的横向区域/u)
+  assert.match(prompt, /横屏占顶部 18%，竖屏占顶部 22%/u)
+  assert.match(prompt, /不要出现任何文字、字母、数字、标点/u)
+  assert.match(prompt, /示意性横线/u)
+  assert.match(prompt, /中部 60% 高度以内/u)
+  // 9:16 在信息流被裁是既有事实，得写进裁切安全区要求
+  assert.match(prompt, /3:4 展示/u)
+})
+
+test('regenerateCover reuses the saved title when the task itself carries none', async () => {
+  // 2026-10-08 实测漏掉：叠字只从 task.result.content.title / task.sourceSnapshot.title 取，
+  // 而「重生封面」任务只带封面提示词、**不带发布文案**——于是叠字被静默跳过，
+  // 新提示词生出了干净的底图却还是没有标题。修法是回项目读已保存的 packaging。
+  const source = await readFile(join(import.meta.dirname, '..', 'spoken-video-publish-host.mjs'), 'utf8')
+  assert.ok(source.includes('title = detail?.artifacts?.packaging?.data?.content?.title || null'),
+    "the cover overlay must read the title from the project saved packaging")
+  assert.ok(source.includes('if (!title) title = task.result?.content?.title'),
+    "and keep the in-task title as a later fallback")})
+test('the portrait cover is generated at 3:4 so nothing important falls outside the feed crop', async () => {
+  // 抖音、小红书的信息流封面都按 3:4 展示。9:16 生成的图上下会被裁掉约 25%，
+  // 主体很容易被切到——按展示形态生成，主体天然落在必留区里。
+  const source = await readFile(new URL('../spoken-video-publish-host.mjs', import.meta.url), 'utf8')
+  assert.match(source, /size: kind === 'landscape' \? '1280\*720' : '1080\*1440'/u)
+  const prompt = buildPublishPrompt({ project: { title: '测试', artifacts: {} } })
+  assert.match(prompt, /竖屏 3:4/u, 'the packaging agent is told to compose for 3:4')
+  assert.match(prompt, /竖屏 3:4 比 9:16 更"方"/u, 'and that 3:4 needs a different layout than 9:16')
+  // 竖屏别再沿用横版的左右分栏——3:4 更方，左右并排会挤。
+  assert.match(prompt, /竖版请改为上下分层或单主体居中，不要沿用横版的左右分栏/u)
+})
+
+test('a busy title zone is reported instead of silently stacking text over artwork', async () => {
+  // 2026-10-08 实测：提示词已经要求「顶部 18% 留空」，但生图模型没照做，时钟图标和
+  // 「昨天/今天」标签穿进了标题位，和叠加的标题糊在一起。检出来要报给人知道。
+  const cover = await readFile(new URL('../spoken-video-cover-text.mjs', import.meta.url), 'utf8')
+  assert.match(cover, /export async function titleZoneBusy\(/u)
+  assert.match(cover, /edgedetect=low=0\.1:high=0\.5/u)
+  assert.match(cover, /if \(zone\?\.busy && typeof onZoneBusy === 'function'\) onZoneBusy\(zone\)/u)
+  assert.match(cover, /titleZoneBusy: Boolean\(zone\?\.busy\)/u)
+})
+
+test('the headline is truncated to what the layout can actually hold', async () => {
+  // 两行版式装得下 perLine*2 个字，硬编码 12 会把钩子后半句切掉：实测
+  // 「同一个 AI 昨天还行、今天犯傻」只剩前半句，真正有信息量的「今天犯傻」丢了。
+  const cover = await readFile(new URL('../spoken-video-cover-text.mjs', import.meta.url), 'utf8')
+  assert.match(cover, /const capacity = Math\.max\(6, perLine \* layout\.maxLines - 2\)/u)
+  assert.match(cover, /coverHeadline\(title, capacity\)/u)
+  const landscape = coverLayoutFor('landscape', 1280, 720)
+  const perLine = Math.max(4, Math.floor((1280 - landscape.sideMargin * 2) / landscape.fontSize))
+  assert.ok(perLine * landscape.maxLines - 2 > 12, `a two-line 1280x720 cover holds more than the old fixed 12 (got ${perLine * landscape.maxLines - 2})`)
+})
+
+test('the cover font size respects the column width, not just the canvas height', () => {
+  // 2026-10-08 实测：竖屏 3:4 是 1088x1440，按高度算字号得 98px，每行只装 9 个字，
+  // 「苹果收紧 Mac 磁盘权限」在「限」字前被劈开、标题后半句全丢。改成宽度也参与决定：
+  // 每行至少要装得下 MIN_CHARS_PER_LINE 个中文字。
+  const portrait = coverLayoutFor('portrait', 1088, 1440)
+  const landscape = coverLayoutFor('landscape', 1280, 720)
+  const perLinePortrait = Math.max(4, Math.floor((1088 - portrait.sideMargin * 2) / portrait.fontSize))
+  const perLineLandscape = Math.max(4, Math.floor((1280 - landscape.sideMargin * 2) / landscape.fontSize))
+  assert.ok(perLinePortrait >= 12, `the portrait cover must fit 12 chars per line (got ${perLinePortrait} at ${portrait.fontSize}px)`)
+  assert.ok(perLineLandscape >= 12, `the landscape cover must fit 12 chars per line (got ${perLineLandscape} at ${landscape.fontSize}px)`)
+  // 字号也不能小到读不清——缩略图里字号要占画面足够比例。
+  assert.ok(portrait.fontSize / 1440 > 0.05, 'the portrait headline stays large relative to the canvas')
+  assert.ok(landscape.fontSize / 720 > 0.07, 'the landscape headline stays large relative to the canvas')
+})
+
+test('the headline wraps at punctuation instead of orphaning a trailing character', () => {
+  // 硬折会把「权限」劈成「权」+「限」，第二行只剩一个字，在缩略图里很怪。
+  const portrait = coverLayoutFor('portrait', 1088, 1440)
+  const perLine = Math.max(4, Math.floor((1088 - portrait.sideMargin * 2) / portrait.fontSize))
+  const lines = wrapCoverHeadline('苹果收紧 Mac 磁盘权限，你的 AI 工具还能跑吗', perLine, 2)
+  assert.ok(lines.length >= 2, 'a long title wraps onto two lines')
+  for (const [index, line] of lines.entries()) {
+    assert.ok([...line].length >= 4, `line ${index + 1} should not orphan one or two characters: ${JSON.stringify(lines)}`)
+  }
+  // 行首空格会被 trim（渲染时本来就看不见），所以按「非空白字符完全一致」来断言。
+  const strip = (value) => [...String(value)].filter((ch) => ch.trim() !== '').join('')
+  assert.equal(strip(lines.join('')), strip('苹果收紧 Mac 磁盘权限，你的 AI 工具还能跑吗'), 'wrapping must not drop characters')
 })
