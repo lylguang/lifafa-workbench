@@ -178,16 +178,24 @@ async function main() {
   if (args.skipBrowser) {
     process.stdout.write('[--] 跳过渲染浏览器（--skip-browser）\n')
   } else {
-    const shellSource = process.env.LWB_HEADLESS_SHELL_SOURCE
-    if (!shellSource || !existsSync(shellSource)) {
+    // 接受三种形态：exe 本身、chrome-headless-shell-win64 目录、或它的父目录。
+    const source = process.env.LWB_HEADLESS_SHELL_SOURCE
+    const candidates = [
+      source,
+      source && join(source, 'chrome-headless-shell-win64', 'chrome-headless-shell.exe'),
+      source && join(source, 'chrome-headless-shell.exe'),
+    ].filter(Boolean)
+    const shellExe = candidates.find((candidate) => existsSync(candidate) && candidate.endsWith('.exe'))
+    if (!shellExe) {
       throw new Error(
-        '未找到 chrome-headless-shell。请设置 LWB_HEADLESS_SHELL_SOURCE 指向已下载的\n' +
-        'chrome-headless-shell-win64 目录（或其下的 chrome-headless-shell.exe），\n' +
-        '也可以用 --skip-browser 跳过——但客户首次渲染会慢 5 倍以上。',
+        '未找到 chrome-headless-shell.exe。请把 LWB_HEADLESS_SHELL_SOURCE 指向\n' +
+        '  · chrome-headless-shell.exe 本身，或\n' +
+        '  · chrome-headless-shell-win64 目录，或\n' +
+        '  · 包含它的上级目录（node_modules/.remotion/chrome-headless-shell/…）\n' +
+        '也可以用 --skip-browser 跳过——但客户首次渲染会慢 5 倍以上。\n' +
+        `已尝试：\n${candidates.join('\n')}`,
       )
     }
-    const shellExe = shellSource.endsWith('.exe') ? shellSource : join(shellSource, 'chrome-headless-shell-win64', 'chrome-headless-shell.exe')
-    if (!existsSync(shellExe)) throw new Error(`LWB_HEADLESS_SHELL_SOURCE 指向的文件不存在：${shellExe}`)
     const target = join(pkgDir, HEADLESS_SHELL_REL)
     mkdirSync(dirname(target), { recursive: true })
     process.stdout.write('[--] 复制渲染浏览器\n')
