@@ -18,84 +18,100 @@ $script:blocking = @()
 # ---------------------------------------------------------------- 基础环境
 Write-Head '基础环境'
 
-$nodeOk = $false
 try {
     $nodeVersion = (& node -v 2>$null) -replace '^v',''
     if ($LASTEXITCODE -eq 0 -and $nodeVersion) {
-        $major = [int]($nodeVersion -split '\.')[0]
-        $minor = [int]($nodeVersion -split '\.')[1]
+        $parts = $nodeVersion -split '\.'
+        $major = [int]$parts[0]
+        $minor = [int]$parts[1]
         # package.json 要求 ^22.19.0 || >=24.0.0
-        $ok = ($major -eq 22 -and $minor -ge 19) -or $major -ge 24
-        if ($ok) { Write-Ok "Node.js $nodeVersion"; $nodeOk = $true }
-        else { Write-Bad "Node.js $nodeVersion 版本过低（需要 22.19 以上或 24 以上）"; $script:blocking += 'Node.js 版本' }
-    } else { Write-Bad '未检测到 Node.js'; $script:blocking += 'Node.js 未安装' }
-} catch { Write-Bad '未检测到 Node.js'; $script:blocking += 'Node.js 未安装' }
+        if (($major -eq 22 -and $minor -ge 19) -or $major -ge 24) {
+            Write-Ok "Node.js $nodeVersion"
+        } else {
+            Write-Bad "Node.js $nodeVersion 版本过低（需要 22.19 以上，或 24 以上）"
+            $script:blocking += 'Node.js 版本过低'
+        }
+    } else {
+        Write-Bad '未检测到 Node.js'
+        $script:blocking += 'Node.js 未安装'
+    }
+} catch {
+    Write-Bad '未检测到 Node.js'
+    $script:blocking += 'Node.js 未安装'
+}
 
-$ffmpegOk = $false
 try {
     $null = & ffmpeg -version 2>&1
-    if ($LASTEXITCODE -eq 0) { Write-Ok 'FFmpeg 已安装'; $ffmpegOk = $true }
-    else { Write-Warn '未检测到 FFmpeg（配音、字幕合成、视频渲染都依赖它）'; $script:blocking += 'FFmpeg 未安装' }
-} catch { Write-Warn '未检测到 FFmpeg'; $script:blocking += 'FFmpeg 未安装' }
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok 'FFmpeg 已安装'
+    } else {
+        Write-Warn '未检测到 FFmpeg（配音、字幕合成、视频渲染都依赖它）'
+        $script:blocking += 'FFmpeg 未安装'
+    }
+} catch {
+    Write-Warn '未检测到 FFmpeg'
+    $script:blocking += 'FFmpeg 未安装'
+}
 
 # ---------------------------------------------------------------- 交付包完整性
 Write-Head '交付包完整性'
 
 $root = $PSScriptRoot
 $cliEntry = Join-Path $root 'vendor\deepseek-harness\apps\cli\lib\bin.js'
-if (Test-Path -LiteralPath $cliEntry) { Write-Ok '工作台引擎已构建' }
-else {
+if (Test-Path -LiteralPath $cliEntry) {
+    Write-Ok '工作台引擎已构建'
+} else {
     Write-Bad '工作台引擎缺失——交付包不完整，请重新解压'
     $script:blocking += '交付包不完整'
 }
 
-$depsPresent = Test-Path -LiteralPath (Join-Path $root 'node_modules')
-if ($depsPresent) { Write-Ok '依赖已安装' }
-else { Write-Bad '依赖缺失，请重新解压'; $script:blocking += '依赖缺失' }
+if (Test-Path -LiteralPath (Join-Path $root 'node_modules')) {
+    Write-Ok '依赖已安装'
+} else {
+    Write-Bad '依赖缺失，请重新解压'
+    $script:blocking += '依赖缺失'
+}
 
-# zip 存不了符号链接，所以压缩时全跳过了。未跑过「首次运行.cmd」时，
-# vendor 的 pnpm workspace 链接是缺失的——工作台能启动但能力包会加载失败。
-$probe = Join-Path $root 'vendor\deepseek-harnesspps\cli
-ode_modules\@deepseek-ai\dsh-app-boot'
-if (-not (Test-Path -LiteralPath (Join-Path $probe 'package.json'))) {
+# zip 存不了符号链接，所以打包时全跳过了。没跑过「首次运行.cmd」时，vendor 的
+# pnpm workspace 链接是缺的——工作台能启动，但能力包会加载失败。
+#
+# 判据只看「内容能不能解析」，不要求必须是链接形态：pnpm 重建出的是 symlink，
+# 别的安装方式可能给 junction 或实体目录，三者都能用。真正要抓的是目录整个
+# 不存在，那才是没跑首次运行。
+$probe = Join-Path $root 'vendor\deepseek-harness\apps\cli\node_modules\@deepseek-ai\dsh-app-boot'
+if (Test-Path -LiteralPath (Join-Path $probe 'package.json')) {
+    Write-Ok '依赖链接已就绪'
+} else {
     Write-Bad '依赖链接尚未重建——请先双击「首次运行.cmd」（只需做一次，约 30 秒）'
     $script:blocking += '依赖链接未重建'
-} else {
-    $isLink = $false
-    try {
-        $item = Get-Item -LiteralPath $probe -Force
-        $isLink = ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
-    } catch { }
-    if ($isLink) { Write-Ok '依赖链接已就绪' }
-    else {
-        Write-Warn '依赖被解压成了实体目录，功能可能异常——建议重新解压并运行「首次运行.cmd」'
-    }
 }
 
 $shell = Join-Path $root '浏览器\chrome-headless-shell-win64\chrome-headless-shell.exe'
 if (Test-Path -LiteralPath $shell) {
     Write-Ok '渲染浏览器已就绪（高速版）'
-    $browserOk = $true
 } else {
     $chrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
     if (Test-Path -LiteralPath $chrome) {
         Write-Warn '未找到随包的渲染浏览器，将回退到系统 Chrome（渲染慢约 5 倍）'
-        $browserOk = $true
     } else {
         Write-Bad '没有可用的渲染浏览器，视频渲染会失败'
         $script:blocking += '缺少渲染浏览器'
-        $browserOk = $false
     }
 }
 
-# 端口占用：第二个实例会以 EADDRINUSE 崩掉，看起来像启动失败
+# 第二个实例会以端口占用崩掉，看起来像启动失败
 $portBusy = $false
 try {
     $conn = Get-NetTCPConnection -LocalPort 4173 -State Listen -ErrorAction Stop
     $portBusy = $null -ne $conn
-} catch { $portBusy = $false }
-if ($portBusy) { Write-Warn '端口 4173 已被占用（工作台可能已在运行；若不是，换个端口启动）' }
-else { Write-Ok '端口 4173 空闲' }
+} catch {
+    $portBusy = $false
+}
+if ($portBusy) {
+    Write-Warn '端口 4173 已被占用（工作台可能已在运行；若不是，请换个端口启动）'
+} else {
+    Write-Ok '端口 4173 空闲'
+}
 
 # ---------------------------------------------------------------- 镜像可达性
 Write-Head '下载加速'
@@ -137,22 +153,23 @@ $ramTotalGb = [math]::Round($os.TotalVisibleMemorySize / 1MB)
 $ramFreeGb = [math]::Round($os.FreePhysicalMemory / 1MB)
 
 if ($gpuTotalMiB -gt 0) {
-    Write-Host "  显卡：$gpuName（$([math]::Round($gpuTotalMiB / 1024, 1)) GB 显存）"
+    Write-Host ("  显卡：{0}（{1} GB 显存）" -f $gpuName, [math]::Round($gpuTotalMiB / 1024, 1))
 } else {
     Write-Host '  显卡：未检测到 NVIDIA 独立显卡'
 }
-Write-Host "  内存：共 $ramTotalGb GB，当前可用 $ramFreeGb GB"
+Write-Host ("  内存：共 {0} GB，当前可用 {1} GB" -f $ramTotalGb, $ramFreeGb)
 
-# 可用磁盘：渲染需要临时空间，磁盘在渲染中途写满比慢更糟
-$freeDisks = @()
-foreach ($d in (Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Free -gt 0 })) {
-    $freeDisks += [pscustomobject]@{ Name = $d.Name; FreeGb = [math]::Floor($d.Free / 1GB) }
+# 渲染需要临时空间，磁盘在渲染中途写满比慢更糟
+$best = Get-PSDrive -PSProvider FileSystem |
+    Where-Object { $_.Free -gt 0 } |
+    Sort-Object { $_.Free } -Descending |
+    Select-Object -First 1
+if ($best) {
+    Write-Host ("  最空闲磁盘：{0}:\ （{1} GB）" -f $best.Name, [math]::Floor($best.Free / 1GB))
 }
-$best = $freeDisks | Sort-Object FreeGb -Descending | Select-Object -First 1
-if ($best) { Write-Host "  最空闲磁盘：$($best.Name):\ （$($best.FreeGb) GB）" }
 
 # 推荐配置。门槛来自实测（bridge.mjs 的 ENGINE_VRAM_NEED_MIB / ENGINE_RAM_NEED_MIB）：
-#   字幕识别 4.5G 显存 / 8G 内存 / 4.4G 模型
+#   字幕识别 4.5G 显存 /8G 内存 / 4.4G 模型
 #   本地配音 7.5G 显存 / 23G 内存 / 7.2G 模型  ← 真正的门槛是内存
 #   封面生图 8.5G 显存 / 10G 内存 / 18G 模型  ← 8G 卡不够，int8 已是量化下限
 $vramGb = [math]::Round($gpuTotalMiB / 1024, 1)
@@ -161,13 +178,9 @@ Write-Host '  建议配置：' -ForegroundColor Cyan
 
 if ($vramGb -lt 8) {
     Write-Host '    · 配音：云端（不占本机资源，官方标注限时免费）' -ForegroundColor Cyan
-    if ($vramGb -gt 0) {
-        Write-Host '    · 字幕：云端识别' -ForegroundColor Cyan
-    } else {
-        Write-Host '    · 字幕：云端识别' -ForegroundColor Cyan
-    }
+    Write-Host '    · 字幕：云端识别' -ForegroundColor Cyan
     Write-Host '    · 封面：云端生图' -ForegroundColor Cyan
-    Write-Host '    · 说明：本地配音需要 8GB 以上显存 + 23GB 空闲内存；本地封面生图需要 12GB 以上显存。' -ForegroundColor DarkGray
+    Write-Host '    · 说明：本地配音需要 8GB 以上显存加 23GB 空闲内存；本地封面生图需要 12GB 以上显存。' -ForegroundColor DarkGray
     Write-Host '              你的显卡达不到，走云端即可。视频渲染用的是 CPU，不受显卡影响。' -ForegroundColor DarkGray
 } elseif ($vramGb -lt 12) {
     Write-Host '    · 配音：云端（不占显存，把显存留给字幕）' -ForegroundColor Cyan
