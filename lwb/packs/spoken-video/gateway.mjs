@@ -65,6 +65,14 @@ export class SpokenVideoGateway extends TypertRemoteService {
   cancelScheduleRun(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoSchedule.cancelScheduleRun(context, request)) }
   deleteScheduleRun(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoSchedule.deleteScheduleRun(context, request)) }
   scheduleRun(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoSchedule.scheduleRun(context, request)) }
+  /** 排队视图：等待中的任务带位次，运行中/已结算的分开列。 */
+  scheduleQueue() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoSchedule.queueView(context)) }
+  /** 故障聚类：按根因折叠，直接回答「最近为什么失败、该改什么」。 */
+  listScheduleFailures(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoSchedule.listFailures(context, request || {})) }
+  /** 手动续跑一条被中断的轮次（默认已自动排队，这里给不想等的人一个按钮）。 */
+  resumeScheduleRun(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoSchedule.resumeRun(context, request)) }
+  /** 开工前体检报告：保存任务前就能看到能不能跑起来。 */
+  schedulePreflight(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoSchedule.preflightReport(context, request || {})) }
   getProfile() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoContent.getProfile(context)) }
   setProfile(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoContent.setProfile(context, request)) }
   listAccounts() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoContent.listAccounts(context)) }

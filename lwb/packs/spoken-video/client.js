@@ -6,6 +6,100 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const { IconSettingsOutline16, MarkdownText } = require('@deepseek-ai/dsh-client-ui-primitives');
     const h = React.createElement;
+
+    // 提示音与桌面通知。
+    //
+    // 定时任务是无人值守的，改造前工作台对这件事的回应是零——只有一个 CSS 脉冲
+    // 小圆点。这里用 WebAudio 实时合成而不是音频文件：完成音与失败音是两段不到
+    // 半秒的正弦波，合成出来 0 字节资源、没有加载延迟，也不会出现「文件没打进包
+    // 所以没声音」这种问题。
+    //
+    // 浏览器关掉时这条通道失效，由 alerts.json 加独立的 Windows 计划任务兜底。
+    const NOTIFY_KEY = 'lwb.notify.v1';
+    const notifySettings = { sound: true, desktop: false };
+    try {
+      const raw = window.localStorage?.getItem(NOTIFY_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed.sound === 'boolean') notifySettings.sound = parsed.sound;
+        if (typeof parsed.desktop === 'boolean') notifySettings.desktop = parsed.desktop;
+      }
+    } catch (_) { /* 隐私模式下 localStorage 会抛 */ }
+    const notifySave = () => { try { window.localStorage?.setItem(NOTIFY_KEY, JSON.stringify(notifySettings)); } catch (_) {} };
+    // 上行双音 = 到头了，好事；下行低音 = 沉、留尾巴。隔一层墙也分得出。
+    const NOTIFY_VOICES = {
+      success: [[660, 0.18, 0.22, 0], [880, 0.22, 0.22, 0.18]],
+      error: [[440, 0.22, 0.26, 0], [220, 0.34, 0.24, 0.22], [120, 0.5, 0.2, 0.24]],
+      attention: [[880, 0.16, 0.22, 0], [880, 0.16, 0.22, 0.26]],
+    };
+    let notifyCtx = null;
+    let notifyLast = { key: '', at: 0 };
+    const notifyAudio = () => {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return null;
+      if (!notifyCtx || notifyCtx.state === 'closed') notifyCtx = new Ctx();
+      return notifyCtx;
+    };
+    function notifyPlay(voiceName) {
+      if (!notifySettings.sound) return false;
+      const voice = NOTIFY_VOICES[voiceName];
+      if (!voice) return false;
+      try {
+        const ctx = notifyAudio();
+        if (!ctx) return false;
+        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+        const now = ctx.currentTime;
+        for (const [frequency, duration, peak, delay] of voice) {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(frequency, now + delay);
+          // 5 毫秒淡入、指数衰减：避免咔哒声。
+          gain.gain.setValueAtTime(0.0001, now + delay);
+          gain.gain.exponentialRampToValueAtTime(peak, now + delay + 0.005);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + delay + duration);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(now + delay);
+          osc.stop(now + delay + duration + 0.02);
+        }
+        return true;
+      } catch (_) { return false; }
+    }
+    /** 解锁音频：必须在用户手势里调用一次，否则后续自动播放全被拦。 */
+    function notifyUnlock() {
+      try {
+        const ctx = notifyAudio();
+        if (!ctx) return false;
+        if (ctx.state === 'suspended') ctx.resume();
+        return ctx.state === 'running';
+      } catch (_) { return false; }
+    }
+    /** 同一事件只响一次：轮次终态会被连续几轮轮询读到，不去重就响成一片。 */
+    function notifyOnce(key, voiceName) {
+      const signature = `${key}:${voiceName}`;
+      const at = Date.now();
+      if (notifyLast.key === signature && at - notifyLast.at < 60_000) return false;
+      notifyLast = { key: signature, at };
+      return notifyPlay(voiceName);
+    }
+    function notifyDesktop(title, body) {
+      if (!notifySettings.desktop || typeof window.Notification !== 'function') return false;
+      if (window.Notification.permission !== 'granted') return false;
+      try {
+        const n = new window.Notification(title, { body, tag: title, silent: true });
+        n.onclick = () => { window.focus?.(); n.close(); };
+        return true;
+      } catch (_) { return false; }
+    }
+    function notifyRequestDesktop() {
+      if (typeof window.Notification !== 'function') return Promise.resolve('unsupported');
+      if (window.Notification.permission !== 'default') return Promise.resolve(window.Notification.permission);
+      return window.Notification.requestPermission().then((permission) => {
+        if (permission === 'granted') { notifySettings.desktop = true; notifySave(); }
+        return permission;
+      }).catch(() => 'denied');
+    }
+    const notify = { play: notifyPlay, playOnce: notifyOnce, unlock: notifyUnlock, notifyDesktop, requestDesktop: notifyRequestDesktop, settings: notifySettings };
     let connection; let executionRemote; let executionStreams;
     let audioCaptionsHandoff = null;
     let publishHandoff = null;
@@ -266,6 +360,26 @@ window.__ModuleLoader__.load({
       .sv-as-warn { display:grid; gap:4px; padding:9px 11px; border:1px solid #ecd39b; border-radius:8px; color:#7a5b17; background:#fffaf0; font-size:var(--lwb-text-sm,13px); line-height:1.55; }
       body[data-ds-dark-theme] .sv-as-warn { border-color:#665327; color:#e8d9a9; background:#332b1b; }
       .sv-as-blockers { display:grid; gap:4px; }
+      /* 队列条 / 故障聚类 / 提示音开关（无人值守可用性，2026-10 加） */
+      .sv-queue-bar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:10px 13px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-surface); }
+      .sv-queue-title { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); font-weight:800; letter-spacing:.08em; }
+      .sv-queue-waiting { display:flex; flex-wrap:wrap; gap:6px; align-items:center; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); }
+      .sv-queue-chip { padding:3px 9px; border:1px solid var(--sv-accent-line); border-radius:99px; color:var(--sv-accent-ink); background:var(--sv-accent-soft); font-size:var(--lwb-text-xs,12px); font-weight:700; }
+      .sv-queue-more { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); }
+      .sv-queue-idle { color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); }
+      .sv-notify-toggle { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+      .sv-fail-panel { display:grid; gap:9px; padding:14px; border:1px solid #e6b5b5; border-radius:10px; background:#fff7f7; }
+      body[data-ds-dark-theme] .sv-fail-panel { border-color:#7a4444; background:#3a2323; }
+      .sv-fail-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:9px; }
+      .sv-fail-head h4 { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-md,15px); }
+      .sv-fail-row { display:flex; gap:10px; padding:9px 11px; border:1px solid var(--lwb-line); border-radius:8px; background:var(--lwb-surface); }
+      .sv-fail-count { flex:none; min-width:44px; padding:2px 8px; border-radius:99px; color:var(--lwb-muted); background:var(--lwb-blue-soft); font-size:var(--lwb-text-xs,12px); font-weight:800; text-align:center; }
+      .sv-fail-count.is-many { color:#994646; background:#ffe9e9; }
+      .sv-fail-body { display:grid; gap:3px; min-width:0; }
+      .sv-fail-cat { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); font-weight:800; letter-spacing:.06em; }
+      .sv-fail-sig { overflow:hidden; margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); text-overflow:ellipsis; white-space:nowrap; }
+      .sv-fail-remedy { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); line-height:1.55; }
+      .sv-fail-recent { display:grid; gap:6px; }
       .sv-as-adv { display:grid; gap:10px; padding:11px; border:1px dashed var(--lwb-line); border-radius:9px; }
       .sv-as-adv-title { margin:0; color:var(--sv-accent-ink); font-size:var(--lwb-text-base,14px); font-weight:700; }
       .sv-as-grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:9px; }
@@ -1082,6 +1196,97 @@ window.__ModuleLoader__.load({
       );
     }
     function Notice({ error }) { return error ? h('p', { className: 'sv-error', role: 'alert' }, error) : null; }
+
+    /**
+     * 提示音与桌面通知开关。
+     *
+     * 音频上下文必须在用户手势里首次解锁，这是浏览器自动播放策略的要求——
+     * 所以开关按钮同时承担「开声音」和「解锁音频」两件事，光勾选不点不会生效。
+     */
+    function NotifyToggle() {
+      const [sound, setSound] = React.useState(() => notify.settings.sound !== false);
+      const [desktop, setDesktop] = React.useState(() => Boolean(notify.settings.desktop));
+      return h('div', { className: 'sv-notify-toggle' },
+        h('button', {
+          type: 'button',
+          className: `lwb-plain-button${sound ? ' is-on' : ''}`,
+          title: sound ? '完成与失败时会播放提示音' : '提示音已关闭',
+          onClick: () => {
+            // 先解锁再改设置：用户点了按钮就是一个合规的手势上下文。
+            notify.unlock();
+            const next = !sound;
+            setSound(next);
+            notify.settings.sound = next;
+            notifySave();
+            if (next) notify.play('attention');
+          },
+        }, sound ? '🔔 提示音开' : '🔕 提示音关'),
+        h('button', {
+          type: 'button',
+          className: `lwb-plain-button${desktop ? ' is-on' : ''}`,
+          title: desktop ? '桌面通知已开启' : '点击开启桌面通知（浏览器会询问权限）',
+          onClick: async () => {
+            if (desktop) { notify.settings.desktop = false; notifySave(); setDesktop(false); return; }
+            const permission = await notify.requestDesktop();
+            setDesktop(permission === 'granted');
+          },
+        }, desktop ? '🖥 桌面通知开' : '🖥 桌面通知关'));
+    }
+
+    /**
+     * 排队条：同时只跑一轮，其余按执行顺序排队等位次。
+     *
+     * 改造前同刻到期的任务会互相抢跑，抢输的那个被静默吞掉；现在它们都在
+     * 队列里可见，位次是确定的。
+     */
+    function QueueBar({ queue }) {
+      const waiting = queue?.waiting || [];
+      const active = Number(queue?.active || 0);
+      if (!active && !waiting.length) return null;
+      return h('div', { className: 'sv-queue-bar' },
+        h('span', { className: 'sv-queue-title' }, '执行队列'),
+        active ? h('span', { className: 'sv-live-pill' }, h('span', { className: 'sv-live-dot' }), `正在执行 ${active} 项`) : null,
+        waiting.length
+          ? h('span', { className: 'sv-queue-waiting' }, `等待 ${waiting.length} 项：`,
+            waiting.slice(0, 4).map((item) => h('span', { key: item.id, className: 'sv-queue-chip' }, `${item.position}. ${item.scheduleName || '内容安排'}`)),
+            waiting.length > 4 ? h('span', { className: 'sv-queue-more' }, `等 ${waiting.length - 4} 项`) : null)
+          : h('span', { className: 'sv-queue-idle' }, '队列空闲'));
+    }
+
+    /**
+     * 故障聚类面板：按根因折叠，直接回答「最近为什么失败、该改什么」。
+     *
+     * 24 条失败逐条读是读不完的；同一根因折叠成一行、带上该做什么，才是真的
+     * 「自己能找出原因」。
+     */
+    function FailurePanel({ failures, onResume, busy }) {
+      const [expanded, setExpanded] = React.useState(false);
+      const clusters = failures?.clusters || [];
+      if (!clusters.length) return null;
+      return h('section', { className: 'sv-fail-panel' },
+        h('header', { className: 'sv-fail-head' },
+          h('h4', null, `最近失败 ${failures.total} 次，归为 ${clusters.length} 类`),
+          h('button', {
+            type: 'button', className: 'lwb-plain-button',
+            onClick: () => setExpanded((value) => !value),
+          }, expanded ? '收起' : '展开明细')),
+        clusters.slice(0, expanded ? 20 : 5).map((cluster) => h('div', { key: cluster.signature, className: 'sv-fail-row' },
+          h('span', { className: `sv-fail-count${cluster.count > 1 ? ' is-many' : ''}` }, `×${cluster.count}`),
+          h('div', { className: 'sv-fail-body' },
+            h('p', { className: 'sv-fail-cat' }, cluster.categoryLabel),
+            h('p', { className: 'sv-fail-sig' }, cluster.sample),
+            h('p', { className: 'sv-fail-remedy' }, cluster.remedy)))),
+        expanded && (failures.recent || []).some((row) => row.runId) ? h('div', { className: 'sv-fail-recent' },
+          h('p', { className: 'sv-fail-cat' }, '可续跑的轮次'),
+          (failures.recent || [])
+            .filter((row) => row.category === 'host.restart')
+            .slice(0, 5)
+            .map((row) => h('button', {
+              key: row.id, type: 'button', className: 'lwb-plain-button',
+              disabled: busy,
+              onClick: () => onResume(row.runId),
+            }, `续跑该轮（${row.scheduleName || row.itemTitle || '内容安排'}）`))) : null);
+    }
     /* 应用内确认对话框：复用宿主 lwb 对话框视觉体系（modal 遮罩 / 卡片 / 三类按钮），层级高于 sv-drawer。 */
     function useSvConfirm() {
       const [meta, setMeta] = React.useState(null);
@@ -3238,14 +3443,79 @@ window.__ModuleLoader__.load({
       const scheduleVoiceFileInputRef = React.useRef(null);
       const fail = React.useCallback((message) => { setError(message); }, [setError]);
 
+      // 上一次已知的轮次状态，用来发现「刚刚落到终态」这件事。放在 ref 而不是
+      // state：它是轮询的副产物，不该触发重渲染。
+      const seenRunStates = React.useRef(new Map());
+      const [queue, setQueue] = React.useState({ active: 0, waiting: [], recent: [] });
+      const [failures, setFailures] = React.useState(null);
+      const [notifyOpen, setNotifyOpen] = React.useState(false);
+
+      /**
+       * 提示音与桌面通知的唯一触发点。
+       *
+       * 放在轮询结果上比对，而不是由后端推事件：这一页本来就在按 1.5 秒轮询，
+       * 复用它零成本；代价是页面不在时听不见——那条由 alerts.json 加独立的
+       * Windows 计划任务兜底，不依赖浏览器。
+       *
+       * 只在「首次见到某条已是终态的轮次」时响，避免刷新页面就响一片；同一条
+       * 终态被后续轮询反复读到也只响一次。
+       */
+      const announceRuns = React.useCallback((nextRuns) => {
+        const seen = seenRunStates.current;
+        for (const run of nextRuns || []) {
+          if (!run || !run.id) continue;
+          const status = run.status;
+          const terminal = ['completed', 'partial', 'failed', 'blocked', 'interrupted'].includes(status);
+          if (!terminal) { seen.set(run.id, status); continue; }
+          if (seen.get(run.id) === status) continue;
+          const firstSight = !seen.has(run.id);
+          seen.set(run.id, status);
+          if (!firstSight) continue;
+          const minutes = run.elapsedMs ? `，耗时 ${Math.round(run.elapsedMs / 60000)} 分钟` : '';
+          if (status === 'completed') {
+            notify.playOnce(run.id, 'success');
+            notify.notifyDesktop(`自动化已完成${minutes}`, run.message || '');
+          } else if (status === 'partial') {
+            notify.playOnce(run.id, 'attention');
+            notify.notifyDesktop(`自动化部分完成${minutes}`, run.message || '');
+          } else {
+            notify.playOnce(run.id, 'error');
+            notify.notifyDesktop('自动化失败', run.remedy || run.error || run.message || '');
+          }
+        }
+        // 长时间开着页面不能让这张表无限增长。
+        if (seen.size > 200) {
+          for (const key of [...seen.keys()].slice(0, seen.size - 200)) seen.delete(key);
+        }
+      }, []);
+
       const loadSchedules = React.useCallback(async () => {
         if (!packId) return { schedules: [], runs: [] };
         try {
           const next = await remote(packId, 'listSchedules');
           setSchedules(next.schedules || []); setRuns(next.runs || []); setError(null);
+          announceRuns(next.runs);
           return next;
         } catch (cause) { fail(cause.message); return { schedules: [], runs: [] }; }
-      }, [packId, setError, fail]);
+      }, [packId, setError, fail, announceRuns]);
+
+      // 队列与故障档案：低频刷新即可，它们的变化节奏远慢于轮次列表本身。
+      React.useEffect(() => {
+        if (!packId) return undefined;
+        let active = true;
+        const load = async () => {
+          const [queueNext, failureNext] = await Promise.all([
+            remoteStatic('scheduleQueue').catch(() => null),
+            remote(packId, 'listScheduleFailures').catch(() => null),
+          ]);
+          if (!active) return;
+          if (queueNext) setQueue(queueNext);
+          if (failureNext) setFailures(failureNext);
+        };
+        void load();
+        const timer = setInterval(() => { if (active) void load(); }, 8000);
+        return () => { active = false; clearInterval(timer); };
+      }, [packId]);
 
       React.useEffect(() => {
         if (!packId) return;
@@ -3263,6 +3533,16 @@ window.__ModuleLoader__.load({
       }, [packId, fail, loadSchedules]);
 
       const anyRunning = runs.some((run) => run.status === 'running');
+      // 调度器本来会自动续跑中断的轮次；这个按钮是给「我刚把失效的 Key 换好了，
+      // 现在就跑」的人准备的，不用再等下一个 30 秒节拍。
+      const resumeInterrupted = React.useCallback(async (runId) => {
+        setBusy(`resume:${runId}`);
+        try {
+          await remote(packId, 'resumeScheduleRun', { runId });
+          await loadSchedules();
+        } catch (cause) { fail(cause.message); }
+        finally { setBusy(null); }
+      }, [packId, loadSchedules, setBusy, fail]);
       React.useEffect(() => {
         if (!packId) return undefined;
         let active = true;
@@ -3673,8 +3953,10 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sv-drawer-scroll' }, h(ScheduleRunHistory, { key: historySchedule.id, packId, scheduleId: historySchedule.id, refreshKey: historyRefresh, onPublish: goPublish, onContinue: continueItem })),
         ),
       );
-      return h(PackFrame, { packId, openConversation, title: '内容安排', accent: 'sky', copy: '按账号配置定时任务：到点后由主机侧调度器无人值守跑完「选题 → 写稿 → 配音字幕 → 成片质检 → 发布资料 → 投递到平台」。深度决定跑到哪一步；选到成片及以后会自动确认 AI 稿件。选「投递到平台」时，默认停在平台的发布按钮前等你确认；只有把投递方式设为「自动提交」，才会无人值守直接发布。', hero },
+      return h(PackFrame, { packId, openConversation, title: '内容安排', accent: 'sky', copy: '按账号配置定时任务：到点后由主机侧调度器无人值守跑完「选题 → 写稿 → 配音字幕 → 成片质检 → 发布资料 → 投递到平台」。深度决定跑到哪一步；选到成片及以后会自动确认 AI 稿件。选「投递到平台」时，默认停在平台的发布按钮前等你确认；只有把投递方式设为「自动提交」，才会无人值守直接发布。', hero, introActions: h(NotifyToggle) },
         h(Notice, { error }),
+        h(QueueBar, { queue }),
+        h(FailurePanel, { failures, busy, onResume: resumeInterrupted }),
         h('section', { className: 'sv-split' }, configCard, taskPanel),
         signalsDrawerNode,
         runDetailDrawer,

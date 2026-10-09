@@ -107,10 +107,55 @@ export function voiceoverTimeoutMs(chars) {
   return Math.min(45 * 60_000, Math.max(STEP_TIMEOUT_MS.voiceover, Math.round(estimated * 1.8)))
 }
 
+/**
+ * 停滞预算：阶段在多久「完全没有进展」之后才判定为卡死。
+ *
+ * 固定墙钟把「跑得慢」和「已经死了」当成同一件事，于是长稿件被误杀
+ * （2026-10-09 13:00 那轮：2113 字实际跑完、音频已落盘，却因为刚过 10 分钟
+ * 被判超时，整轮报废）。改为观察任务是否还在动：指纹（子任务的 updatedAt
+ * 与阶段名）变了就重新计时，只有纹丝不动超过预算才判死。子任务一直在写
+ * 进度的心跳上，所以这个判据比墙钟准得多。
+ */
+export const NO_PROGRESS_BUDGET_MS = Object.freeze({
+  topic: 8 * 60_000,
+  script: 8 * 60_000,
+  approve: 60_000,
+  voiceover: 12 * 60_000,
+  subtitles: 8 * 60_000,
+  video: 15 * 60_000,
+  packaging: 8 * 60_000,
+  publish: 10 * 60_000,
+})
+
+/**
+ * 硬性上限：防止「一直在动但永远动不完」的任务无限占用机器。
+ * 与停滞预算并存——前者防误杀，后者防跑飞。
+ */
+export const STEP_CEILING_MS = Object.freeze({
+  topic: 60 * 60_000,
+  script: 60 * 60_000,
+  approve: 5 * 60_000,
+  voiceover: 60 * 60_000,
+  subtitles: 45 * 60_000,
+  video: 90 * 60_000,
+  packaging: 45 * 60_000,
+  publish: 60 * 60_000,
+})
+
+/** 视频阶段的等待上限，按镜头数上浮（约每镜头 40 秒）。 */
+export function videoTimeoutMs(sceneCount) {
+  const scenes = Number(sceneCount)
+  if (!Number.isFinite(scenes) || scenes <= 0) return STEP_TIMEOUT_MS.video
+  const estimated = Math.ceil(scenes * 40_000)
+  return Math.min(STEP_CEILING_MS.video, Math.max(STEP_TIMEOUT_MS.video, estimated))
+}
+
 export const SCHEDULE_POLL_INTERVAL_MS = 2_000
 
-export const RUN_STATUSES = Object.freeze(['running', 'completed', 'partial', 'failed', 'missed', 'cancelled'])
-export const ITEM_STATUSES = Object.freeze(['running', 'completed', 'failed', 'cancelled'])
+export const RUN_STATUSES = Object.freeze([
+  'running', 'completed', 'partial', 'failed', 'missed', 'cancelled', 'interrupted', 'blocked',
+])
+export const ITEM_STATUSES = Object.freeze(['running', 'completed', 'failed', 'cancelled', 'interrupted'])
 export const STAGE_STATUSES = Object.freeze(['pending', 'running', 'done', 'failed', 'skipped'])
 
 export class SpokenVideoScheduleError extends Error {
@@ -412,6 +457,9 @@ function itemRecord(value) {
     title: text(item.title, '条目标题', 160, false),
     status,
     reachedStep: text(item.reachedStep, '到达阶段', 24, false),
+    // 断点续跑的起点。`reachedStep` 一直在写却从没有代码读过它——字段早就
+    // 存在，只是续跑能力没有实现。现在 host 会在重启后从这里接上。
+    resumeFrom: text(item.resumeFrom, '续跑起点', 24, false),
     signalCount: integer(item.signalCount, '信号数', 0, 100_000, null),
     scriptChars: integer(item.scriptChars, '稿件字数', 0, 100_000, null),
     scriptRevision: integer(item.scriptRevision, '稿件版本', 1, 1_000_000, null),
@@ -452,6 +500,14 @@ function runRecord(value) {
     step: text(item.step, '当前阶段', 24, false),
     message: text(item.message, '执行信息', 500, false),
     error: text(item.error, '执行错误', 500, false),
+    // 断点续跑与自动修复的审计。resumeCount 让「续跑第 3 次仍失败」在界面上
+    // 一眼可见，而不是被当成一次全新的失败。
+    resumeCount: integer(item.resumeCount, '续跑次数', 0, 100, 0),
+    resumedFromStep: text(item.resumedFromStep, '续跑起点阶段', 24, false),
+    interruptedAt: text(item.interruptedAt, '中断时间', 64, false),
+    // 预检或分类给出的可执行修法，直接展示给用户，省去人工翻译报错。
+    remedy: text(item.remedy, '修复建议', 600, false),
+    failureCategory: text(item.failureCategory, '失败分类', 64, false),
     refs: {
       topicGenerationId: text(item.refs?.topicGenerationId, '选题任务标识', 64, false),
       scriptGenerationIds: idList(item.refs?.scriptGenerationIds, '写稿任务标识', SCHEDULE_ITEM_LIMIT * 2).slice(0, SCHEDULE_ITEM_LIMIT * 2),

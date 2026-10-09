@@ -1131,7 +1131,7 @@ test('a slot missed while the host was down is logged once and never backfilled'
   assert.equal(listed.schedules[0].latestRun.status, 'missed')
 })
 
-test('restart marks an interrupted round failed instead of leaving it running forever', async (t) => {
+test('restart parks an interrupted round as resumable instead of discarding its work', async (t) => {
   const { cwd, fake } = await setup(t)
   const file = join(cwd, 'data', 'schedules.json')
   const scheduleId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -1150,18 +1150,18 @@ test('restart marks an interrupted round failed instead of leaving it running fo
   const host = new SpokenVideoScheduleHost({ ...fake.hosts, workspacePath: cwd, pollIntervalMs: 2 })
   await host.recoverInterrupted()
   const data = JSON.parse(await readFile(file, 'utf8'))
-  assert.equal(data.runs[0].status, 'failed')
+  // 重启不该把已完成的几十分钟扔掉：轮次停放为 interrupted，由调度器从断点接上。
+  assert.equal(data.runs[0].status, 'interrupted')
   assert.match(data.runs[0].error, /重启/u)
-  assert.ok(data.runs[0].completedAt)
-  assert.ok(data.runs[0].elapsedMs > 24 * 3600_000, 'long host outages remain valid audit durations')
-  assert.equal(data.runs[0].items[0].status, 'failed')
-  assert.equal(data.runs[0].items[0].stages[0].status, 'done', 'completed stage work is preserved')
-  assert.equal(data.runs[0].items[0].stages[1].status, 'failed')
-  assert.equal(data.runs[0].items[0].stages[2].status, 'failed')
+  assert.equal(data.runs[0].completedAt, null, '未跑完的轮次没有完成时间')
+  assert.equal(data.runs[0].items[0].status, 'interrupted')
+  assert.equal(data.runs[0].items[0].stages[0].status, 'done', '已完成的阶段原样保留')
+  assert.equal(data.runs[0].items[0].stages[1].status, 'pending', '没做完的阶段重新排队，而不是判失败')
+  assert.equal(data.runs[0].items[0].stages[2].status, 'pending')
 
   // Idempotent: a second pass changes nothing.
   await host.recoverInterrupted()
-  assert.equal(JSON.parse(await readFile(file, 'utf8')).runs[0].status, 'failed')
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).runs[0].status, 'interrupted')
 })
 
 test('deleteSchedule refuses while a round is in flight', async (t) => {

@@ -8,6 +8,7 @@ import {
   emptyStages,
   finalStep,
   missedSlot,
+  NO_PROGRESS_BUDGET_MS,
   parseScheduleRequest,
   reduceRunStatus,
   runView,
@@ -19,14 +20,36 @@ import {
   scheduleView,
   scriptInputOf,
   SpokenVideoScheduleError,
+  STEP_CEILING_MS,
   STEP_LABEL,
   STEP_TIMEOUT_MS,
   stepsForRun,
+  videoTimeoutMs,
   voiceoverTimeoutMs,
   topicInputOf,
 } from './spoken-video-schedule.mjs'
+import {
+  classifyFailure,
+  CATEGORY_LABEL,
+  repairBackoffMs,
+  STAGE_MAX_ATTEMPTS,
+} from './spoken-video-failure.mjs'
+import {
+  canStartMore,
+  emptyQueueFile,
+  enqueue,
+  nextRunnable,
+  QUEUE_FILE,
+  queueEntry,
+  waitingWithPosition,
+} from './spoken-video-queue.mjs'
+import { ensureLocalEngine as ensureEngineDefault, preflightSummary, runPreflight } from './spoken-video-runtime-preflight.mjs'
 const TICK_INTERVAL_MS = 30_000
 const LIVE = new Set(['queued', 'running'])
+/** 故障档案保留条数。够看清趋势，又不会让文件无限涨。 */
+const FAILURE_LIMIT = 500
+/** 同一轮最多自动续跑几次，避免半夜无限重试。 */
+const MAX_RESUMES = 3
 
 function fail(code, message) { throw new SpokenVideoScheduleError(code, message) }
 function invalid(message) { fail('SPOKEN_VIDEO_SCHEDULE_INVALID_INPUT', message) }
@@ -37,6 +60,14 @@ function elapsed(start, end) {
 }
 function reasonOf(error) { return String(error?.message || error).slice(0, 500) }
 function charsOf(body) { return [...String(body || '').replace(/\s+/g, '')].length }
+
+/** 断点：已知做到 `reached`，下一步接哪一步。没做过就从第一步来。 */
+function nextStepOf(steps, reached) {
+  if (!reached) return null
+  const index = steps.indexOf(reached)
+  if (index === -1) return null
+  return steps[index + 1] || null
+}
 
 async function workspaceFor(agent) {
   const cwd = agent?.workspacePath ?? agent?.session?.header?.cwd
@@ -133,6 +164,7 @@ export class SpokenVideoScheduleHost {
     pollIntervalMs = SCHEDULE_POLL_INTERVAL_MS,
     tickIntervalMs = TICK_INTERVAL_MS,
     now = stamp,
+    ensureLocalEngine = null,
   } = {}) {
     if (!content) throw new Error('SpokenVideoScheduleHost requires the content store.')
     if (!projects) throw new Error('SpokenVideoScheduleHost requires the project store.')
@@ -162,6 +194,9 @@ export class SpokenVideoScheduleHost {
     this.pollIntervalMs = Number.isSafeInteger(pollIntervalMs) && pollIntervalMs >= 1 ? pollIntervalMs : SCHEDULE_POLL_INTERVAL_MS
     this.tickIntervalMs = Number.isSafeInteger(tickIntervalMs) && tickIntervalMs >= 1 ? tickIntervalMs : TICK_INTERVAL_MS
     this.now = now
+    // 引擎自愈钩子。默认走 runtime-preflight 的真实实现；测试注入假实现，
+    // 这样「预检拉起引擎」这条路径可以离线验证。
+    this.ensureLocalEngine = ensureLocalEngine || ((kind, options) => ensureEngineDefault(kind, options))
     /** Per-workspace write serialization for schedules.json. */
     this.writes = new Map()
     /** Live rounds: runId -> { workspace, scheduleId, controller }. */
@@ -561,19 +596,27 @@ export class SpokenVideoScheduleHost {
    * Reserve the slot and start the round. The stamp and the running record are
    * written BEFORE any stage starts, so the next thirty second tick can never
    * launch the same slot twice even though a round takes many minutes.
+   *
+   * `resumeRunId` turns this into a checkpoint continuation: the existing run
+   * record is reused (same id, same items, same refs) instead of a new round
+   * being created, so the audit trail stays one continuous line rather than
+   * "round 1 failed, round 2 started from scratch".
    */
-  async startRun(paths, schedule, trigger) {
+  async startRun(paths, schedule, trigger, { queueId = null, resumeRunId = null } = {}) {
+    // 串行执行：机器一次只扛得住一轮渲染，交错执行的失败在审计里没法读。
+    // 现在这个判断由队列保证（#drainQueue 只在空闲时取一个），这里是最后一道防线。
     if ([...this.active.values()].some((run) => run.workspace === paths.workspace)) {
       fail('SPOKEN_VIDEO_SCHEDULE_BUSY', '本工作区已有一轮自动化在执行，请等待其结束。')
     }
-    const runId = randomUUID()
     const triggeredAt = this.now()
     const steps = stepsForRun(schedule.depth, schedule.production.subtitleEnabled)
-    const record = {
+    const resume = resumeRunId ? await this.#resumePayload(paths, resumeRunId, schedule) : null
+    const runId = resume ? resumeRunId : randomUUID()
+    const record = resume || {
       id: runId,
       scheduleId: schedule.id,
       status: 'running',
-      trigger,
+      trigger: trigger === 'resume' ? 'automatic' : trigger,
       triggeredAt,
       completedAt: null,
       elapsedMs: null,
@@ -582,7 +625,10 @@ export class SpokenVideoScheduleHost {
       step: steps[0],
       message: `已启动，目标深度「${DEPTH_LABEL[schedule.depth]}」。`,
       error: null,
-      refs: { topicGenerationId: null, scriptGenerationIds: [], mediaRunIds: [], publishTaskIds: [] },
+      remedy: null,
+      failureCategory: null,
+      resumeCount: 0,
+      refs: { topicGenerationId: null, scriptGenerationIds: [], mediaRunIds: [], publishTaskIds: [], publishJobIds: [] },
       items: [],
     }
     await this.mutate(paths, (data) => {
@@ -591,14 +637,60 @@ export class SpokenVideoScheduleHost {
         item.lastRunAt = triggeredAt
         item.updatedAt = triggeredAt
       }
-      data.runs.unshift(record)
+      if (resume) {
+        // 续跑不重写 triggeredAt：那是本轮真实开始的时间，也是「这一轮跑了多久」
+        // 的唯一依据。resumeCount 单独记续跑了几次。
+        const index = data.runs.findIndex((candidate) => candidate.id === runId)
+        if (index !== -1) {
+          data.runs[index] = {
+            ...record,
+            status: 'running',
+            completedAt: null,
+            elapsedMs: null,
+            resumeCount: (record.resumeCount || 0) + 1,
+            message: `主机重启后从「${STEP_LABEL[record.resumedFromStep] || record.resumedFromStep || '断点'}」续跑（第 ${(record.resumeCount || 0) + 1} 次）。`,
+          }
+        }
+      } else {
+        data.runs.unshift(record)
+      }
     })
     const controller = new AbortController()
-    this.active.set(runId, { workspace: paths.workspace, scheduleId: schedule.id, controller })
-    void this.background(this.#execute(paths, runId, schedule, controller.signal)
+    this.active.set(runId, { workspace: paths.workspace, scheduleId: schedule.id, controller, queueId })
+    void this.background(this.#execute(paths, runId, schedule, controller.signal, resume)
       .catch(() => {})
       .finally(() => { this.active.delete(runId) }))
-    return { runId, triggeredAt }
+    return { runId, triggeredAt, resumed: Boolean(resume) }
+  }
+
+  /** 组装续跑载荷：保留 id / items / refs，只把状态拨回可继续。 */
+  async #resumePayload(paths, runId, schedule) {
+    const data = await this.serial(paths.workspace, () => this.readFile(paths))
+    const run = data.runs.find((item) => item.id === runId)
+    if (!run) return null
+    const steps = stepsForRun(schedule.depth, schedule.production.subtitleEnabled)
+    const items = run.items.map((item) => ({
+      ...item,
+      status: item.status === 'completed' ? 'completed' : 'running',
+      error: null,
+      remedy: null,
+      failureCategory: null,
+      resumeFrom: item.status === 'completed' ? null : (item.resumeFrom || nextStepOf(steps, item.reachedStep)),
+      stages: item.stages.map((stage) => (stage.status === 'done' ? stage : { ...stage, status: 'pending', completedAt: null, message: null })),
+    }))
+    const firstOpen = items.find((item) => item.status === 'running')
+    return {
+      ...run,
+      status: 'running',
+      completedAt: null,
+      elapsedMs: null,
+      error: null,
+      remedy: null,
+      failureCategory: null,
+      step: firstOpen?.resumeFrom || run.step,
+      resumedFromStep: firstOpen?.resumeFrom || run.step,
+      items,
+    }
   }
 
   /* --------------------------- execution identity ------------------------- */
@@ -659,16 +751,33 @@ export class SpokenVideoScheduleHost {
   }
 
   /**
-   * Poll until `isDone` accepts the value, the deadline passes, or the round is
-   * cancelled. A timeout never kills the underlying task — it keeps its own
-   * durable record and recovery — it only stops this round from waiting.
+   * Poll until `isDone` accepts the value, the round is cancelled, or the stage
+   * is judged dead. A timeout never kills the underlying task — it keeps its
+   * own durable record and recovery — it only stops this round from waiting.
    *
-   * `timeoutMs` 让调用方按稿件长度上浮等待上限（配音/字幕用，见 voiceoverTimeoutMs）；
-   * 不传就用该阶段的默认上限。
+   * 两个判据取代了原来的单一墙钟：
+   *
+   * - **停滞预算**：只要子任务的进展指纹还在变（updatedAt / 阶段名），就重新
+   *   计时。原来的固定墙钟把「跑得慢」和「已经死了」当成同一件事，于是长稿件
+   *   被误杀——2026-10-09 13:00 那轮 2113 字实际跑完、音频已落盘，却因为刚过
+   *   10 分钟被判超时，整轮报废。
+   * - **硬性上限**：指纹一直在变但永远不变完的任务（死循环）由它兜底。
+   *
+   * `fingerprint(value)` 可选，默认按对象序列化取值——子任务记录每轮都会带上
+   * 自己的 updatedAt/阶段，这正是「还在动」的证据。
+   *
+   * `timeoutMs` 让调用方按稿件长度等实际工作量上浮等待上限；不传就用该阶段的
+   * 默认停滞预算。
    */
-  async #poll(step, signal, read, isDone, timeoutMs = null) {
-    const budget = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : STEP_TIMEOUT_MS[step]
-    const deadline = Date.now() + budget
+  async #poll(step, signal, read, isDone, timeoutMs = null, fingerprint = null) {
+    const stallBudget = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : (NO_PROGRESS_BUDGET_MS[step] || STEP_TIMEOUT_MS[step])
+    const ceiling = STEP_CEILING_MS[step] || Number.POSITIVE_INFINITY
+    const startedAt = Date.now()
+    let lastProgressAt = startedAt
+    let lastMark = null
+    const markOf = fingerprint || ((value) => {
+      try { return JSON.stringify([value?.status ?? null, value?.updatedAt ?? value?.updated ?? null, value?.phase ?? null, value?.progress ?? null]) } catch { return null }
+    })
     // 「暂时读不到」与「永远读不到」必须分开。写盘走「临时文件 + 原子 rename」，
     // rename 目标被任意句符打开就 EPERM 重试（见 writeJson）——落地前那一瞬读者会
     // 读到旧内容，这是 2026-10-08 11:17 那次 102ms 竞态的成因，重试几次即可。
@@ -700,8 +809,18 @@ export class SpokenVideoScheduleHost {
       }
       missed = 0
       if (isDone(value)) return value
-      if (Date.now() > deadline) {
-        fail('SPOKEN_VIDEO_SCHEDULE_TIMEOUT', `${STEP_LABEL[step]}超过 ${Math.round(STEP_TIMEOUT_MS[step] / 60_000)} 分钟仍未完成。`)
+      // 进展指纹变了就重新给满停滞预算。这是本次改造的核心：慢不等于死。
+      const mark = markOf(value)
+      if (mark !== null && mark !== lastMark) {
+        lastMark = mark
+        lastProgressAt = Date.now()
+      }
+      const now = Date.now()
+      if (now - lastProgressAt > stallBudget) {
+        fail('SPOKEN_VIDEO_SCHEDULE_NO_PROGRESS', `${STEP_LABEL[step]}已连续 ${Math.round(stallBudget / 60_000)} 分钟没有任何进展（任务可能已卡死），本轮将自动重试该阶段。`)
+      }
+      if (now - startedAt > ceiling) {
+        fail('SPOKEN_VIDEO_SCHEDULE_TIMEOUT', `${STEP_LABEL[step]}超过 ${Math.round(ceiling / 60_000)} 分钟硬性上限仍未完成。`)
       }
       await this.#sleep(signal)
     }
@@ -709,101 +828,168 @@ export class SpokenVideoScheduleHost {
 
   /* ------------------------------- orchestrator ---------------------------- */
 
-  async #execute(paths, runId, schedule, signal) {
+  async #execute(paths, runId, schedule, signal, resume = null) {
     let handle = null
     try {
       handle = this.context ? { agent: this.context, dispose: async () => {} } : await this.#acquireAgent(paths.workspace, schedule, signal)
       const agent = handle.agent
       await this.#patch(paths, runId, (run) => { run.sessionId = agent.id ? String(agent.id) : null })
-      await this.#runRound(paths, runId, agent, schedule, signal)
+      await this.#runRound(paths, runId, agent, schedule, signal, resume ? { topicGenerationId: resume.refs?.topicGenerationId || null } : null)
+      await this.#settleAlert(paths, runId)
     } catch (error) {
       const cancelled = signal.aborted
+      const failure = classifyFailure({ error })
+      await this.#appendFailure(paths, {
+        runId,
+        scheduleId: schedule.id,
+        scheduleName: schedule.name,
+        step: failure.step,
+        attempt: 1,
+        category: failure.category,
+        categoryLabel: CATEGORY_LABEL[failure.category] || '',
+        signature: failure.signature,
+        message: failure.message,
+        remedy: failure.remedy,
+        remedyTarget: failure.remedyTarget,
+        code: failure.code,
+        fatal: true,
+      }).catch(() => {})
       await this.#patch(paths, runId, (run) => {
         run.status = cancelled ? 'cancelled' : 'failed'
         run.error = cancelled ? null : reasonOf(error)
+        run.remedy = cancelled ? null : failure.remedy
+        run.failureCategory = cancelled ? null : failure.category
         run.message = cancelled
           ? '本轮已按操作者要求停止，已完成的阶段产物保留。'
-          : `自动化在「${STEP_LABEL[run.step] || run.step}」阶段失败。`
+          : `自动化在「${STEP_LABEL[run.step] || run.step}」阶段失败：${failure.remedy}`
         run.completedAt = this.now()
         run.elapsedMs = elapsed(run.triggeredAt, run.completedAt)
         for (const item of run.items) {
           if (item.status !== 'running') continue
           item.status = cancelled ? 'cancelled' : 'failed'
-          if (!cancelled && !item.error) item.error = reasonOf(error)
+          if (!cancelled && !item.error) {
+            item.error = reasonOf(error)
+            item.remedy = failure.remedy
+            item.failureCategory = failure.category
+          }
         }
       }).catch(() => {})
+      await this.#settleAlert(paths, runId)
     } finally {
       if (handle) await handle.dispose().catch(() => {})
     }
   }
 
-  async #runRound(paths, runId, agent, schedule, signal) {
+  /**
+   * 轮次落到终态后发一条无人值守告警，供独立于浏览器的 Windows 计划任务播放。
+   * 失败也发——那正是人最需要被叫醒的时刻。
+   */
+  async #settleAlert(paths, runId) {
+    try {
+      const run = await this.#patch(paths, runId, () => {})
+      if (!run) return
+      const data = await this.serial(paths.workspace, () => this.readFile(paths))
+      const name = data.schedules.find((candidate) => candidate.id === run.scheduleId)?.name || '内容安排'
+      const ok = run.status === 'completed'
+      const label = ok ? '已完成' : run.status === 'partial' ? '部分完成' : run.status === 'cancelled' ? '已停止' : '失败'
+      const minutes = run.elapsedMs ? `，耗时 ${Math.round(run.elapsedMs / 60_000)} 分钟` : ''
+      await this.#alert(paths, {
+        level: ok ? 'success' : 'error',
+        title: `${name}：自动化${label}${minutes}`,
+        detail: `${run.message || ''}${run.error ? `｜${run.error}` : ''}`.slice(0, 400),
+      })
+    } catch { /* 通知尽力而为 */ }
+  }
+
+  async #runRound(paths, runId, agent, schedule, signal, resume = null) {
     const steps = stepsForRun(schedule.depth, schedule.production.subtitleEnabled)
     const startedAt = this.now()
 
-    // Topic generation also backfills today's missing channels, which is why a
-    // separate collect step would be redundant.
-    await this.#patch(paths, runId, (run) => { run.step = 'topic' })
-    const launched = await this.content.startTopicGeneration(agent, topicInputOf(schedule))
-    await this.#patch(paths, runId, (run) => { run.refs.topicGenerationId = launched.id })
-    const generation = await this.#poll('topic', signal,
-      () => this.content.topicGenerationStatus(agent, { id: launched.id }),
-      (record) => !LIVE.has(record.status))
-    if (generation.status !== 'completed') {
-      // A failed round always carries the reason in `error`; the message stays
-      // a one-line human summary for the task card.
-      await this.#finish(paths, runId, startedAt, 'failed', 'topic', '选题生成未完成。', generation.error || '选题生成未正常结束。')
-      return
+    // 续跑：topic 已经产出项目，不必重做一遍选题（那会生成一批新项目，与本轮无关）。
+    // 复用原来的选题批次与已建的项目，只从真正断掉的那一步接着走。
+    let generation = null
+    let projects = null
+    if (resume?.topicGenerationId) {
+      try {
+        generation = await this.content.topicGenerationStatus(agent, { id: resume.topicGenerationId })
+        if (generation.status === 'completed') {
+          projects = await this.#resumeProjects(paths, runId, generation)
+        }
+      } catch { generation = null }
     }
 
-    const projects = await this.#selectProjects(agent, generation, schedule.perRunLimit)
-    if (!projects.length) {
-      await this.#finish(paths, runId, startedAt, 'failed', 'topic', '本轮没有可用的选题候选。', '选题生成已完成，但没有返回可用候选；可调整选题角度或参与渠道后重试。')
-      return
+    // Topic generation also backfills today's missing channels, which is why a
+    // separate collect step would be redundant.
+    if (!projects) {
+      await this.#patch(paths, runId, (run) => { run.step = 'topic' })
+      const launched = await this.content.startTopicGeneration(agent, topicInputOf(schedule))
+      await this.#patch(paths, runId, (run) => { run.refs.topicGenerationId = launched.id })
+      generation = await this.#poll('topic', signal,
+        () => this.content.topicGenerationStatus(agent, { id: launched.id }),
+        (record) => !LIVE.has(record.status))
+      if (generation.status !== 'completed') {
+        // A failed round always carries the reason in `error`; the message stays
+        // a one-line human summary for the task card.
+        await this.#finish(paths, runId, startedAt, 'failed', 'topic', '选题生成未完成。', generation.error || '选题生成未正常结束。')
+        return
+      }
+      projects = await this.#selectProjects(agent, generation, schedule.perRunLimit)
+      if (!projects.length) {
+        await this.#finish(paths, runId, startedAt, 'failed', 'topic', '本轮没有可用的选题候选。', '选题生成已完成，但没有返回可用候选；可调整选题角度或参与渠道后重试。')
+        return
+      }
     }
 
     const rest = steps.filter((step) => step !== 'topic')
-    const topicDoneAt = this.now()
-    await this.#patch(paths, runId, (run) => {
-      run.items = projects.map((project) => ({
-        projectId: project.projectId,
-        title: project.title,
-        // A topic-only round is already finished here; leaving the item running
-        // would strand it in a state no later pass ever revisits.
-        status: rest.length ? 'running' : 'completed',
-        reachedStep: 'topic',
-        signalCount: project.signalCount,
-        scriptChars: null,
-        scriptRevision: null,
-        durationSeconds: null,
-        orientation: rest.includes('video') ? schedule.production.orientation : null,
-        qcPassed: false,
-        coverState: null,
-        publishState: null,
-        publishAccount: null,
-        publishUrl: null,
-        error: null,
-        stages: emptyStages(steps).map((stage) => (stage.step === 'topic'
-          ? { ...stage, status: 'done', startedAt, completedAt: topicDoneAt, refId: generation.id, message: `候选「${project.title}」· 依据 ${project.signalCount} 条信号` }
-          : stage)),
-      }))
-      run.message = rest.length
-        ? `选题完成，本轮推进 ${projects.length} 条至「${DEPTH_LABEL[schedule.depth]}」。`
-        : `选题完成，本轮产出 ${projects.length} 条待写稿选题。`
-      if (!rest.length) {
-        run.status = 'completed'
-        run.step = 'topic'
-        run.completedAt = this.now()
-        run.elapsedMs = elapsed(startedAt, run.completedAt)
-      }
-    })
-    if (!rest.length) return
+    if (!resume) {
+      const topicDoneAt = this.now()
+      await this.#patch(paths, runId, (run) => {
+        run.items = projects.map((project) => ({
+          projectId: project.projectId,
+          title: project.title,
+          // A topic-only round is already finished here; leaving the item running
+          // would strand it in a state no later pass ever revisits.
+          status: rest.length ? 'running' : 'completed',
+          reachedStep: 'topic',
+          resumeFrom: null,
+          signalCount: project.signalCount,
+          scriptChars: null,
+          scriptRevision: null,
+          durationSeconds: null,
+          orientation: rest.includes('video') ? schedule.production.orientation : null,
+          qcPassed: false,
+          coverState: null,
+          publishState: null,
+          publishAccount: null,
+          publishUrl: null,
+          error: null,
+          stages: emptyStages(steps).map((stage) => (stage.step === 'topic'
+            ? { ...stage, status: 'done', startedAt, completedAt: topicDoneAt, refId: generation.id, message: `候选「${project.title}」· 依据 ${project.signalCount} 条信号` }
+            : stage)),
+        }))
+        run.message = rest.length
+          ? `选题完成，本轮推进 ${projects.length} 条至「${DEPTH_LABEL[schedule.depth]}」。`
+          : `选题完成，本轮产出 ${projects.length} 条待写稿选题。`
+        if (!rest.length) {
+          run.status = 'completed'
+          run.step = 'topic'
+          run.completedAt = this.now()
+          run.elapsedMs = elapsed(startedAt, run.completedAt)
+        }
+      })
+      if (!rest.length) return
+    }
 
     // One project at a time: rendering saturates the machine, and interleaved
     // failures are far harder to read in the audit trail.
-    for (const project of projects) {
+    const targets = resume
+      ? (await this.#readItems(paths, runId))
+        .map((item) => ({ projectId: item.projectId, resumeFrom: item.resumeFrom || nextStepOf(rest, item.reachedStep) }))
+        .filter((item) => item.projectId)
+      : projects.map((project) => ({ projectId: project.projectId, resumeFrom: null }))
+    for (const target of targets) {
       if (signal.aborted) break
-      await this.#runItem(paths, runId, agent, schedule, project.projectId, rest, signal)
+      await this.#runItem(paths, runId, agent, schedule, target.projectId, rest, signal, target.resumeFrom)
     }
 
     const cancelled = signal.aborted
@@ -822,6 +1008,17 @@ export class SpokenVideoScheduleHost {
             : status === 'partial' ? `本轮部分完成：${done}/${items.length} 条推进到「${DEPTH_LABEL[schedule.depth]}」。`
               : '本轮全部失败，请展开各条查看原因。',
       cancelled ? null : items.find((item) => item.error)?.error || null)
+  }
+
+  /**
+   * 续跑时的项目列表：直接读本轮已建的项目，不再重新选题（重新选会生成一批
+   * 与本轮无关的新项目）。返回空数组表示这轮没有可继续的条目。
+   */
+  async #resumeProjects(paths, runId, generation) {
+    const items = await this.#readItems(paths, runId)
+    return items
+      .filter((item) => item.projectId)
+      .map((item) => ({ projectId: item.projectId, title: item.title }))
   }
 
   /**
@@ -861,35 +1058,155 @@ export class SpokenVideoScheduleHost {
     return [...chosen.values()].slice(0, wanted)
   }
 
-  async #runItem(paths, runId, agent, schedule, projectId, steps, signal) {
-    for (const step of steps) {
+  /**
+   * Drive one project through its steps.
+   *
+   * A stage that fails is classified first. Retryable failures (a dead local
+   * engine, a rate limit, a stalled stage) are repaired and the *same stage* is
+   * re-entered — never the whole round, so a 40-minute pipeline does not throw
+   * away 40 minutes because the engine needed a restart at minute 35.
+   * Non-retryable failures (a dead credential, a QC rejection) stop immediately
+   * with the remedy attached, because retrying them only wastes time.
+   */
+  async #runItem(paths, runId, agent, schedule, projectId, steps, signal, resumeFrom = null) {
+    // 续跑时跳过已完成阶段；每阶段开始前还会用 refId 复查一次子任务的真实状态，
+    // 所以即使阶段被标记为 done 而产物其实没落盘，也会被重新做一遍。
+    const startIndex = resumeFrom ? Math.max(0, steps.indexOf(resumeFrom)) : 0
+    for (let index = startIndex; index < steps.length; index += 1) {
+      const step = steps[index]
       signal.throwIfAborted()
-      await this.#setStage(paths, runId, projectId, step, { status: 'running', startedAt: this.now() })
-      try {
-        const note = await this.#runStep(step, agent, schedule, projectId, signal, paths, runId)
-        await this.#setStage(paths, runId, projectId, step, {
-          status: 'done',
-          completedAt: this.now(),
-          ...(note?.refId ? { refId: note.refId } : {}),
-          ...(note?.message ? { message: note.message } : {}),
-        })
-        await this.#patchItem(paths, runId, projectId, (item) => { item.reachedStep = step })
-      } catch (error) {
-        const cancelled = signal.aborted
-        const message = reasonOf(error)
-        await this.#setStage(paths, runId, projectId, step, {
-          status: cancelled ? 'skipped' : 'failed',
-          completedAt: this.now(),
-          message: cancelled ? '本轮已停止。' : message,
-        })
-        await this.#patchItem(paths, runId, projectId, (item) => {
-          item.status = cancelled ? 'cancelled' : 'failed'
-          if (!cancelled) item.error = message
-        })
-        return
+      if (await this.#stageAlreadyDone(paths, agent, runId, projectId, step)) continue
+      const maxAttempts = STAGE_MAX_ATTEMPTS[step] ?? 1
+      for (let attempt = 1; ; attempt += 1) {
+        await this.#setStage(paths, runId, projectId, step, { status: 'running', startedAt: this.now() })
+        try {
+          const note = await this.#runStep(step, agent, schedule, projectId, signal, paths, runId)
+          await this.#setStage(paths, runId, projectId, step, {
+            status: 'done',
+            completedAt: this.now(),
+            ...(note?.refId ? { refId: note.refId } : {}),
+            ...(note?.message ? { message: note.message } : {}),
+          })
+          await this.#patchItem(paths, runId, projectId, (item) => {
+            item.reachedStep = step
+            item.error = null
+            item.remedy = null
+            item.failureCategory = null
+          })
+          break
+        } catch (error) {
+          const cancelled = signal.aborted
+          const failure = classifyFailure({ error, step })
+          const message = reasonOf(error)
+          await this.#setStage(paths, runId, projectId, step, {
+            status: cancelled ? 'skipped' : 'failed',
+            completedAt: this.now(),
+            message: cancelled ? '本轮已停止。' : message,
+          })
+          if (cancelled) {
+            await this.#patchItem(paths, runId, projectId, (item) => {
+              item.status = 'cancelled'
+              item.error = null
+            })
+            return
+          }
+          await this.#recordStageFailure(paths, runId, projectId, step, failure, attempt)
+          if (failure.retryable && attempt < maxAttempts) {
+            await this.#sleep(signal)
+            await this.#autoRepair(failure, step, signal)
+            // 重入本阶段：setStage 会把它重新标成 running，审计里能看到重试痕迹。
+            continue
+          }
+          await this.#patchItem(paths, runId, projectId, (item) => {
+            item.status = 'failed'
+            item.error = message
+            item.remedy = failure.remedy
+            item.failureCategory = failure.category
+          })
+          return
+        }
       }
     }
     await this.#patchItem(paths, runId, projectId, (item) => { item.status = 'completed' })
+  }
+
+  /**
+   * 幂等复查：阶段记录写着 done，但它指向的子任务是不是真的成功了？
+   *
+   * 续跑的正确性完全依赖这一步。断点续跑要跳过「已完成的阶段」，而唯一可信的
+   * 判据是那个阶段的 refId 指向的子任务的真实终态——阶段记录是我们自己写的，
+   * 也可能写着 done 而产物其实没落盘（比如写到一半主机挂了）。
+   *
+   * 查不到子任务时返回 false（宁可重做，不可假定成功）。重做的代价是一次
+   * 配音或渲染；跳过的代价是交付一个坏产物。
+   */
+  async #stageAlreadyDone(paths, agent, runId, projectId, step) {
+    const data = await this.serial(paths.workspace, () => this.readFile(paths))
+    const run = data.runs.find((item) => item.id === runId)
+    const entry = run?.items.find((item) => item.projectId === projectId)?.stages.find((item) => item.step === step)
+    if (entry?.status !== 'done' || !entry.refId) return false
+    try {
+      if (step === 'script') {
+        const record = await this.content.scriptGenerationStatus(agent, { id: entry.refId })
+        return record.status === 'completed'
+      }
+      if (step === 'topic') {
+        const record = await this.content.topicGenerationStatus(agent, { id: entry.refId })
+        return record.status === 'completed'
+      }
+      if (['voiceover', 'subtitles', 'video'].includes(step)) {
+        const runs = await this.media.operations(agent, { projectId })
+        const run2 = runs.find((item) => item.id === entry.refId)
+        return run2?.status === 'succeeded'
+      }
+      if (step === 'packaging') {
+        const task = await this.publish.task(agent, { taskId: entry.refId })
+        return task.status === 'succeeded'
+      }
+      // `approve` 没有子任务，它只在自己的记录里留痕；`publish` 之后才需要
+      // 人工介入，重入一次是幂等的（发布器自己按项目版本去重）。
+      if (step === 'approve') return true
+      return step === 'publish' ? Boolean(entry.completedAt) : false
+    } catch {
+      return false
+    }
+  }
+
+  /** 一次失败尝试的完整留痕：分类、修法、完整错误全文。 */
+  async #recordStageFailure(paths, runId, projectId, step, failure, attempt) {
+    try {
+      const data = await this.serial(paths.workspace, () => this.readFile(paths))
+      const run = data.runs.find((item) => item.id === runId)
+      const item = run?.items.find((candidate) => candidate.projectId === projectId)
+      await this.#appendFailure(paths, {
+        runId,
+        scheduleId: run?.scheduleId || null,
+        scheduleName: data.schedules.find((candidate) => candidate.id === run?.scheduleId)?.name || null,
+        projectId,
+        itemTitle: item?.title || null,
+        step,
+        attempt,
+        category: failure.category,
+        categoryLabel: CATEGORY_LABEL[failure.category] || '',
+        signature: failure.signature,
+        message: failure.message,
+        remedy: failure.remedy,
+        remedyTarget: failure.remedyTarget,
+        code: failure.code,
+      })
+    } catch { /* 故障档案是排查辅助，写不进去不该让轮次失败 */ }
+  }
+
+  /**
+   * 自动修复动作。目前只有一类是真正能自己做的：把本地推理引擎拉起来。
+   * 退避已经在调用方完成，这里只处理需要外部副作用的修复。
+   */
+  async #autoRepair(failure, step, signal) {
+    if (failure.autoRepair !== 'ensureEngine') return
+    const kind = (step === 'packaging' || step === 'publish') ? 'image' : 'tts'
+    try {
+      await this.ensureLocalEngine?.(kind, { reason: failure.category })
+    } catch { /* 修复失败不抛：真正的判定交给下一次尝试 */ }
   }
 
   /** Explicit dispatch: private methods are not reachable by computed name. */
@@ -907,6 +1224,19 @@ export class SpokenVideoScheduleHost {
   /* --------------------------------- stages -------------------------------- */
 
   async #stageScript(agent, schedule, projectId, signal, paths, runId) {
+    // 精确定位：优先续用「这个项目」已登记的写稿任务。refs.scriptGenerationIds
+    // 是整轮共用的数组，不按项目分段——所以必须同时匹配项目，不能只取最后一条
+    // （否则第二个项目会复用第一个项目的写稿任务，写到别的项目里去）。
+    //
+    // 历史 4 次「写稿生成记录不存在」就是靠"找最新一条同类记录"定位造成的：
+    // 记录有 40 条保留上限，长任务跑到后段时前段记录已被挤出。
+    const existing = await this.#stageRefForProject(paths, runId, projectId, 'script')
+    if (existing) {
+      const record = await this.content.scriptGenerationStatus(agent, { id: existing }).catch(() => null)
+      if (record?.status === 'completed') {
+        return this.#noteScript(agent, projectId, existing, paths, runId)
+      }
+    }
     const launched = await this.content.startScriptGeneration(agent, scriptInputOf(schedule, projectId))
     await this.#pushRef(paths, runId, 'scriptGenerationIds', launched.id)
     await this.#setStage(paths, runId, projectId, 'script', { refId: launched.id })
@@ -914,6 +1244,10 @@ export class SpokenVideoScheduleHost {
       () => this.content.scriptGenerationStatus(agent, { id: launched.id }),
       (item) => !LIVE.has(item.status))
     if (record.status !== 'completed') throw new Error(record.error || '写稿生成未完成。')
+    return this.#noteScript(agent, projectId, launched.id, paths, runId)
+  }
+
+  async #noteScript(agent, projectId, refId, paths, runId) {
     const detail = await this.projects.get(agent, { projectId })
     const revision = detail.artifacts?.script?.revision || null
     const chars = charsOf(detail.artifacts?.script?.data?.body)
@@ -922,7 +1256,23 @@ export class SpokenVideoScheduleHost {
       item.scriptRevision = revision
       item.title = detail.title || item.title
     })
-    return { refId: launched.id, message: `${chars} 字稿件已保存为版本 ${revision || '?'}` }
+    return { refId, message: `${chars} 字稿件已保存为版本 ${revision || '?'}` }
+  }
+
+  /**
+   * 取「该项目、该阶段」已登记的子任务标识。
+   *
+   * 读的是 items[].stages 里的 refId，而不是 run.refs 那个扁平数组——后者是整轮
+   * 共用的，一轮推三条时无法区分哪条属于哪个项目，按它复用会把一个项目的写稿
+   * 任务接到另一个项目上。
+   */
+  async #stageRefForProject(paths, runId, projectId, step) {
+    const data = await this.serial(paths.workspace, () => this.readFile(paths))
+    const run = data.runs.find((item) => item.id === runId)
+    const item = run?.items.find((candidate) => candidate.projectId === projectId)
+    const stage = item?.stages.find((candidate) => candidate.step === step)
+    if (stage?.refId) return stage.refId
+    return null
   }
 
   /**
@@ -991,7 +1341,10 @@ export class SpokenVideoScheduleHost {
     })
     await this.#pushRef(paths, runId, 'mediaRunIds', started.id)
     await this.#setStage(paths, runId, projectId, 'video', { refId: started.id })
-    const done = await this.#pollMedia(agent, 'video', signal, paths, runId, projectId, started.id)
+    // 渲染耗时随镜头数增长。固定 40 分钟对长片不够，而过早上限会把「还在渲染」
+    // 误判成失败——#poll 的停滞预算已经解决慢的问题，这里只按工作量上浮上限。
+    const sceneHint = detail.artifacts?.script?.data?.body ? charsOf(detail.artifacts.script.data.body) / 90 : 0
+    const done = await this.#pollMedia(agent, 'video', signal, paths, runId, projectId, started.id, videoTimeoutMs(Math.round(sceneHint)))
     if (done.status !== 'succeeded') throw new Error(done.error || '视频渲染或质检未通过。')
     const video = done.result?.video || {}
     await this.#patchItem(paths, runId, projectId, (item) => {
@@ -1113,6 +1466,92 @@ export class SpokenVideoScheduleHost {
     }, (run) => !LIVE.has(run.status), timeoutMs)
   }
 
+  /* ------------------------- failure ledger + alerts ------------------------ */
+
+  /**
+   * 故障档案与队列各自一个文件，刻意与 schedules.json 分开。
+   *
+   * schedules.json 是业务真相，任何一处写坏都会让整个内容安排页不可用；而故障档案
+   * 只是排查辅助，写坏了最坏情况是丢掉历史，不该有能力拖垮主流程。所以读失败一律
+   * 吞掉并回落成空档案。
+   */
+  async #readLedger(paths, name, fallback) {
+    try {
+      return await readJsonFile(join(paths.root, name), fallback)
+    } catch {
+      return fallback()
+    }
+  }
+
+  async #appendFailure(paths, record) {
+    const file = join(paths.root, 'failures.json')
+    const fallback = emptyQueueFile
+    const data = await this.#readLedger(paths, 'failures.json', fallback)
+    const entries = Array.isArray(data.entries) ? data.entries : []
+    const row = { id: randomUUID(), at: stamp(), ...record }
+    entries.unshift(row)
+    await writeJsonFile(file, { schemaVersion: 1, entries: entries.slice(0, FAILURE_LIMIT) })
+    return row
+  }
+
+  /**
+   * 失败聚类：把同类故障按签名折叠，界面上直接回答「上周为什么失败」。
+   *
+   * 这是「自己能找出原因」的落点——不靠人去翻日志，系统在失败的那一刻就已经
+   * 知道原因与修法，这里只负责把它们按同一根因归拢。
+   */
+  async listFailures(agent, request = {}) {
+    const paths = await this.paths(agent)
+    const data = await this.#readLedger(paths, 'failures.json', emptyQueueFile)
+    const entries = (Array.isArray(data.entries) ? data.entries : [])
+      .filter((row) => (request.category ? row.category === request.category : true))
+    const clusters = new Map()
+    for (const row of entries) {
+      const key = row.signature || row.message || '未知'
+      const existing = clusters.get(key)
+      if (existing) {
+        existing.count += 1
+        if (String(row.at) > String(existing.lastAt)) existing.lastAt = row.at
+        continue
+      }
+      clusters.set(key, {
+        signature: key,
+        category: row.category || 'code.defect',
+        categoryLabel: CATEGORY_LABEL[row.category] || CATEGORY_LABEL['code.defect'],
+        remedy: row.remedy || '',
+        remedyTarget: row.remedyTarget || null,
+        count: 1,
+        lastAt: row.at,
+        steps: row.step ? [row.step] : [],
+        sample: row.message || '',
+      })
+    }
+    const list = [...clusters.values()].sort((left, right) => right.count - left.count)
+    return {
+      total: entries.length,
+      clusters: list.slice(0, 50),
+      recent: entries.slice(0, 50).map((row) => ({ ...row, categoryLabel: CATEGORY_LABEL[row.category] || '' })),
+    }
+  }
+
+  /**
+   * 无人值守告警落盘。前端有 WebAudio 提示音，但浏览器关掉、标签页被节流、
+   * 或者人根本不在电脑前时都听不见；这份文件由独立于工作台的 Windows 计划
+   * 任务读取并播放系统音，是唯一不依赖浏览器的通道。
+   *
+   * 写入失败绝不抛：一个通知通道坏了不该让已经成功的轮次变成失败。
+   */
+  async #alert(paths, { level, title, detail = '' }) {
+    const file = join(paths.root, 'alerts.json')
+    const fallback = emptyQueueFile
+    try {
+      const data = await this.#readLedger(paths, 'alerts.json', fallback)
+      const entries = Array.isArray(data.entries) ? data.entries : []
+      entries.unshift({ id: randomUUID(), level, title, detail, at: stamp(), read: false })
+      await writeJsonFile(file, { schemaVersion: 1, entries: entries.slice(0, 50) })
+    } catch { /* 通知是尽力而为 */ }
+  }
+
   /* ------------------------------ run record ------------------------------ */
 
   async #readItems(paths, runId) {
@@ -1185,10 +1624,19 @@ export class SpokenVideoScheduleHost {
 
   /**
    * One tick. Signal collection stays with the content store; this only looks
-   * for automation slots. Rounds start detached, so a twenty minute pipeline
-   * can never block subsequent ticks, and the
-   * per-workspace in-flight guard plus the pre-written stamp keep the next
-   * tick from starting the same slot twice.
+   * for automation slots.
+   *
+   * 三件事按顺序发生：
+   *
+   * 1. **补跑断掉的轮次**（工程包四-B）：主机重启后被标记为 interrupted 的轮次
+   *    在这里排队续跑，从中断的阶段接着走，不从头再来。
+   * 2. **把到期的任务入队**（工程包九）：同一分钟到期的多个任务全部入队，不再是
+   *    「谁先抢到谁跑，另一个被 `.catch(() => {})` 静默吞掉」。
+   * 3. **按队列逐个执行**：一次只跑一个。渲染会打满机器，交错执行的失败在审计里
+   *    根本没法读——这是原来 `startRun` 直接拒绝第二个任务的原因，现在由队列表达。
+   *
+   * 轮次是 detached 的，所以一个二十分钟的流水线不会阻塞后续 tick；入队时写下的
+   * 时间戳保证同一槽位不会被重复入队。
    */
   async tick() {
     const clock = new Date(this.now())
@@ -1207,12 +1655,238 @@ export class SpokenVideoScheduleHost {
       } catch {
         continue
       }
-      if ([...this.active.values()].some((run) => run.workspace === workspace)) continue
-      for (const schedule of data.schedules) {
-        if (schedule.disabledReason || !scheduleDue(schedule, clock)) continue
-        await this.startRun(paths, schedule, 'automatic').catch(() => {})
+
+      // 1. 续跑中断的轮次（不占新槽位，只是把之前的活接着干完）
+      await this.#requeueInterrupted(paths, data).catch(() => {})
+
+      // 2. 到期的任务全部入队
+      const due = data.schedules.filter((schedule) => !schedule.disabledReason && scheduleDue(schedule, clock))
+      if (due.length) {
+        await this.serial(workspace, async () => {
+          const current = await this.readFile(paths)
+          const queued = await this.#readQueue(paths)
+          let entries = queued.entries
+          for (const schedule of due) {
+            const next = enqueue(entries, {
+              scheduleId: schedule.id,
+              scheduleName: schedule.name,
+              depth: schedule.depth,
+              trigger: 'automatic',
+              // 槽位身份 = 计划时间 + 当天。同一分钟内多次 tick 只入队一次。
+              slotKey: `${schedule.id}@${clock.toISOString().slice(0, 16)}`,
+            }, this.now())
+            if (next) entries = next
+          }
+          await writeJsonFile(join(paths.root, QUEUE_FILE), { schemaVersion: 1, entries })
+        }).catch(() => {})
       }
+
+      // 3. 从队列里取一个来跑
+      await this.#drainQueue(paths).catch(() => {})
     }
+  }
+
+  async #readQueue(paths) {
+    const data = await readJsonFile(join(paths.root, QUEUE_FILE), emptyQueueFile).catch(() => emptyQueueFile())
+    return { schemaVersion: 1, entries: Array.isArray(data?.entries) ? data.entries.map(queueEntry) : [] }
+  }
+
+  /**
+   * 执行队列中的下一个任务。
+   *
+   * 同时只允许一轮在跑：`canStartMore` 看的是「队列里 active 的数量 + host 手里
+   * 正在跑的轮次数量」。续跑轮次也计入后者，所以断点续跑与新任务不会互相踩。
+   */
+  async #drainQueue(paths) {
+    if (!canStartMore(this.active.size, 1)) return
+    let entry = null
+    await this.serial(paths.workspace, async () => {
+      const queue = await this.#readQueue(paths)
+      const next = nextRunnable(queue.entries)
+      if (!next) return
+      // 入队时就该占位（避免下一个 tick 又取到同一个），执行失败再放回去。
+      queue.entries = queue.entries.map((item) => (item.id === next.id
+        ? { ...item, status: 'active', startedAt: this.now() }
+        : item))
+      await writeJsonFile(join(paths.root, QUEUE_FILE), queue)
+      entry = next
+    })
+    if (!entry) return
+
+    try {
+      const data = await this.serial(paths.workspace, () => this.readFile(paths))
+      const schedule = data.schedules.find((candidate) => candidate.id === entry.scheduleId)
+      if (!schedule) throw new Error('内容安排已被删除')
+      if (schedule.disabledReason) throw new Error(schedule.disabledReason)
+
+      // 开工前体检：不能修的依赖问题在这里就拦下，不烧掉一整轮
+      const report = await runPreflight({
+        steps: stepsForRun(schedule.depth, schedule.production.subtitleEnabled),
+        mediaStatus: await this.media.status().catch(() => null),
+        publishStatus: await this.publish.status().catch(() => null),
+        ensureEngine: this.ensureLocalEngine,
+      })
+      if (!report.ok) {
+        await this.#recordBlocked(paths, schedule, report)
+        await this.#settleQueue(paths, entry.id, 'failed', preflightSummary(report))
+        return
+      }
+
+      const started = await this.startRun(paths, schedule, entry.trigger, {
+        queueId: entry.id,
+        ...(entry.resumeRunId ? { resumeRunId: entry.resumeRunId } : {}),
+      })
+      await this.#settleQueue(paths, entry.id, 'done', started.runId)
+    } catch (error) {
+      // 只有「真的跑不起来」才留在队列里等下一轮；启动成功后的失败由 #execute 负责。
+      const message = reasonOf(error)
+      await this.#settleQueue(paths, entry.id, 'failed', message)
+      await this.#appendFailure(paths, {
+        scheduleId: entry.scheduleId,
+        scheduleName: entry.scheduleName,
+        step: null,
+        attempt: 1,
+        category: classifyFailure({ error }).category,
+        categoryLabel: CATEGORY_LABEL[classifyFailure({ error }).category] || '',
+        signature: classifyFailure({ error }).signature,
+        message: String(error?.message || error),
+        remedy: classifyFailure({ error }).remedy,
+        remedyTarget: classifyFailure({ error }).remedyTarget,
+      }).catch(() => {})
+      await this.#alert(paths, { level: 'error', title: `${entry.scheduleName || '内容安排'}：任务未能启动`, detail: message })
+    }
+  }
+
+  async #settleQueue(paths, queueId, status, detail = null) {
+    await this.serial(paths.workspace, async () => {
+      const queue = await this.#readQueue(paths)
+      queue.entries = queue.entries.map((item) => (item.id === queueId
+        ? { ...item, status, finishedAt: this.now(), result: detail }
+        : item))
+      await writeJsonFile(join(paths.root, QUEUE_FILE), queue)
+    }).catch(() => {})
+  }
+
+  /**
+   * 体检未通过时不进入 running，而是记一条 blocked。理由很直接：一条 running
+   * 记录会占住工作区的执行位，让人以为「正在跑」，而实际上第一秒就该失败。
+   */
+  async #recordBlocked(paths, schedule, report) {
+    const at = this.now()
+    const record = {
+      id: randomUUID(),
+      scheduleId: schedule.id,
+      status: 'blocked',
+      trigger: 'automatic',
+      triggeredAt: at,
+      completedAt: at,
+      elapsedMs: 0,
+      sessionId: null,
+      depth: schedule.depth,
+      step: null,
+      message: `开工前体检未通过（${report.blockers.length} 项）：${report.blockers.map((item) => item.label).join('、')}`,
+      error: preflightSummary(report),
+      remedy: report.blockers[0]?.remedy || null,
+      failureCategory: 'preflight.blocked',
+      resumeCount: 0,
+      refs: { topicGenerationId: null, scriptGenerationIds: [], mediaRunIds: [], publishTaskIds: [], publishJobIds: [] },
+      items: [],
+      preflight: report.checks,
+    }
+    await this.mutate(paths, (data) => {
+      const item = data.schedules.find((candidate) => candidate.id === schedule.id)
+      if (item) { item.lastRunAt = at; item.updatedAt = at }
+      data.runs.unshift(record)
+    })
+    await this.#alert(paths, { level: 'error', title: `${schedule.name}：开工前体检未通过，未启动`, detail: preflightSummary(report) })
+  }
+
+  /**
+   * 重启后把中断的轮次重新排上队。
+   *
+   * recoverInterrupted 负责把 running 改成 interrupted，这里负责让它们真的
+   * 继续跑完。已经成功或已经失败的条目跳过——续跑只补没做完的活。
+   */
+  async #requeueInterrupted(paths, data) {
+    const pending = data.runs.filter((run) => run.status === 'interrupted' && (run.resumeCount ?? 0) < MAX_RESUMES)
+    for (const run of pending) {
+      const schedule = data.schedules.find((candidate) => candidate.id === run.scheduleId)
+      if (!schedule || schedule.disabledReason) continue
+      await this.serial(paths.workspace, async () => {
+        const queue = await this.#readQueue(paths)
+        if (queue.entries.some((item) => item.runId === run.id && item.status === 'waiting')) return
+        const next = enqueue(queue.entries, {
+          scheduleId: run.scheduleId,
+          scheduleName: schedule.name,
+          depth: run.depth,
+          trigger: 'resume',
+          resumeRunId: run.id,
+        }, this.now())
+        if (!next) return
+        await writeJsonFile(join(paths.root, QUEUE_FILE), { schemaVersion: 1, entries: next })
+      }).catch(() => {})
+    }
+  }
+
+  /** 队列视图：等待中的按执行顺序给位次，界面直接展示。 */
+  async queueView(agent) {
+    const paths = await this.paths(agent)
+    const queue = await this.#readQueue(paths)
+    const entries = queue.entries
+    return {
+      active: this.active.size,
+      waiting: waitingWithPosition(entries),
+      recent: entries
+        .filter((entry) => entry.status === 'done' || entry.status === 'failed')
+        .slice(0, 20),
+    }
+  }
+
+  /**
+   * 手动续跑一条中断的轮次。
+   *
+   * 调度器本来就会自动把中断轮次排上队，这个入口是给「我知道了，现在就跑」
+   * 的人准备的——比如他刚把失效的 API Key 换好，不想再等下一个 30 秒 tick。
+   */
+  async resumeRun(agent, request) {
+    const runId = String(request?.runId || '').trim()
+    if (!runId) invalid('执行记录标识不能为空。')
+    const paths = await this.paths(agent)
+    const data = await this.serial(paths.workspace, () => this.readFile(paths))
+    const run = data.runs.find((item) => item.id === runId)
+    if (!run) fail('SPOKEN_VIDEO_SCHEDULE_NOT_FOUND', '执行记录不存在。')
+    if (run.status !== 'interrupted') fail('SPOKEN_VIDEO_SCHEDULE_BUSY', '只有被中断的轮次可以续跑。')
+    if ((run.resumeCount ?? 0) >= MAX_RESUMES) fail('SPOKEN_VIDEO_SCHEDULE_BUSY', `该轮已续跑 ${MAX_RESUMES} 次仍未完成，请手动重新执行。`)
+    const schedule = data.schedules.find((item) => item.id === run.scheduleId)
+    if (!schedule) fail('SPOKEN_VIDEO_SCHEDULE_NOT_FOUND', '对应的内容安排已被删除。')
+    if (schedule.disabledReason) fail('SPOKEN_VIDEO_SCHEDULE_DISABLED', schedule.disabledReason)
+    if ([...this.active.values()].some((item) => item.workspace === paths.workspace)) {
+      fail('SPOKEN_VIDEO_SCHEDULE_BUSY', '本工作区已有一轮自动化在执行，请等待其结束。')
+    }
+    // 直接开跑而不是入队：人已经明确要求现在执行，且 busy 检查已保证不会撞车。
+    const started = await this.startRun(paths, schedule, 'resume', { resumeRunId: runId })
+    return { runId: started.runId, resumed: true }
+  }
+
+  /**
+   * 体检报告（只读，不修复）。给任务表单用：保存之前就告诉用户「按现在的配置，
+   * 这个任务跑起来会卡在哪一步」，而不是等到半夜三点。
+   */
+  async preflightReport(agent, request = {}) {
+    const paths = await this.paths(agent)
+    const data = await this.serial(paths.workspace, () => this.readFile(paths))
+    const schedule = request.scheduleId
+      ? data.schedules.find((item) => item.id === request.scheduleId)
+      : null
+    const depth = request.depth || schedule?.depth || 'packaging'
+    const report = await runPreflight({
+      steps: stepsForRun(depth, schedule?.production?.subtitleEnabled !== false),
+      mediaStatus: await this.media.status().catch(() => null),
+      publishStatus: await this.publish.status().catch(() => null),
+      // 只读报告不主动拉引擎：180 秒的等待不该发生在「打开表单」这种场合。
+      ensureEngine: async () => ({ ok: false, detail: '体检报告模式不自动拉起引擎' }),
+    })
+    return { ...report, summary: preflightSummary(report) }
   }
 
   /**
@@ -1251,10 +1925,15 @@ export class SpokenVideoScheduleHost {
   }
 
   /**
-   * A restart drops every in-flight round along with its execution agent, so
-   * none can resume. Mark them failed once instead of leaving a permanently
-   * running record. Underlying stage tasks keep their own recovery in their
-   * own hosts, and the drawer still shows their real terminal state.
+   * A restart drops every in-flight round along with its execution agent. Rather
+   * than marking them failed — which threw away up to 40 minutes of finished
+   * work — they become `interrupted` and keep every artifact, ref and stage
+   * trail they had. `tick` then re-queues them and `startRun` continues from the
+   * stage each item actually reached, after re-checking each stage's child task
+   * (see #stageAlreadyDone) so nothing is assumed finished that isn't.
+   *
+   * `resumeCount` bounds the loop: a round that keeps getting interrupted is
+   * stopped for good rather than retrying forever across unattended restarts.
    */
   async recoverInterrupted() {
     for (const workspace of await this.#workspaces()) {
@@ -1265,17 +1944,25 @@ export class SpokenVideoScheduleHost {
         let changed = false
         for (const run of data.runs) {
           if (run.status !== 'running') continue
-          run.status = 'failed'
-          run.error = '主机在流水线完成前已重启，本轮中止；各阶段任务的真实状态见对应模块。'
-          run.message = '主机重启导致本轮中止。'
-          run.completedAt = this.now()
-          run.elapsedMs = elapsed(run.triggeredAt, run.completedAt)
+          const steps = run.depth ? stepsForRun(run.depth, true) : []
+          run.status = 'interrupted'
+          run.error = '主机在流水线完成前已重启。已完成的阶段产物保留，本轮将从中断处自动续跑。'
+          run.message = '主机重启，本轮将在引擎就绪后自动续跑。'
+          run.interruptedAt = this.now()
+          run.completedAt = null
+          run.elapsedMs = null
           for (const item of run.items) {
-            if (item.status !== 'running') continue
-            item.status = 'failed'
-            item.error = run.error
+            if (item.status === 'completed') continue
+            if (item.status === 'failed' || item.status === 'cancelled') continue
+            item.status = 'interrupted'
+            item.error = null
+            item.resumeFrom = item.resumeFrom || nextStepOf(steps, item.reachedStep)
+            // 未完成的阶段回退成 pending，续跑时才会被重新排上；done 的原样保留。
             for (const stage of item.stages) {
-              if (stage.status === 'running' || stage.status === 'pending') stage.status = 'failed'
+              if (stage.status === 'done') continue
+              stage.status = 'pending'
+              stage.completedAt = null
+              stage.message = null
             }
           }
           changed = true
