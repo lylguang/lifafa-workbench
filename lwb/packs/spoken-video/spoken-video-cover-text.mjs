@@ -185,13 +185,46 @@ export async function titleZoneBusy(inputPath, { kind, width, height }) {
 }
 
 /**
+ * 检标题区里有没有画上标题。
+ *
+ * 现在标题由 AI 直接写进封面（2026-10-08 实测本机 Qwen-Image 写汉字零乱码，
+ * 横竖两版一次成功），所以这里不做叠字，只做质检：AI 没写、或写得太小看不清时，
+ * 标题区会是一片纯色，边缘检测的能量就极低。检出这种情况就该重生封面。
+ *
+ * 检查范围取顶部 45%——艺术字标题带描边和倾斜，实际占画面上半部近一半，只看顶部
+ * 18% 会漏判（2026-10-08 实测：箭头穿进顶部 18% 时旧阈值报 busy=false）。
+ */
+export async function inspectCoverTitleZone(inputPath, { width, height, kind }) {
+  const landscape = kind === 'landscape'
+  const zoneHeight = Math.max(8, Math.round(height * (landscape ? 0.42 : 0.5)))
+  try {
+    // scale 到 96px 宽只为省算力；edgedetect 放大笔画与描边的边缘，再取平均信号强度。
+    const { stderr } = await run('ffmpeg', ['-hide_banner', '-loglevel', 'info', '-i', inputPath,
+      '-vf', `crop=${width}:${zoneHeight}:0:0,scale=96:-1,edgedetect=low=0.1:high=0.4,signalstats,metadata=print:key=lavfi.signalstats.YAVG`,
+      '-frames:v', '1', '-f', 'null', '-'], { timeout: 30_000, windowsHide: true })
+    const match = String(stderr).match(/lavfi\.signalstats\.YAVG=([\d.]+)/u)
+    if (!match) return null
+    const value = Number(match[1])
+    if (!Number.isFinite(value)) return null
+    // 阈值 18。实测四张真实封面的能量分布（2026-10-08）：
+    //   AI 写的艺术字标题（粗体 + 6px 描边 + 投影）→ 28 ~ 30
+    //   工整白字标题 → 9.8
+    //   完全没写标题的纯底图（夜空 + 集装箱 + 货轮 + 箭头）→ 7.7
+    // 纯底图本身就有货轮桅杆、集装箱边缘这些硬边，所以能量不是 0；取 18 能把
+    // 「有标题」与「无标题但画面本身很繁复」分开。低于 18 只记事件提示重生，不阻断。
+    return { busy: value > 18, edgeEnergy: Number(value.toFixed(2)), zoneHeight }
+  } catch {
+    return null // 探测不了不阻塞流程，交给人工判断
+  }
+}
+
+/**
  * 给封面底图叠加中文标题。
  *
- * 叠字失败不抛错——封面本身已经生成好了，标题只是增强；这里返回原始文件，
- * 让调用方继续走「有底图就有封面」的路径，不因为加个字而让整条发布资料失败。
- *
- * `onZoneBusy` 给调用方一个「底图没遵守留空要求」的信号（标题仍会叠，只是记录
- * 下来供人工判断要不要重生一张），而不是静默把字压在图标上。
+ * **已停用**（2026-10-08）：标题改由 AI 直接写进封面，效果更好且实测零乱码，
+ * 程序叠字会盖住 AI 写的艺术字。保留本函数仅作历史参考与兜底测试，新流程走
+ * `inspectCoverTitleZone` 质检。调用点见 spoken-video-publish-host.mjs 的
+ * `#overlayCoverTitle`（已改为只质检、不叠字）。
  */
 export async function overlayCoverHeadline(inputPath, outputPath, { kind, title, width, height, onZoneBusy }) {
   const font = pickCoverFont()

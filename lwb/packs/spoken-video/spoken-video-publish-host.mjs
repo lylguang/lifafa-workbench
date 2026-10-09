@@ -20,7 +20,7 @@ import {
   SpokenVideoPublishError,
 } from './spoken-video-publish.mjs'
 import { appendDshTrace, dshChildStarted, dshTrace, ensureDshTrace, projectDshSessionEvent } from './spoken-video-dsh-trace.mjs'
-import { overlayCoverHeadline } from './spoken-video-cover-text.mjs'
+import { inspectCoverTitleZone } from './spoken-video-cover-text.mjs'
 
 const PROJECT_ID = /^[a-f0-9-]{36}$/iu
 const TASKS_FILE = 'publish-tasks.json'
@@ -467,12 +467,15 @@ export class SpokenVideoPublishHost {
    * 给封面底图叠加发布标题。返回 { bytes, inspected }——叠字成功就用带字版本，
    * 失败（缺字体、ffmpeg 报错、标题为空）原样返回底图，绝不因此让发布资料失败。
    */
+  /**
+   * 质检 AI 写进封面的标题是否合格。
+   *
+   * 2026-10-08 实测推翻了旧方案：本机 Qwen-Image 直接写中文标题零乱码，横竖两版
+   * 都一次成功，所以**不再用程序叠字**（叠上去会盖住 AI 写的艺术字标题）。这里只做
+   * 检查：标题区必须有明显的内容（对比度足够高）且不是纯色空��——那说明模型没把标题
+   * 画进去，或者画得太小看不清。检出不合格就记一条事件，让调用方换 seed 重生。
+   */
   async #overlayCoverTitle(agent, task, kind, bytes, inspected) {
-    // 标题来源有三处，按可靠性排序：
-    // ① 项目里已保存的发布资料——「重生封面」任务本身只带封面提示词、不带文案，
-    //    但它提交时会重读 packaging，所以必须回项目去取（2026-10-08 实测漏了这条，
-    //    结果叠字被静默跳过，底图上没有标题）。
-    // ② 完整发布任务的结果；③ 任务快照里的标题。
     let title = null
     try {
       const detail = await this.projectsStore.get(agent, { projectId: task.projectId })
@@ -485,22 +488,16 @@ export class SpokenVideoPublishHost {
     if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return { bytes, inspected }
     const scratch = await mkdtemp(join(tmpdir(), 'lwb-cover-'))
     const source = join(scratch, 'base.png')
-    const output = join(scratch, 'titled.png')
     try {
       await writeFile(source, bytes)
-      const result = await overlayCoverHeadline(source, output, { kind, title, width, height })
-      if (!result.applied) {
+      // 标题区（顶部 45%）应该有大量笔画边缘；纯色留白说明模型没写字。
+      const zone = await inspectCoverTitleZone(source, { width, height, kind })
+      if (!zone || !zone.busy) {
         await this.#mutateTask(await publishRootFor(agent), task.id, (item) => {
-          executionEvent(item, `${kind === 'landscape' ? '横版' : '竖版'}封面标题未叠加`, { actor: '封面排版', status: 'error', detail: result.reason || '未知原因，已保留无字底图' })
+          executionEvent(item, `${kind === 'landscape' ? '横版' : '竖版'}封面上未见清晰标题`, { actor: '封面质检', status: 'error', detail: '标题区几乎是纯色，可能 AI 没把标题画进去或画得太小——建议重生这张封面。' })
         }).catch(() => {})
-        return { bytes, inspected }
       }
-      const merged = await readFile(output)
-      const mergedInspected = inspectPublishImage(merged)
-      await this.#mutateTask(await publishRootFor(agent), task.id, (item) => {
-        executionEvent(item, `${kind === 'landscape' ? '横版' : '竖版'}封面已叠加标题`, { actor: '封面排版', detail: result.headline })
-      }).catch(() => {})
-      return { bytes: merged, inspected: mergedInspected }
+      return { bytes, inspected }
     } catch {
       return { bytes, inspected }
     } finally {

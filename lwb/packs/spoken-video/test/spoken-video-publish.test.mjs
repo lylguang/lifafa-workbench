@@ -907,18 +907,6 @@ test('headline wrapping respects the per-line budget and the line cap', () => {
   assert.deepEqual(wrapCoverHeadline('', 5, 2), [])
 })
 
-test('the prompt asks the image model to leave a clean title band', () => {
-  // 标题是程序叠的，底图必须留出位置且不含任何伪文字——否则叠完字会出现
-  // 「真标题 + 残留的示意横线」这种像乱码的东西（2026-10-08 实测过）。
-  const prompt = buildPublishPrompt({ project: { title: '测试', artifacts: {} } })
-  assert.match(prompt, /留出一块\*\*纯色、低频、无任何图形元素\*\*的横向区域/u)
-  assert.match(prompt, /横屏占顶部 18%，竖屏占顶部 22%/u)
-  assert.match(prompt, /不要出现任何文字、字母、数字、标点/u)
-  assert.match(prompt, /示意性横线/u)
-  assert.match(prompt, /中部 60% 高度以内/u)
-  // 9:16 在信息流被裁是既有事实，得写进裁切安全区要求
-  assert.match(prompt, /3:4 展示/u)
-})
 
 test('regenerateCover reuses the saved title when the task itself carries none', async () => {
   // 2026-10-08 实测漏掉：叠字只从 task.result.content.title / task.sourceSnapshot.title 取，
@@ -936,9 +924,7 @@ test('the portrait cover is generated at 3:4 so nothing important falls outside 
   assert.match(source, /size: kind === 'landscape' \? '1280\*720' : '1080\*1440'/u)
   const prompt = buildPublishPrompt({ project: { title: '测试', artifacts: {} } })
   assert.match(prompt, /竖屏 3:4/u, 'the packaging agent is told to compose for 3:4')
-  assert.match(prompt, /竖屏 3:4 比 9:16 更"方"/u, 'and that 3:4 needs a different layout than 9:16')
-  // 竖屏别再沿用横版的左右分栏——3:4 更方，左右并排会挤。
-  assert.match(prompt, /竖版请改为上下分层或单主体居中，不要沿用横版的左右分栏/u)
+  assert.match(prompt, /竖屏 3:4 比横版更高更窄/u, 'the portrait layout must differ from the landscape one')
 })
 
 test('a busy title zone is reported instead of silently stacking text over artwork', async () => {
@@ -989,4 +975,42 @@ test('the headline wraps at punctuation instead of orphaning a trailing characte
   // 行首空格会被 trim（渲染时本来就看不见），所以按「非空白字符完全一致」来断言。
   const strip = (value) => [...String(value)].filter((ch) => ch.trim() !== '').join('')
   assert.equal(strip(lines.join('')), strip('苹果收紧 Mac 磁盘权限，你的 AI 工具还能跑吗'), 'wrapping must not drop characters')
+})
+test('the cover prompt asks the image model to write the headline as the visual subject', async () => {
+  // 2026-10-08 实测推翻了旧方案：本机 Qwen-Image 直接写中文标题零乱码，横竖两版都
+  // 一次成功。旧提示词把文字、人物、纵深全禁掉（「不要任何文字」「纯图形、无真人面孔」
+  // 「极简」），产出的是正确但没人会点的抽象符号图。现在标题就是画面主体。
+  const source = await readFile(new URL('../spoken-video-publish.mjs', import.meta.url), 'utf8')
+  assert.match(source, /【封面生图提示词的硬性要求】/u)
+  // 不再禁止文字 —— 反而点名要哪几行。
+  assert.match(source, /标题就是画面主体/u)
+  assert.match(source, /标题文字\*\*必须与本条视频的真实标题完全一致\*\*/u)
+  assert.match(source, /超粗黑体（小标题体）/u)
+  assert.match(source, /微微倾斜约 -4 度/u)
+  assert.match(source, /高饱和亮橙色单独强调/u)
+  // 场景要具象、要有人物、要电影感光影，而不是抽象符号。
+  assert.match(source, /必须有人物/u)
+  assert.match(source, /具象可辨/u)
+  assert.match(source, /蓝调时刻/u)
+  // 旧的三条禁令必须消失。
+  assert.ok(!source.includes('不要出现任何文字、字母、数字、标点'), 'the no-text rule is gone')
+  assert.ok(!source.includes('纯图形封面（不出现真人面孔）'), 'the no-people rule is gone')
+  assert.ok(!source.includes('必须真的留空'), 'the reserved-title-band rule is gone')
+})
+
+test('the cover host inspects the title instead of stamping over it', async () => {
+  // 程序叠字会盖住 AI 写的艺术字标题（2026-10-08）。现在这一步只做质检：标题区没有
+  // 明显笔画就记一条事件提示重生封面，不再改图。
+  const host = await readFile(new URL('../spoken-video-publish-host.mjs', import.meta.url), 'utf8')
+  assert.match(host, /import \{ inspectCoverTitleZone \} from '\.\/spoken-video-cover-text\.mjs'/u)
+  assert.ok(!host.includes('overlayCoverHeadline'), 'the host no longer overlays a headline')
+  assert.match(host, /封面上未见清晰标题/u)
+  assert.match(host, /建议重生这张封面/u)
+  const cover = await readFile(new URL('../spoken-video-cover-text.mjs', import.meta.url), 'utf8')
+  assert.match(cover, /export async function inspectCoverTitleZone\(/u)
+  // 检查范围要够宽：只看顶部 18% 会漏判倾斜的艺术字标题。
+  assert.match(cover, /crop=\$\{width\}:\$\{zoneHeight\}:0:0/u)
+  assert.match(cover, /const zoneHeight = Math\.max\(8, Math\.round\(height \* \(landscape \? 0\.42 : 0\.5\)\)\)/u)
+  // 阈值要落在实测分布的中间：艺术字 28~30，有标题的工整字 9.8，无标题的繁复底图 7.7。
+  assert.match(cover, /busy: value > 18/u)
 })
