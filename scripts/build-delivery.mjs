@@ -249,44 +249,43 @@ async function main() {
  * 关键坑：**Windows 的 junction 不是 symlink，`os.path.islink` 对它返回 False**
  * （实测 reparse point 属性 0x410，但 islink=False）。包里各能力的 node_modules
  * 全是指向 vendor 的 junction，所以：
- * - `os.walk` 默认会跟进目录 junction，跟着走就等于把vendor 的 1.9G 再压一遍；
+ * - `os.walk` 默认会跟进目录 junction，跟着走就等于把 vendor 的 1.9G 再压一遍；
  * - 压缩时按普通文件 stat，还可能报 FileNotFoundError（junction 目标此时不可达）。
  *
- * 因此改用 `st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT` 判定，
- * 目录与文件两侧都要挡。跳过的链接在客户机上由 `npm run pack:link` 重建。
+ * 但**不能一律按 reparse point 跳过**：pnpm 在 vendor 内部也用链接搭 workspace
+ * 依赖图（各包的 node_modules/@deepseek-ai 下指向兄弟包的链接），那些链接
+ * `islink()` 返回 True，删掉它们会让 vendor 自己报 ERR_MODULE_NOT_FOUND
+ * （实测 `@deepseek-ai/cordis` 找不到）。所以判据是 `islink()`——它精确命中
+ * "该跟着走的链接"，而 junction 恰好是它识别不了的那一类。
+ *
+ * 跳过的 junction 在客户机上由 `npm run pack:link` 重建。
  */
 async function compress(outDir, edition) {
   const zipPath = join(dirname(outDir), `李发发工作台-v1.0-${edition === 'local' ? '本地增强版' : '标准版'}.zip`)
   rmSync(zipPath, { force: true })
   const script = [
-    'import os, stat, sys, zipfile',
-    'REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)',
-    'def is_link(path):',
-    '    try:',
-    '        return bool(os.lstat(path).st_file_attributes & REPARSE)',
-    '    except OSError:',
-    '        return False',
+    'import os, sys, zipfile',
     'src, dst = sys.argv[1], sys.argv[2]',
     'skipped = 0',
     'with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:',
     '    for root, dirs, files in os.walk(src, followlinks=False):',
     '        kept = []',
     '        for d in sorted(dirs):',
-    '            if is_link(os.path.join(root, d)):',
+    '            if os.path.islink(os.path.join(root, d)):',
     '                skipped += 1',
     '            else:',
     '                kept.append(d)',
     '        dirs[:] = kept',
     '        for name in sorted(files):',
     '            full = os.path.join(root, name)',
-    '            if is_link(full):',
+    '            if os.path.islink(full):',
     '                skipped += 1',
     '                continue',
     '            try:',
     '                z.write(full, os.path.relpath(full, src))',
     '            except OSError:',
     '                skipped += 1',
-    'print("skipped %d reparse-point/unreadable entries" % skipped)',
+    'print("skipped %d junction entries" % skipped)',
   ].join('\n')
   run('python', ['-c', script, outDir, zipPath], dirname(outDir), '压缩')
   return zipPath
