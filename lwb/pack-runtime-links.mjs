@@ -68,6 +68,13 @@ export async function linkLwbPackForRuntime(pack) {
 export async function linkInRepoPacks() {
   const packsDir = join(ROOT_DIR, 'lwb', 'packs')
   if (!existsSync(packsDir)) return []
+  // The link targets all live inside vendor/. Linking before the upstream is
+  // built would create junctions to paths that do not exist, and the second
+  // run then fails with EEXIST instead of a useful message. Say so plainly.
+  if (!existsSync(DSH_DIR)) {
+    console.warn(`[warn] 未找到 ${DSH_DIR}，跳过运行期链接。请先构建上游：npm run setup（Windows 见 docs/部署说明）。`)
+    return []
+  }
   const linked = []
   for (const entry of await readdir(packsDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
@@ -80,6 +87,9 @@ export async function linkInRepoPacks() {
     let touched = false
     for (const [name, target] of PACK_RUNTIME_PEERS) {
       if (typeof declared[name] === 'string') {
+        // 只在目标真实存在时建链；vendor 尚未构建完就建，会留下指向空
+        // 路径的 junction，下次重跑报 EEXIST 而不是因为缺上游。
+        if (!existsSync(target)) continue
         await ensureLwbRuntimeSymlink(packagePath(packageNodeModules, name), target)
         touched = true
       }
