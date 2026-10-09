@@ -240,7 +240,7 @@ async function main() {
   process.stdout.write(`[==] zip：${zipPath}\n`)
   process.stdout.write(`[==] 内容：lifafa-workbench/（${args.edition}）`)
   if (args.edition === 'local') process.stdout.write(' + 本地媒体桥接/')
-  process.stdout.write('\n[==] 客户：解压到固定目录 → 双击 自检.cmd → 双击 启动工作台.cmd\n')
+  process.stdout.write('\n[==] 客户：解压到固定目录 → 双击 首次运行.cmd（一次，约 30 秒）→ 双击 自检.cmd → 双击 启动工作台.cmd\n')
 }
 
 /**
