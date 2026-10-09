@@ -18,7 +18,8 @@
     "dsh:dump": "node lwb/dsh-launcher.mjs --dump-config",
     "profile:check": "node lwb/profile-smoke.mjs",
     "pack:profile-check": "node lwb/pack-profile-smoke.mjs",
-    "test": "npm run check && npm run profile:check && npm run pack:profile-check && npm run unit:test",
+    "pack:link": "node lwb/link-packs.mjs",
+    "test": "npm run pack:link && npm run check && npm run profile:check && npm run pack:profile-check && npm run unit:test",
     "upstream:check": "sh lwb/upgrade/check-upstream.sh",
     "unit:test": "node --test lwb/pack-sdk/test/*.test.mjs lwb/dsh-bundle/test/pack-*.test.mjs lwb/dsh-bundle/test/client-style-contract.test.mjs lwb/dsh-bundle/test/launcher-temp-redirect.test.mjs lwb/packs/spoken-video/test/*.test.mjs lwb/packs/benchmark/test/*.test.mjs lwb/packs/whiteboard/test/*.test.mjs lwb/packs/publisher/test/*.test.mjs"
   },

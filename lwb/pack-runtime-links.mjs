@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { lstat, mkdir, readFile, readlink, symlink, unlink } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, readlink, symlink, unlink } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -50,4 +50,41 @@ export async function linkLwbPackForRuntime(pack) {
       await ensureLwbRuntimeSymlink(packagePath(packageNodeModules, name), target)
     }
   }
+}
+
+/**
+ * Link the peers of every in-repo pack under `lwb/packs/`.
+ *
+ * `linkLwbPackForRuntime` only runs when a pack is loaded in the UI, which is
+ * too late for anything importing a pack entry directly: the test suite does,
+ * and it is what a customer gets when they clone the repository on a machine
+ * where those junctions do not exist yet. Node resolves `workspace:*` peers
+ * through `node_modules`, so without this every `import '@deepseek-ai/...'`
+ * in a pack fails with ERR_MODULE_NOT_FOUND.
+ *
+ * This is why the suite passed in the working copy and failed on a fresh
+ * clone: the junctions there were left over from earlier local runs.
+ */
+export async function linkInRepoPacks() {
+  const packsDir = join(ROOT_DIR, 'lwb', 'packs')
+  if (!existsSync(packsDir)) return []
+  const linked = []
+  for (const entry of await readdir(packsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const source = join(packsDir, entry.name)
+    const packageJsonPath = join(source, 'package.json')
+    if (!existsSync(packageJsonPath)) continue
+    const packageJson = JSON.parse(await readFile(packageJsonPath, 'utf8'))
+    const declared = Object.assign({}, packageJson.dependencies, packageJson.peerDependencies)
+    const packageNodeModules = join(source, 'node_modules')
+    let touched = false
+    for (const [name, target] of PACK_RUNTIME_PEERS) {
+      if (typeof declared[name] === 'string') {
+        await ensureLwbRuntimeSymlink(packagePath(packageNodeModules, name), target)
+        touched = true
+      }
+    }
+    if (touched) linked.push(entry.name)
+  }
+  return linked
 }
