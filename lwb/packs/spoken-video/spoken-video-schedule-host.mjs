@@ -22,6 +22,7 @@ import {
   STEP_LABEL,
   STEP_TIMEOUT_MS,
   stepsForRun,
+  voiceoverTimeoutMs,
   topicInputOf,
 } from './spoken-video-schedule.mjs'
 const TICK_INTERVAL_MS = 30_000
@@ -661,9 +662,13 @@ export class SpokenVideoScheduleHost {
    * Poll until `isDone` accepts the value, the deadline passes, or the round is
    * cancelled. A timeout never kills the underlying task — it keeps its own
    * durable record and recovery — it only stops this round from waiting.
+   *
+   * `timeoutMs` 让调用方按稿件长度上浮等待上限（配音/字幕用，见 voiceoverTimeoutMs）；
+   * 不传就用该阶段的默认上限。
    */
-  async #poll(step, signal, read, isDone) {
-    const deadline = Date.now() + STEP_TIMEOUT_MS[step]
+  async #poll(step, signal, read, isDone, timeoutMs = null) {
+    const budget = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : STEP_TIMEOUT_MS[step]
+    const deadline = Date.now() + budget
     // 「暂时读不到」与「永远读不到」必须分开。写盘走「临时文件 + 原子 rename」，
     // rename 目标被任意句符打开就 EPERM 重试（见 writeJson）——落地前那一瞬读者会
     // 读到旧内容，这是 2026-10-08 11:17 那次 102ms 竞态的成因，重试几次即可。
@@ -960,7 +965,12 @@ export class SpokenVideoScheduleHost {
       : await this.media.startVoiceover(agent, request)
     await this.#pushRef(paths, runId, 'mediaRunIds', started.id)
     await this.#setStage(paths, runId, projectId, step, { refId: started.id })
-    const done = await this.#pollMedia(agent, step, signal, paths, runId, projectId, started.id)
+    // 配音与字幕的耗时随稿件长度增长（云端分段合成，每段一次往返）。固定 10 分钟上限
+    // 会把长稿件误判成失败——2026-10-09 实测 2113 字（27 段）实际跑完、音频也落盘了，
+    // 却因为刚过 10 分钟被判超时，整轮报废。这里按字数上浮等待上限。
+    const scriptChars = charsOf(detail.artifacts?.script?.data?.body)
+    const budget = ['voiceover', 'subtitles'].includes(step) ? voiceoverTimeoutMs(scriptChars) : null
+    const done = await this.#pollMedia(agent, step, signal, paths, runId, projectId, started.id, budget)
     if (done.status !== 'succeeded') throw new Error(done.error || (step === 'subtitles' ? '字幕生成失败。' : '配音生成失败。'))
     const seconds = done.result?.audio?.durationSeconds
     return {
@@ -1085,7 +1095,7 @@ export class SpokenVideoScheduleHost {
     }
   }
 
-  async #pollMedia(agent, step, signal, paths, runId, projectId, mediaRunId) {
+  async #pollMedia(agent, step, signal, paths, runId, projectId, mediaRunId, timeoutMs = null) {
     return this.#poll(step, signal, async () => {
       const runs = await this.media.operations(agent, { projectId })
       const run = runs.find((item) => item.id === mediaRunId)
@@ -1100,7 +1110,7 @@ export class SpokenVideoScheduleHost {
         }
       }
       return run
-    }, (run) => !LIVE.has(run.status))
+    }, (run) => !LIVE.has(run.status), timeoutMs)
   }
 
   /* ------------------------------ run record ------------------------------ */

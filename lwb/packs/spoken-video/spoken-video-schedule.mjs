@@ -90,6 +90,23 @@ export const STEP_TIMEOUT_MS = Object.freeze({
   publish: 25 * 60_000,
 })
 
+/**
+ * 配音与字幕的等待上限，按口播稿字数上浮。
+ *
+ * 固定 10 分钟对长稿件不够（2026-10-09 实测：2113 字稿件云端分 27 段合成，实际跑了
+ * 约 20 分钟，被判超时整轮报废——而音频其实做完了、产物也落盘了，是纯粹的误判；
+ * 2026-10-05 那轮也是同样原因）。
+ *
+ * 经验速率约 100 字/分钟（云端分段合成，每段一次往返 + 段间 2 秒节流），所以按
+ * 字数估一个基准值，再留足余量。下限仍是 10 分钟——短稿件不该被拖长。
+ */
+export function voiceoverTimeoutMs(chars) {
+  const length = Number(chars)
+  if (!Number.isFinite(length) || length <= 0) return STEP_TIMEOUT_MS.voiceover
+  const estimated = Math.ceil(length / 100) * 60_000
+  return Math.min(45 * 60_000, Math.max(STEP_TIMEOUT_MS.voiceover, Math.round(estimated * 1.8)))
+}
+
 export const SCHEDULE_POLL_INTERVAL_MS = 2_000
 
 export const RUN_STATUSES = Object.freeze(['running', 'completed', 'partial', 'failed', 'missed', 'cancelled'])

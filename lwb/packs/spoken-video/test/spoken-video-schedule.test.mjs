@@ -18,7 +18,9 @@ import {
   scheduleFile,
   scriptInputOf,
   SpokenVideoScheduleError,
+  STEP_TIMEOUT_MS,
   stepsForRun,
+  voiceoverTimeoutMs,
   topicInputOf,
   validDays,
   validTime,
@@ -1332,4 +1334,19 @@ test('a round that is currently executing cannot be deleted', async (t) => {
     await new Promise((resolve) => setTimeout(resolve, 2))
   }
   assert.ok(fake, 'the fixture ran')
+})
+test('the voiceover wait limit scales with the script length', () => {
+  // 2026-10-09 实测：2113 字稿件（云端分 27 段合成）实际跑了约 20 分钟、音频也落盘了，
+  // 却因为刚过固定 10 分钟上限被判超时，整轮报废——纯粹的误判。2026-10-05 那轮同样原因。
+  // 配音耗时随字数增长，所以等待上限必须跟着走。
+  assert.equal(voiceoverTimeoutMs(0), STEP_TIMEOUT_MS.voiceover, 'no script length falls back to the default')
+  assert.equal(voiceoverTimeoutMs(null), STEP_TIMEOUT_MS.voiceover)
+  assert.equal(voiceoverTimeoutMs(NaN), STEP_TIMEOUT_MS.voiceover)
+  // 短稿不该被拖长：600 字仍在默认线上略上浮。
+  assert.ok(voiceoverTimeoutMs(600) < 15 * 60_000, 'a short script must not wait half an hour')
+  // 长稿要显著放宽。
+  assert.ok(voiceoverTimeoutMs(2113) >= 30 * 60_000, 'a 2000-word script needs far more than 10 minutes')
+  // 单调递增，且有天花板防止无限等下去。
+  assert.ok(voiceoverTimeoutMs(3000) >= voiceoverTimeoutMs(2000))
+  assert.ok(voiceoverTimeoutMs(99999) <= 45 * 60_000, 'the limit stays bounded')
 })
