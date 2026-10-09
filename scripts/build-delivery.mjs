@@ -226,12 +226,41 @@ async function main() {
     cpSync(join(ROOT, 'docs', 'delivery', '引擎安装指引.md'), join(pkgDir, '引擎安装指引.md'))
   }
 
-  // 8) 收尾提示。
+  // 8) 压缩。
+  //
+  // **不要用 PowerShell 的 Compress-Archive**：它按系统 ANSI 编码写 zip 条目名，
+  // 交付物里「启动工作台.cmd」「安装说明.md」这类中文名会变成
+  //「µëôÕ+ÇÕÀÑõ¢£ÕŦ.cmd」——客户双击直接废（2026-10-09 实测）。
+  // Python 的 zipfile 会为非 ASCII 条目名正确置 UTF-8 标志位（0x800）。
+  process.stdout.write('[--] 压缩成zip\n')
+  const zipPath = await compress(outDir, args.edition)
+
   process.stdout.write('\n[==] 交付包已生成\n')
-  process.stdout.write(`[==] 目录：${outDir}\n`)
+  process.stdout.write(`[==] zip：${zipPath}\n`)
   process.stdout.write(`[==] 内容：lifafa-workbench/（${args.edition}）`)
   if (args.edition === 'local') process.stdout.write(' + 本地媒体桥接/')
-  process.stdout.write('\n[==] 下一步：压缩成 zip 后交给客户，客户解压双击 自检.cmd 再双击 启动工作台.cmd\n')
+  process.stdout.write('\n[==] 客户：解压到固定目录 → 双击 自检.cmd → 双击 启动工作台.cmd\n')
+}
+
+/**
+ * 打包成 zip。用 Python 的 zipfile 而不是 PowerShell 的 Compress-Archive：
+ * 后者按系统 ANSI 写条目名，中文文件名会乱码（见调用处注释）。
+ */
+async function compress(outDir, edition) {
+  const zipPath = join(dirname(outDir), `李发发工作台-v1.0-${edition === 'local' ? '本地增强版' : '标准版'}.zip`)
+  rmSync(zipPath, { force: true })
+  const script = [
+    'import os, sys, zipfile',
+    'src, dst = sys.argv[1], sys.argv[2]',
+    'with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:',
+    '    for root, dirs, files in os.walk(src):',
+    '        dirs.sort(); files.sort()',
+    '        for name in files:',
+    '            full = os.path.join(root, name)',
+    '            z.write(full, os.path.relpath(full, src))',
+  ].join('\n')
+  run('python', ['-c', script, outDir, zipPath], dirname(outDir), '压缩')
+  return zipPath
 }
 
 main().catch((error) => {
