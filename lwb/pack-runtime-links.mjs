@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { lstat, mkdir, readFile, readdir, readlink, symlink, unlink } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, readlink, rm, symlink, unlink } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -29,9 +29,22 @@ export async function ensureLwbRuntimeSymlink(linkPath, target) {
   await mkdir(dirname(linkPath), { recursive: true })
   if (existsSync(linkPath)) {
     const stats = await lstat(linkPath)
-    if (!stats.isSymbolicLink()) throw new Error(`LWB profile path is not a symlink: ${linkPath}`)
-    if (resolve(dirname(linkPath), await readlink(linkPath)) === resolve(target)) return
-    await unlink(linkPath)
+    if (stats.isSymbolicLink()) {
+      if (resolve(dirname(linkPath), await readlink(linkPath)) === resolve(target)) return
+      await unlink(linkPath)
+    } else if (!existsSync(join(linkPath, 'package.json'))) {
+      // A zip archive cannot store a junction: extracting one materialises a real
+      // directory in its place, so the path exists but is not a link. The delivery
+      // package hits this on its very first run. A directory without a package.json
+      // is a leftover and safe to replace; one that has it is real content and a
+      // silent rm would destroy code.
+      await rm(linkPath, { recursive: true, force: true })
+    } else {
+      throw new Error(
+        `LWB profile path is a real directory, not a link: ${linkPath}\n` +
+        '它带着 package.json，可能是真实代码而不是链接残留。请手动确认后再重试。',
+      )
+    }
   }
   await symlink(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir')
 }

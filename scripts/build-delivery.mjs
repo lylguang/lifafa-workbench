@@ -246,46 +246,54 @@ async function main() {
  * 打包成 zip。用 Python 的 zipfile 而不是 PowerShell 的 Compress-Archive：
  * 后者按系统 ANSI 写条目名，中文文件名会乱码（见调用处注释）。
  *
- * 关键坑：**Windows 的 junction 不是 symlink，`os.path.islink` 对它返回 False**
- * （实测 reparse point 属性 0x410，但 islink=False）。包里各能力的 node_modules
- * 全是指向 vendor 的 junction，所以：
- * - `os.walk` 默认会跟进目录 junction，跟着走就等于把 vendor 的 1.9G 再压一遍；
- * - 压缩时按普通文件 stat，还可能报 FileNotFoundError（junction 目标此时不可达）。
+ * 关键坑是两种链接必须区别对待：
  *
- * 但**不能一律按 reparse point 跳过**：pnpm 在 vendor 内部也用链接搭 workspace
- * 依赖图（各包的 node_modules/@deepseek-ai 下指向兄弟包的链接），那些链接
- * `islink()` 返回 True，删掉它们会让 vendor 自己报 ERR_MODULE_NOT_FOUND
- * （实测 `@deepseek-ai/cordis` 找不到）。所以判据是 `islink()`——它精确命中
- * "该跟着走的链接"，而 junction 恰好是它识别不了的那一类。
+ * - **junction**（`islink()` 返回 False，但 `st_file_attributes` 带
+ *   FILE_ATTRIBUTE_REPARSE_POINT）：各能力包的 node_modules/@deepseek-ai 下那些
+ *   指向 vendor 的链接。**zip 格式存不了 junction，解压时会展开成完整的实体目录
+ *   副本**——既让包凭空多一份代码，又把打包机的绝对路径写死在客户机上。必须跳过。
+ * - **pnpm 的 workspace symlink**（`islink()` 返回 True）：vendor 内部各包
+ *   node_modules 下指向兄弟包的链接，是 vendor 能构建的前提。跳掉它，解压后
+ *   vendor 自己就报 ERR_MODULE_NOT_FOUND（实测 @deepseek-ai/cordis 找不到）。
  *
- * 跳过的 junction 在客户机上由 `npm run pack:link` 重建。
+ * 所以判据是 `reparse and not islink`——只命中 junction。跳过的在客户机上由
+ * `npm run pack:link` 重建。
  */
 async function compress(outDir, edition) {
   const zipPath = join(dirname(outDir), `李发发工作台-v1.0-${edition === 'local' ? '本地增强版' : '标准版'}.zip`)
   rmSync(zipPath, { force: true })
   const script = [
-    'import os, sys, zipfile',
+    'import os, stat, sys, zipfile',
+    'REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)',
+    'def is_junction(path):',
+    '    # junction 对 islink() 隐身（返回 False），只能靠 reparse 属性认出来。',
+    '    if os.path.islink(path):',
+    '        return False',
+    '    try:',
+    '        return bool(os.lstat(path).st_file_attributes & REPARSE)',
+    '    except OSError:',
+    '        return False',
     'src, dst = sys.argv[1], sys.argv[2]',
     'skipped = 0',
     'with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:',
     '    for root, dirs, files in os.walk(src, followlinks=False):',
     '        kept = []',
     '        for d in sorted(dirs):',
-    '            if os.path.islink(os.path.join(root, d)):',
+    '            if is_junction(os.path.join(root, d)):',
     '                skipped += 1',
     '            else:',
     '                kept.append(d)',
     '        dirs[:] = kept',
     '        for name in sorted(files):',
     '            full = os.path.join(root, name)',
-    '            if os.path.islink(full):',
+    '            if is_junction(full):',
     '                skipped += 1',
     '                continue',
     '            try:',
     '                z.write(full, os.path.relpath(full, src))',
     '            except OSError:',
     '                skipped += 1',
-    'print("skipped %d junction entries" % skipped)',
+    'print("skipped %d junctions (rebuilt by npm run pack:link)" % skipped)',
   ].join('\n')
   run('python', ['-c', script, outDir, zipPath], dirname(outDir), '压缩')
   return zipPath
