@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { existsSync } from 'node:fs'
 import { readFile, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -141,9 +142,15 @@ test('launcher leaves the channel unset when no bridge answers', async () => {
   assert.equal(await blank.resolveScitigerBaseUrl({ LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: '   ' }), blank.LOCAL_BRIDGE_URL)
 })
 
-test('the media bridge keeps ffmpeg scratch files off the system drive', async () => {
-  // bridge.mjs 位于工作台根目录下的「本地媒体桥接」，不在 lifafa-workbench-main 内。
+test('the media bridge keeps ffmpeg scratch files off the system drive', async (t) => {
+  // bridge.mjs 位于工作台根目录下的「本地媒体桥接」，不在 lifafa-workbench-main 内，
+  // 标准版交付包不包含它。缺失时跳过而不是让整条测试报 ENOENT——否则客户从仓库
+  // 拉下代码跑 npm test，会看到一个与他的代码无关的失败（2026-10-09 实测）。
   const bridgePath = fileURLToPath(new URL('../../../../本地媒体桥接/bridge.mjs', import.meta.url))
+  if (!existsSync(bridgePath)) {
+    t.skip('本地媒体桥接未随包交付（标准版）')
+    return
+  }
   const bridge = await readFile(bridgePath, 'utf8')
   // 重定向必须发生在第一个 ffmpeg 调用之前，否则设置不生效。
   const redirectAt = bridge.indexOf('process.env.TEMP = scratch')
