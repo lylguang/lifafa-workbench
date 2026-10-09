@@ -15,7 +15,7 @@
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, cpSync } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -52,45 +52,25 @@ function run(command, commandArgs, cwd, label) {
 /**
  * 从 git 仓库导出指定 ref 的文件树到 destination。
  *
- * 这里有两处 Windows/Git Bash 的坑，绕开它们才能跑通：
+ * 试过三条路，两条都死在 Windows 上：
  *
- * 1. `tar -x -C 'F:\...'` 里的盘符会被 MSYS 改写成 `F\:\...`，直接报
- *    "Cannot open: No such file or directory"（2026-10-09 实测）。`MSYS2_ARG_CONV_EXCL`
- *    在管道里对 Windows 自带的 tar 不生效。
- * 2. `git archive -o 'F:\...'` 会把 `F:` 当成远程主机，报 "Cannot connect to F"。
+ * 1. `tar -x -C 'F:\...'` —— 盘符被 Git Bash 的 MSYS 改写成 `F\:\...`
+ *    （“Cannot open: No such file or directory”）；`MSYS2_ARG_CONV_EXCL` 在管道里
+ *    对自带 tar 不生效；`git archive -o 'F:\...'` 还会把 `F:` 当远程主机。
+ * 2. 绕开 MSYS 改用 System32 的原生 tar —— 能跑，但**中文文件名报
+ *    “Invalid empty pathname”**，而交付物里有一半文件名是中文（启动工作台.cmd、
+ *    打开工作台.ps1、docs/…）。
  *
- * 所以：tar 文件用**相对名**写到工作目录，解包交给 PowerShell 里的 Windows
- * 原生 tar —— 整条链路上没有任何盘符形式的参数。
+ * `git worktree` 两条都躲开：它不经过任何 shell 管道，路径由 git 自己处理；
+ * 而且 `.git` 在 worktree 里是一个**文件**而非目录，DSH 的构建脚本
+ * `scripts/build.ts` 要执行的 `git rev-parse HEAD` 照样能用（这一点很关键：
+ * 直接 `git archive` 剥掉 .git 会让上游构建失败）。
  */
-function gitArchive(repoDir, ref, destination) {
+function exportRef(repoDir, ref, destination) {
   mkdirSync(destination, { recursive: true })
-  // tar 落在交付目录里而不是 repoDir：工作副本可能只读，而且打包脚本本来就
-  // 要求工作区干净，不能留下临时文件。
-  const tarPath = join(destination, `.lwb-archive-${process.pid}.tar`)
-  // 解包必须在目标目录里、用**文件名**而不是盘符路径：Git Bash 的 MSYS 会把
-  // `F:\...` 改写成 `F\:\...`，`git archive -o F:\...` 还会把 `F:` 当远程主机。
-  // tar 与目标目录都在 cwd 下，整条链路就没有盘符形式的参数。
-  const tarName = basename(tarPath)
-  try {
-    const archive = spawnSync('git', ['archive', '--format=tar', ref, '-o', tarPath], {
-      cwd: repoDir, stdio: ['ignore', 'pipe', 'pipe'], shell: false,
-    })
-    if (archive.status !== 0) {
-      throw new Error(`git archive ${ref} 失败：${archive.stderr?.toString().slice(-500) ?? ''}`)
-    }
-    // 必须用 Windows 原生 tar：PowerShell 解析到的 `tar` 可能是 Git Bash 的
-    // /usr/bin/tar，它把 `F:` 当成远程主机，报 "Cannot connect to F: resolve failed"。
-    const extract = spawnSync(
-      join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'),
-      ['-xf', tarName],
-      { cwd: destination, stdio: ['ignore', 'pipe', 'pipe'], shell: false },
-    )
-    if (extract.status !== 0) {
-      throw new Error(`解包失败：${extract.stderr?.toString().slice(-500) ?? ''}`)
-    }
-  } finally {
-    rmSync(tarPath, { force: true })
-  }
+  run('git', ['worktree', 'add', '--detach', '--force', destination, ref], repoDir, `检出 ${ref.slice(0, 8)}`)
+  // worktree 会把自己登记在源仓库的 .git 里，不清掉的话源仓库下次操作会报错。
+  run('git', ['worktree', 'prune'], repoDir, '清理 worktree 登记')
 }
 
 function npmrc(registry) {
@@ -123,28 +103,26 @@ async function main() {
 
   // 1) 工作台源码：只取被跟踪的文件，天然不含 node_modules / lwb/local / .venv。
   process.stdout.write('[--] 导出工作台源码\n')
-  gitArchive(ROOT, 'HEAD', pkgDir)
+  exportRef(ROOT, 'HEAD', pkgDir)
   writeFileSync(join(pkgDir, '.npmrc'), npmrc(NPM_REGISTRY), 'utf8')
 
-  // 2) vendor：DSH 的构建脚本要跑 `git rev-parse HEAD`，所以必须是 git 仓库。
-  //    archive 只给源码（115M，无历史），再 init 一个单提交仓库满足构建脚本。
+  // 2) vendor。DSH 的构建脚本 scripts/build.ts 要执行 `git rev-parse HEAD`，
+  //    所以这里必须是一个 git 仓库——用 worktree 而不是 archive 正是为此：
+  //    worktree 的 .git 是文件，`git rev-parse HEAD` 在里面照样工作。
   const vendorDir = join(pkgDir, 'vendor', VENDOR_NAME)
   process.stdout.write('[--] 导出上游 DSH 源码\n')
   const upstreamRepo = process.env.LWB_UPSTREAM_REPO
-  if (upstreamRepo && existsSync(join(upstreamRepo, '.git'))) {
-    gitArchive(upstreamRepo, lock.commit, vendorDir)
-  } else {
-    const localVendor = join(ROOT, 'vendor', VENDOR_NAME)
-    if (!existsSync(join(localVendor, '.git'))) {
-      throw new Error(`找不到 ${localVendor} 的 git 仓库。请先 npm run setup，或用 LWB_UPSTREAM_REPO 指定。`)
-    }
-    gitArchive(localVendor, lock.commit, vendorDir)
+  const localVendor = join(ROOT, 'vendor', VENDOR_NAME)
+  const source = upstreamRepo && existsSync(join(upstreamRepo, '.git'))
+    ? upstreamRepo
+    : existsSync(join(localVendor, '.git')) ? localVendor : null
+  if (!source) {
+    throw new Error(
+      `找不到上游 DSH 仓库（已找 ${upstreamRepo ?? '未设置 LWB_UPSTREAM_REPO'} 与 ${localVendor}）。\n` +
+      '先在开发机上跑 npm run setup，或用 LWB_UPSTREAM_REPO 指向一个已检出的 DSH 仓库。',
+    )
   }
-  run('git', ['init', '-q'], vendorDir, '初始化 vendor 仓库')
-  run('git', ['config', 'user.email', 'build@lifafa.local'], vendorDir, '配置 vendor 提交身份')
-  run('git', ['config', 'user.name', 'Lifafa Delivery Build'], vendorDir, '配置 vendor 提交身份')
-  run('git', ['add', '-A'], vendorDir, '暂存 vendor 源码')
-  run('git', ['commit', '-q', '-m', `vendored ${VENDOR_NAME} ${lock.commit.slice(0, 8)}`], vendorDir, '提交 vendor 源码')
+  exportRef(source, lock.commit, vendorDir)
 
   // 3) 依赖：现场装（实测 npm ci 7s + pnpm install 17s，走镜像）。
   //    不复制工作副本的 node_modules——那是 hardlink 与绝对路径 junction 的集合。
