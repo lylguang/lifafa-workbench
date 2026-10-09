@@ -2,6 +2,23 @@
 rem Launch LWB workbench. If the port is in use, an instance is already running.
 cd /d "%~dp0"
 
+rem Step -1) Bundled runtime first. A customer machine may have neither Node nor
+rem   FFmpeg installed (2026-10-09 measured on a fresh machine: clicking any
+rem   script reports "'node' is not recognized"). The package carries both, and
+rem   putting them ahead on PATH means the customer never has to install them.
+rem   Anything they did install system-wide still works as a fallback.
+if exist "%~dp0运行环境\node\node.exe" set "PATH=%~dp0运行环境\node;%PATH%"
+if exist "%~dp0运行环境\ffmpeg" set "PATH=%~dp0运行环境\ffmpeg;%PATH%"
+where node >NUL 2>&1
+if errorlevel 1 (
+    echo [ERROR] Node.js not found. The bundled runtime is missing from:
+    echo           %~dp0运行环境\node
+    echo         Please re-extract the package, or install Node.js 22+ from https://nodejs.org/
+    echo.
+    pause
+    exit /b 1
+)
+
 rem Step 0) Pick the scratch drive and redirect TEMP/TMP to it.
 rem   Remotion bundling, Chrome profiles and render workspaces all follow
 rem   TEMP/TMP. A single render can write hundreds of MB, and a full drive

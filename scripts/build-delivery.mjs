@@ -25,16 +25,45 @@ const NPM_REGISTRY = 'https://registry.npmmirror.com'
 // 最容易投诉的点，不值得为省 150M 让客户自己下载——尤其国内下载常常失败。
 const HEADLESS_SHELL_REL = join('浏览器', 'chrome-headless-shell-win64', 'chrome-headless-shell.exe')
 
+// 运行时随包携带，让客户零依赖。
+//
+// Node：客户机没装 Node 时，「首次运行.cmd」直接报"'node' 不是内部或外部命令"，
+// 而这是他双击的**第一个**脚本——报错还全是给开发者看的。整份 Node 才105M，
+// 打进包换客户装完即用，值。
+// FFmpeg：配音、字幕合成、Remotion 渲染都靠它，只有 essentials 的
+// ffmpeg + ffprobe（各约 98M），ffplay 用不上。
+const BUNDLED_RUNTIME_REL = join('运行环境')
+
 function parseArgs(argv) {
-  const args = { edition: 'standard', skipBrowser: false }
+  const args = {
+    edition: 'standard',
+    skipBrowser: false,
+    // 运行时来源。不传就从本机 PATH 里找。
+    nodeSource: process.env.LWB_NODE_SOURCE || '',
+    ffmpegSource: process.env.LWB_FFMPEG_SOURCE || '',
+  }
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--out') args.out = argv[++i]
     else if (argv[i] === '--edition') args.edition = argv[++i]
+    else if (argv[i] === '--node') args.nodeSource = argv[++i]
+    else if (argv[i] === '--ffmpeg') args.ffmpegSource = argv[++i]
     else if (argv[i] === '--skip-browser') args.skipBrowser = true
   }
   if (!args.out) throw new Error('必须指定 --out <输出目录>')
   if (!['standard', 'local'].includes(args.edition)) throw new Error(`未知版本 ${args.edition}`)
   return args
+}
+
+/** 在 PATH 里找一个可执行文件，返回其绝对路径。 */
+function whichSync(name, env = process.env) {
+  const exts = (env.PATHEXT || '.EXE;.CMD;.BAT').split(';')
+  for (const dir of (env.PATH || '').split(';').filter(Boolean)) {
+    for (const ext of ['', ...exts]) {
+      const candidate = join(dir, name + ext)
+      if (existsSync(candidate)) return candidate
+    }
+  }
+  return null
 }
 
 /**
@@ -202,7 +231,38 @@ async function main() {
     cpSync(dirname(shellExe), dirname(target), { recursive: true })
   }
 
-  // 6) 本地增强版才带桥接；标准版客户没有本地引擎，带过去只会让人困惑。
+  // 6) 随包携带 Node 与 FFmpeg，让客户零依赖。
+  //
+  // 起因是真实故障：客户机没装 Node，双击「首次运行.cmd」直接报
+  // "'node' 不是内部或外部命令"——而那是他双击的**第一个**脚本，报错还全是
+  // 给开发者看的。Node 整份 105M、FFmpeg 的 ffmpeg+ffprobe 约 197M，合计约
+  // 300M，换客户装完即用。
+  process.stdout.write('[--] 复制运行时（Node / FFmpeg）\n')
+  const runtimeDir = join(pkgDir, BUNDLED_RUNTIME_REL)
+  mkdirSync(join(runtimeDir, 'node'), { recursive: true })
+  mkdirSync(join(runtimeDir, 'ffmpeg'), { recursive: true })
+
+  // Node：整份复制（含 npm 与 corepack，首次运行脚本自己要用）。
+  const nodeHome = args.nodeSource || dirname(process.execPath)
+  if (!existsSync(join(nodeHome, 'node.exe'))) {
+    throw new Error(`--node 指向的目录里没有 node.exe：${nodeHome}`)
+  }
+  cpSync(nodeHome, join(runtimeDir, 'node'), { recursive: true })
+
+  // FFmpeg：只要 ffmpeg 与 ffprobe，ffplay 用不上。
+  const ffmpegHome = args.ffmpegSource || dirname(whichSync('ffmpeg') ?? '')
+  if (!ffmpegHome || !existsSync(join(ffmpegHome, 'ffmpeg.exe'))) {
+    throw new Error(
+      '找不到 ffmpeg.exe。请用 --ffmpeg 指定其所在目录，或先安装 FFmpeg 后重试。\n' +
+      '它是配音、字幕合成与视频渲染的必需依赖，不能省略。',
+    )
+  }
+  for (const exe of ['ffmpeg.exe', 'ffprobe.exe']) {
+    const from = join(ffmpegHome, exe)
+    if (existsSync(from)) cpSync(from, join(runtimeDir, 'ffmpeg', exe))
+  }
+
+  // 7) 本地增强版才带桥接；标准版客户没有本地引擎，带过去只会让人困惑。
   if (args.edition === 'local') {
     const bridgeSrc = join(ROOT, '..', '本地媒体桥接')
     if (!existsSync(bridgeSrc)) throw new Error(`找不到本地媒体桥接目录：${bridgeSrc}`)
@@ -217,7 +277,7 @@ async function main() {
     mkdirSync(join(bridgeDst, 'data'), { recursive: true })
   }
 
-  // 7) 交付说明与自检脚本。
+  // 8) 交付说明与自检脚本。
   process.stdout.write('[--] 写入安装说明与自检脚本\n')
   cpSync(join(ROOT, 'docs', 'delivery', '安装说明.md'), join(pkgDir, '安装说明.md'))
   cpSync(join(ROOT, 'docs', 'delivery', '自检.ps1'), join(pkgDir, '自检.ps1'))
@@ -227,7 +287,7 @@ async function main() {
     cpSync(join(ROOT, 'docs', 'delivery', '引擎安装指引.md'), join(pkgDir, '引擎安装指引.md'))
   }
 
-  // 8) 压缩。
+  // 9) 压缩。
   //
   // **不要用 PowerShell 的 Compress-Archive**：它按系统 ANSI 编码写 zip 条目名，
   // 交付物里「启动工作台.cmd」「安装说明.md」这类中文名会变成

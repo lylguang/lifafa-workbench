@@ -15,6 +15,17 @@
 # 当 GBK 解析，注释与提示全变乱码。
 $ErrorActionPreference = "Continue"
 
+# 随包运行时优先：客户机可能既没 Node 也没 FFmpeg（2026-10-09 实测新机器双击
+# 任何脚本都报 "'node' 不是内部或外部命令"）。这里放在最前面，是因为启动脚本
+# 后续 spawn 的所有子进程都从 PATH 找工具——渲染、混音、转码全都依赖 ffmpeg。
+$bundled = Join-Path $PSScriptRoot '运行环境'
+if (Test-Path -LiteralPath (Join-Path $bundled 'node')) {
+    $env:PATH = (Join-Path $bundled 'node') + ';' + $env:PATH
+}
+if (Test-Path -LiteralPath (Join-Path $bundled 'ffmpeg')) {
+    $env:PATH = (Join-Path $bundled 'ffmpeg') + ';' + $env:PATH
+}
+
 function Get-ScratchRoot {
     if ($env:LWB_SCRATCH_ROOT) {
         return ($env:LWB_SCRATCH_ROOT -replace '[\\/]+$', '')
