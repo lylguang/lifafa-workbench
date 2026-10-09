@@ -10,6 +10,9 @@ vendor/
 **/__pycache__/
 **/*.pyc
 
+# 启动脚本的中转文件（运行产物）
+.lwb-scratch-root.txt
+
 # 测试与构建残留
 **/.tmp-*/
 .tmp/

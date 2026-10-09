@@ -2,21 +2,35 @@
 rem Launch LWB workbench. If the port is in use, an instance is already running.
 cd /d "%~dp0"
 
-rem Step 0) Redirect TEMP/TMP to the scratch drive (E: has the most free space).
+rem Step 0) Pick the scratch drive and redirect TEMP/TMP to it.
 rem   Remotion bundling, Chrome profiles and render workspaces all follow
 rem   TEMP/TMP. A single render can write hundreds of MB, and a full drive
 rem   makes rendering fail with ENOSPC. Nothing in the pipeline may touch C:.
-set "LWB_TEMP=E:\lifa-scratch\temp"
-if not exist "%LWB_TEMP%" mkdir "%LWB_TEMP%"
-set "TEMP=%LWB_TEMP%"
-set "TMP=%LWB_TEMP%"
-rem Model-download caches (HuggingFace hub etc.) also default to C:\Users\...\.cache.
-set "HF_HOME=E:\lifa-scratch\hf-home"
-if not exist "%HF_HOME%" mkdir "%HF_HOME%"
-set "TORCH_HOME=E:\lifa-scratch\torch-home"
-if not exist "%TORCH_HOME%" mkdir "%TORCH_HOME%"
-set "npm_config_cache=E:\lifa-scratch\npm-cache"
-if not exist "%npm_config_cache%" mkdir "%npm_config_cache%"
+rem
+rem   The drive is chosen at run time (roomiest non-system drive with >= 20G
+rem   free) rather than hardcoded: a customer machine has no reason to have our
+rem   E: drive. All of the logic lives in the .ps1 -- inlining PowerShell in a
+rem   .cmd breaks on quoting and GBK path handling (2026-10-08 measured), and
+rem   complex logic must stay out of this file.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0设置渲染暂存盘.ps1"
+if errorlevel 1 (
+    echo [ERROR] Failed to prepare the scratch directory; see the message above.
+    pause
+    exit /b 1
+)
+
+rem The scratch root may sit on a path with non-ASCII characters. cmd reads
+rem script text as GBK, so passing it on the command line would corrupt it;
+rem the .ps1 writes it to a plain file next to itself instead, and we read it
+rem back here. It must not live under TEMP: PowerShell's $env:TEMP and cmd's
+rem %TEMP% can differ as strings (8.3 short path vs long path).
+set "LWB_SCRATCH_RELAY=%~dp0.lwb-scratch-root.txt"
+for /f "usebackq delims=" %%F in ("%LWB_SCRATCH_RELAY%") do set "LWB_SCRATCH_ROOT=%%F"
+if not exist "%LWB_SCRATCH_ROOT%" (
+    echo [ERROR] Could not determine the scratch directory.
+    pause
+    exit /b 1
+)
 
 rem Step 0.5) Refuse to start a second instance when 4173 already answers.
 rem   A second `npm run dev` would die with EADDRINUSE and look like a
@@ -30,22 +44,32 @@ if not errorlevel 1 (
 )
 
 rem Step 1) Start the local media bridge (voiceover/subtitles/cover -> local ComfyUI).
-rem    Skipped when 8199 already answers.
+rem    Skipped when 8199 already answers. Standard-edition deliveries ship
+rem    without the bridge folder, so skip it there instead of failing.
 curl -s -o NUL --noproxy 127.0.0.1 --max-time 2 http://127.0.0.1:8199/health >NUL 2>&1
 if errorlevel 1 (
-    start "local-media-bridge" /min /D "%~dp0..\本地媒体桥接" cmd /c "node bridge.mjs"
-    rem `ping` sleep: `timeout /t` fails when stdin is redirected.
-    ping -n 3 127.0.0.1 >NUL
+    if exist "%~dp0..\本地媒体桥接\bridge.mjs" (
+        start "local-media-bridge" /min /D "%~dp0..\本地媒体桥接" cmd /c "node bridge.mjs"
+        rem `ping` sleep: `timeout /t` fails when stdin is redirected.
+        ping -n 3 127.0.0.1 >NUL
+    ) else (
+        echo [INFO] Local media bridge not shipped in this edition; skipping.
+    )
 )
 
-rem Step 2) Start the workbench with the local model endpoints injected.
-rem Step 3) Remotion browser: use the version-paired headless shell
-rem   (measured 5.6x faster than system Chrome). It must stay on a short
-rem   path: Windows MAX_PATH is 260 and the render workspace path alone
-rem   is already ~300 chars, which makes spawn fail with ENOENT.
-set "LWB_REMOTION_HEADLESS_SHELL=E:\lifa-scratch\browser\chrome-headless-shell-win64\chrome-headless-shell.exe"
-rem Fallback browser when the headless shell is unavailable.
-set "LWB_REMOTION_BROWSER_EXECUTABLE=C:\Program Files\Google\Chrome\Application\chrome.exe"
+rem Step 2) Remotion browser: prefer the version-paired headless shell shipped
+rem   with the package (measured 5.6x faster than system Chrome). It must stay
+rem   on a short path: Windows MAX_PATH is 260 and the render workspace path
+rem   alone is already ~300 chars, which makes spawn fail with ENOENT.
+if exist "%~dp0浏览器\chrome-headless-shell-win64\chrome-headless-shell.exe" (
+    set "LWB_REMOTION_HEADLESS_SHELL=%~dp0浏览器\chrome-headless-shell-win64\chrome-headless-shell.exe"
+) else (
+    rem No bundled shell: fall back to a locally installed Chrome/Chromium.
+    set "LWB_REMOTION_BROWSER_EXECUTABLE=C:\Program Files\Google\Chrome\Application\chrome.exe"
+)
+if not defined LWB_REMOTION_HEADLESS_SHELL set "LWB_REMOTION_BROWSER_EXECUTABLE=C:\Program Files\Google\Chrome\Application\chrome.exe"
+rem Let the launcher pick the scratch drive itself when it has not been told.
+set "LWB_SCRATCH_ROOT=%LWB_SCRATCH_ROOT%"
 set "LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL=http://127.0.0.1:8199"
 set "LWB_SPOKEN_VIDEO_BAILIAN_IMAGE_BASE_URL=http://127.0.0.1:8199"
 rem Extra args (e.g. --trusted-host <domain> for tunnel access) pass through to the harness CLI.
@@ -56,9 +80,15 @@ rem restart, so a browser opened at the bare origin gets
 rem "dsh web authentication required". Capture it to a file so a new browser (or
 rem a new machine profile) can be pointed at the right URL without digging through
 rem this console window. 双击「打开工作台.cmd」即可用它。
-set "LWB_ACCESS_URL_FILE=E:\lifa-scratch\workbench-url.txt"
-if not exist "E:\lifa-scratch" mkdir "E:\lifa-scratch"
+rem Same scratch root as 设置渲染暂存盘.ps1 chose -- 「打开工作台.ps1」 looks there too.
+set "LWB_ACCESS_URL_FILE=%LWB_SCRATCH_ROOT%\workbench-url.txt"
+if not exist "%LWB_ACCESS_URL_FILE%" mkdir "%LWB_ACCESS_URL_FILE%" 2>NUL
 if exist "%LWB_ACCESS_URL_FILE%" del "%LWB_ACCESS_URL_FILE%"
+
+rem 模型下载镜像：huggingface.co 在国内多数网络下连不通（2026-10-08 实测超时），
+rem 而 fp8/1B 配音模型与白板 Python 依赖都要联网取，必须走镜像。
+if not defined HF_ENDPOINT set "HF_ENDPOINT=https://hf-mirror.com"
+
 rem Tee the launcher's stdout so the token line lands in the file as it is printed.
 rem Write it as ASCII (the URL is pure ASCII) on purpose: a UTF-8 BOM would be read by
 rem cmd as a stray character and glued onto the front of the URL, breaking the open
