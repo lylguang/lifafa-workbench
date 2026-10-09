@@ -54,6 +54,10 @@ function npmEntry() {
   return found
 }
 
+function runNpm(args, cwd, label) {
+  run(process.execPath, [npmEntry(), ...args], cwd, label)
+}
+
 /**
  * corepack 的 JS 入口，与 npm 同理：直接 spawn `corepack.cmd` 在 Windows 上拿不到退出码。
  * 找不到时回退到普通 spawn，让脚本自己报错。
