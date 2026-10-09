@@ -53,6 +53,25 @@ $depsPresent = Test-Path -LiteralPath (Join-Path $root 'node_modules')
 if ($depsPresent) { Write-Ok '依赖已安装' }
 else { Write-Bad '依赖缺失，请重新解压'; $script:blocking += '依赖缺失' }
 
+# zip 存不了符号链接，所以压缩时全跳过了。未跑过「首次运行.cmd」时，
+# vendor 的 pnpm workspace 链接是缺失的——工作台能启动但能力包会加载失败。
+$probe = Join-Path $root 'vendor\deepseek-harnesspps\cli
+ode_modules\@deepseek-ai\dsh-app-boot'
+if (-not (Test-Path -LiteralPath (Join-Path $probe 'package.json'))) {
+    Write-Bad '依赖链接尚未重建——请先双击「首次运行.cmd」（只需做一次，约 30 秒）'
+    $script:blocking += '依赖链接未重建'
+} else {
+    $isLink = $false
+    try {
+        $item = Get-Item -LiteralPath $probe -Force
+        $isLink = ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+    } catch { }
+    if ($isLink) { Write-Ok '依赖链接已就绪' }
+    else {
+        Write-Warn '依赖被解压成了实体目录，功能可能异常——建议重新解压并运行「首次运行.cmd」'
+    }
+}
+
 $shell = Join-Path $root '浏览器\chrome-headless-shell-win64\chrome-headless-shell.exe'
 if (Test-Path -LiteralPath $shell) {
     Write-Ok '渲染浏览器已就绪（高速版）'

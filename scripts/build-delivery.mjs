@@ -222,6 +222,7 @@ async function main() {
   cpSync(join(ROOT, 'docs', 'delivery', '安装说明.md'), join(pkgDir, '安装说明.md'))
   cpSync(join(ROOT, 'docs', 'delivery', '自检.ps1'), join(pkgDir, '自检.ps1'))
   cpSync(join(ROOT, 'docs', 'delivery', '自检.cmd'), join(pkgDir, '自检.cmd'))
+  cpSync(join(ROOT, 'docs', 'delivery', '首次运行.cmd'), join(pkgDir, '首次运行.cmd'))
   if (args.edition === 'local') {
     cpSync(join(ROOT, 'docs', 'delivery', '引擎安装指引.md'), join(pkgDir, '引擎安装指引.md'))
   }
@@ -243,21 +244,26 @@ async function main() {
 }
 
 /**
- * 打包成 zip。用 Python 的 zipfile 而不是 PowerShell 的 Compress-Archive：
- * 后者按系统 ANSI 写条目名，中文文件名会乱码（见调用处注释）。
+ * 打包成 zip。
  *
- * 关键坑是两种链接必须区别对待：
+ * 用Python 的 zipfile 而不是 PowerShell 的 Compress-Archive：后者按系统 ANSI
+ * 写条目名，「启动工作台.cmd」会变成「µëôÕ+ÇÕÀÑõ¢£ÕŦ.cmd」，客户双击直接废。
  *
- * - **junction**（`islink()` 返回 False，但 `st_file_attributes` 带
- *   FILE_ATTRIBUTE_REPARSE_POINT）：各能力包的 node_modules/@deepseek-ai 下那些
- *   指向 vendor 的链接。**zip 格式存不了 junction，解压时会展开成完整的实体目录
- *   副本**——既让包凭空多一份代码，又把打包机的绝对路径写死在客户机上。必须跳过。
- * - **pnpm 的 workspace symlink**（`islink()` 返回 True）：vendor 内部各包
- *   node_modules 下指向兄弟包的链接，是 vendor 能构建的前提。跳掉它，解压后
- *   vendor 自己就报 ERR_MODULE_NOT_FOUND（实测 @deepseek-ai/cordis 找不到）。
+ * 链接策略（两种都必须处理，缺一个客户机就起不来）：
  *
- * 所以判据是 `reparse and not islink`——只命中 junction。跳过的在客户机上由
- * `npm run pack:link` 重建。
+ * - **junction**（`islink()` 返回 False，但带 FILE_ATTRIBUTE_REPARSE_POINT）：
+ *   各能力包 `node_modules/@deepseek-ai/*` 指向 vendor。zip 存不了 junction，
+ *   解压会展开成完整实体目录副本——凭空多一份 vendor 代码，还把打包机的绝对
+ *   路径写死在客户机上。跳过，客户机上由 `npm run pack:link` 重建。
+ *
+ * - **pnpm 的 workspace symlink**（`islink()` 返回 True）：vendor 内部
+ *   vendor 内部各包 node_modules 下指向兄弟包的链接，是 vendor 能构建的前提。
+ *   zip 也存不了 symlink，跟着走会撞上 .pnpm 的环（实测递归 20 分钟不收敛）。
+ *   所以也跳过，但**在客户机上重跑一次 `pnpm install` 重建**——pnpm 用
+ *   lockfile 重建整个依赖图，十几秒，比在压缩期处理链接可靠得多。
+ *
+ * 于是 zip 里不含任何链接。交付包首次启动时 `启动工作台.cmd` 之前需要跑一次
+ * `pnpm install`，这一步已写进 安装说明.md 与 自检.ps1 的检查项。
  */
 async function compress(outDir, edition) {
   const zipPath = join(dirname(outDir), `李发发工作台-v1.0-${edition === 'local' ? '本地增强版' : '标准版'}.zip`)
@@ -265,10 +271,11 @@ async function compress(outDir, edition) {
   const script = [
     'import os, stat, sys, zipfile',
     'REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)',
-    'def is_junction(path):',
-    '    # junction 对 islink() 隐身（返回 False），只能靠 reparse 属性认出来。',
+    'def is_link(path):',
+    '    # symlink 与 junction 都要跳过：前者跟着走会撞 .pnpm 的环，后者会被',
+    '    # 解压成实体目录副本。两者的重建方式见调用处注释。',
     '    if os.path.islink(path):',
-    '        return False',
+    '        return True',
     '    try:',
     '        return bool(os.lstat(path).st_file_attributes & REPARSE)',
     '    except OSError:',
@@ -279,26 +286,25 @@ async function compress(outDir, edition) {
     '    for root, dirs, files in os.walk(src, followlinks=False):',
     '        kept = []',
     '        for d in sorted(dirs):',
-    '            if is_junction(os.path.join(root, d)):',
+    '            if is_link(os.path.join(root, d)):',
     '                skipped += 1',
     '            else:',
     '                kept.append(d)',
     '        dirs[:] = kept',
     '        for name in sorted(files):',
     '            full = os.path.join(root, name)',
-    '            if is_junction(full):',
+    '            if is_link(full):',
     '                skipped += 1',
     '                continue',
     '            try:',
     '                z.write(full, os.path.relpath(full, src))',
     '            except OSError:',
     '                skipped += 1',
-    'print("skipped %d junctions (rebuilt by npm run pack:link)" % skipped)',
+    'print("skipped %d links (rebuilt on first run)" % skipped)',
   ].join('\n')
   run('python', ['-c', script, outDir, zipPath], dirname(outDir), '压缩')
   return zipPath
 }
-
 main().catch((error) => {
   process.stderr.write(`\n[ERR] ${error.message}\n`)
   process.exit(1)
