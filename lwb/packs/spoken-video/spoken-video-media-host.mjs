@@ -85,6 +85,18 @@ function mediaErrorMessage(error) {
   return String(error instanceof Error ? error.message : error).replace(/^Error \[[A-Z0-9_]+\]\s*/u, '')
 }
 
+/**
+ * 本地媒体桥接的地址。
+ *
+ * 此前这个地址以字面量散落在错误提示与代码注释里五六处，改端口或换部署方式时
+ * 必然漏改——而漏改的那处只会以「打不开这个网址」的形式在用户面前出现。收敛
+ * 到一处之后，改这一个函数就够。
+ */
+function localBridgeBase(environment = process.env) {
+  const configured = environment.LWB_MEDIA_BRIDGE_URL || environment.LWB_LOCAL_BRIDGE_URL
+  return String(configured || 'http://127.0.0.1:8199').replace(/\/+$/u, '')
+}
+
 // 手动任务的默认标题取文稿第一行非空内容（截 24 字）：通篇都叫「手动输入文稿」
 // 时，多条任务在列表里无法分辨（2026-10-02 用户在同步弹层里认不出自己要的那条）。
 function manualTitleFromText(value) {
@@ -114,7 +126,7 @@ async function mergeRuntimeEvalFailure(report, workspace, signal) {
 /** Provider wording for a rejected credential, across the endpoints we call. */
 const AUTH_FAILURE_DETAIL = /(?:invalid[ _-]*api[ _-]*key|incorrect api key|unauthorized|authentication failed|api[ _-]*key[ _-]*provided)/iu
 
-function providerFailure(label, detail, endpoint = null) {
+function providerFailure(label, detail, endpoint = null, environment = process.env) {
   if (label.startsWith('SciTiger') && /(?:insufficient[ _-]*points|积分不足|余额不足)/iu.test(detail)) {
     return new SpokenVideoMediaError(
       'SPOKEN_VIDEO_MEDIA_INSUFFICIENT_POINTS',
@@ -129,8 +141,8 @@ function providerFailure(label, detail, endpoint = null) {
       return new SpokenVideoMediaError(
         'SPOKEN_VIDEO_MEDIA_CREDENTIAL_REJECTED',
         isLoopbackEndpoint(endpoint)
-          ? `本机桥接拒绝了配音请求（${detail}）。请打开桥接配置中心 http://127.0.0.1:8199/ 检查配音方式与小米 API Key。`
-          : `配音服务返回「${detail}」。当前渠道指向远端 SciTiger 云端，但本机部署应走本机桥接：请用「启动工作台.cmd」启动（它会把渠道指到 http://127.0.0.1:8199），或在「连接配置」里更新 SciTiger API Key。`,
+          ? `本机桥接拒绝了配音请求（${detail}）。请打开桥接配置中心 ${localBridgeBase(environment)}/ 检查配音方式与小米 API Key。`
+          : `配音服务返回「${detail}」。当前渠道指向远端 SciTiger 云端，但本机部署应走本机桥接：请用「启动工作台.cmd」启动（它会把渠道指到 ${localBridgeBase(environment)}），或在「连接配置」里更新 SciTiger API Key。`,
       )
     }
     if (label.startsWith('百炼')) {
@@ -1041,6 +1053,113 @@ export class SpokenVideoMediaHost {
         voices: voices
           .filter((voice) => voice && typeof voice.id === 'string' && voice.id.trim())
           .map((voice) => ({ id: voice.id.trim(), hasTxt: voice.hasTxt === true })),
+      }
+    } catch (error) {
+      return { available: false, reason: mediaErrorMessage(error) }
+    }
+  }
+
+  /**
+   * 本地桥接与推理引擎的控制面板数据。
+   *
+   * 此前这些能力只在桥接自带的那个独立网页（127.0.0.1:8199）里：想看一眼显存
+   * 占用、点一下「一键启动」、或者引擎挂了看日志，都得离开工作台跳到另一个
+   * 页面——而且那个页面没有任何入口链接，只能靠人记住地址。
+   *
+   * 全部经桥接自己的 /admin 端点转发，不绕过它直接操作引擎：桥接才是引擎状态
+   * 的唯一持有者（它记着 starting、做过空闲回收、知道端口对应哪个 PID）。这里
+   * 只做「把结果搬进工作台」这一件事。
+   *
+   * 一律软失败：桥接不在时返回 available:false 与一句能照着做的话，绝不抛错——
+   * 这个面板是可选的便利，不该让页面因为它挂掉。
+   */
+  async bridgeControl() {
+    const base = localBridgeBase(this.environment)
+    try {
+      const health = await this.#externalJson(`${base}/health`, { signal: AbortSignal.timeout(4000) }, '本地媒体桥接')
+      const engines = await this.#externalJson(`${base}/admin/engines`, { signal: AbortSignal.timeout(6000) }, '本地引擎状态')
+      return {
+        available: true,
+        baseUrl: base,
+        ttsProvider: typeof health.ttsProvider === 'string' ? health.ttsProvider : null,
+        engines: (Array.isArray(engines.engines) ? engines.engines : []).map((engine) => ({
+          kind: engine.kind,
+          label: engine.label,
+          port: engine.port,
+          reachable: engine.reachable === true,
+          starting: engine.starting === true,
+          // 引擎没起来时 canLaunch=false 是有意义的：路径校验没过就别让用户点。
+          canLaunch: engine.canLaunch !== false,
+          lastError: engine.lastError || null,
+          home: engine.home || null,
+        })),
+        gpu: engines.gpu ? {
+          usedMiB: engines.gpu.usedMiB ?? null,
+          totalMiB: engines.gpu.totalMiB ?? null,
+          freeMiB: engines.gpu.freeMiB ?? null,
+        } : null,
+        memory: engines.memory ? {
+          totalMiB: engines.memory.totalMiB ?? null,
+          freeMiB: engines.memory.freeMiB ?? null,
+        } : null,
+      }
+    } catch (error) {
+      return { available: false, baseUrl: base, reason: mediaErrorMessage(error) }
+    }
+  }
+
+  /**
+   * 对本地引擎执行一个动作：launch / free / stop。
+   *
+   * launch 会被桥接转成一次「拉起 + 等待就绪」，本地模型冷启动要 30-180 秒，
+   * 所以这里的超时给得比其它调用宽得多；否则按钮一点就报超时，而引擎其实
+   * 正在正常启动。
+   */
+  async bridgeEngineAction(agent, request) {
+    const input = object(request, '引擎操作')
+    const kind = String(stringAt(input, ['kind']) ?? '').trim().toLowerCase()
+    const action = String(stringAt(input, ['action']) ?? '').trim().toLowerCase()
+    if (!['tts', 'image'].includes(kind)) fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '引擎类型无效。')
+    if (!['launch', 'free', 'stop'].includes(action)) fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '引擎操作无效。')
+    const base = localBridgeBase(this.environment)
+    const label = `${action === 'launch' ? '启动' : action === 'free' ? '释放显存' : '停止'}${kind === 'tts' ? '字幕/配音' : '封面生图'}引擎`
+    try {
+      const body = await this.#externalJson(`${base}/admin/engines/${kind}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+        signal: AbortSignal.timeout(action === 'launch' ? 200_000 : 30_000),
+      }, label)
+      return { ok: true, kind, action, detail: stringAt(body, ['message']) || null }
+    } catch (error) {
+      return { ok: false, kind, action, reason: mediaErrorMessage(error) }
+    }
+  }
+
+  /** 桥接日志尾部。排查引擎问题时它比「重新启动一次」有用得多。 */
+  async bridgeLogs(agent, request = {}) {
+    const lines = Math.min(500, Math.max(20, Number(request?.lines) || 80))
+    const base = localBridgeBase(this.environment)
+    try {
+      const body = await this.#externalJson(`${base}/admin/logs?lines=${lines}`, { signal: AbortSignal.timeout(6000) }, '桥接日志')
+      return { available: true, lines: Array.isArray(body.lines) ? body.lines.map(String).slice(-lines) : [] }
+    } catch (error) {
+      return { available: false, reason: mediaErrorMessage(error) }
+    }
+  }
+
+  /** 桥接近期的媒体任务。用于回答「它到底在忙什么」。 */
+  async bridgeTasks() {
+    const base = localBridgeBase(this.environment)
+    try {
+      const body = await this.#externalJson(`${base}/admin/tasks`, { signal: AbortSignal.timeout(6000) }, '桥接任务')
+      return {
+        available: true,
+        tasks: (Array.isArray(body.tasks) ? body.tasks : []).slice(0, 30).map((task) => ({
+          id: task.id, kind: task.kind, status: task.status,
+          stage: task.stage || null, updated: task.updated || null,
+          error_message: task.error_message || null,
+        })),
       }
     } catch (error) {
       return { available: false, reason: mediaErrorMessage(error) }
@@ -2099,7 +2218,7 @@ export class SpokenVideoMediaHost {
     }
     if (!response.ok) {
       const detail = stringAt(body, ['message'], ['error', 'message']) || `HTTP ${response.status}`
-      throw providerFailure(label, detail, url)
+      throw providerFailure(label, detail, url, this.environment)
     }
     return body
   }
@@ -2354,7 +2473,7 @@ export class SpokenVideoMediaHost {
     if (body?.success === true && body.data && typeof body.data === 'object') return body.data
     if (body?.code === 200 && body.data && typeof body.data === 'object') return body.data
     const detail = stringAt(body, ['message'], ['error', 'message']) || `${label}没有返回有效数据。`
-    throw providerFailure(label, detail, endpoint)
+    throw providerFailure(label, detail, endpoint, this.environment)
   }
 
   /** SciTiger replies share one error shape; resolve the endpoint so auth failures can be explained. */
@@ -3105,7 +3224,7 @@ export class SpokenVideoMediaHost {
       throw fail('SPOKEN_VIDEO_WHITEBOARD_ENV', '本地媒体桥接未运行，无法生成线稿。请启动本地媒体桥接后重试。')
     }
     if (!engine.up) {
-      throw fail('SPOKEN_VIDEO_WHITEBOARD_ENV', '生图引擎未连接。请打开桥接配置中心（http://127.0.0.1:8199）点「一键启动」，引擎就绪后再生成线稿。')
+      throw fail('SPOKEN_VIDEO_WHITEBOARD_ENV', '生图引擎未连接。请打开桥接配置中心（${localBridgeBase(this.environment)}）点「一键启动」，引擎就绪后再生成线稿。')
     }
 
     // 旁白 → 视觉描述：结果缓存在 media/whiteboard/descriptions.json，键含稿件

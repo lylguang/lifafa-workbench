@@ -100,6 +100,10 @@ export class SpokenVideoGateway extends TypertRemoteService {
   deleteMediaTasks(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.deleteTasks(context, request)) }
   uploadVoiceReference(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.uploadVoiceReference(context, request)) }
   bridgeVoiceoverInfo() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.bridgeVoiceoverInfo(context)) }
+  bridgeControl() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.bridgeControl(context)) }
+  bridgeEngineAction(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.bridgeEngineAction(context, request)) }
+  bridgeLogs(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.bridgeLogs(context, request || {})) }
+  bridgeTasks() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.bridgeTasks(context)) }
   uploadVideoBgm(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.uploadVideoBgm(context, request)) }
   audioTask(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.audioTask(context, request)) }
   startAudioTask(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startAudioTask(context, request)) }
@@ -186,6 +190,10 @@ decorateRemote(SpokenVideoGateway.prototype, 'listVideoTasks', 'listVideoTasks')
 decorateRemote(SpokenVideoGateway.prototype, 'deleteMediaTasks', 'deleteMediaTasks')
 decorateRemote(SpokenVideoGateway.prototype, 'uploadVoiceReference', 'uploadVoiceReference')
 decorateRemote(SpokenVideoGateway.prototype, 'bridgeVoiceoverInfo', 'bridgeVoiceoverInfo')
+decorateRemote(SpokenVideoGateway.prototype, 'bridgeControl', 'bridgeControl')
+decorateRemote(SpokenVideoGateway.prototype, 'bridgeEngineAction', 'bridgeEngineAction')
+decorateRemote(SpokenVideoGateway.prototype, 'bridgeLogs', 'bridgeLogs')
+decorateRemote(SpokenVideoGateway.prototype, 'bridgeTasks', 'bridgeTasks')
 decorateRemote(SpokenVideoGateway.prototype, 'uploadVideoBgm', 'uploadVideoBgm')
 decorateRemote(SpokenVideoGateway.prototype, 'audioTask', 'audioTask')
 decorateRemote(SpokenVideoGateway.prototype, 'startAudioTask', 'startAudioTask')

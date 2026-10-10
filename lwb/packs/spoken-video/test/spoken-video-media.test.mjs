@@ -2311,3 +2311,101 @@ test('deleteTasks rejects an unknown task type and an oversized batch', async (t
   const many = Array.from({ length: 51 }, (_, index) => `id-${index}`)
   await assert.rejects(host.deleteTasks(currentAgent, { taskType: 'audio', ids: many }), /最多删除 50/u)
 })
+
+/* ---------------------- 本地引擎控制面板（桥接内嵌） ---------------------- */
+
+// 这几条锁的是「host 方法签名必须是 (agent, ...)」这条约定。
+// 2026-10-10 实测踩过：bridgeEngineAction 写成 (request) 时，gateway 按
+// (context, request) 调用，request 实际接到的是 context，真正的请求体被丢弃——
+// 表现是「引擎类型无效」，而 context 上当然没有 kind 字段。签名少写一个
+// agent，参数就整体错位一位，而 554 条测试没有一条能发现它。
+test('the bridge control panel reads engine state through the bridge', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const calls = []
+  const host = new SpokenVideoMediaHost({
+    projectsStore: { async list() { return [] } },
+    credentials: credentialStore(),
+    environment: { LWB_MEDIA_BRIDGE_URL: 'http://127.0.0.1:8199/' },
+    fetch: async (url, init = {}) => {
+      calls.push(String(url))
+      if (String(url).endsWith('/health')) {
+        return { ok: true, json: async () => ({ service: 'lwb-media-bridge', ttsProvider: 'cloud' }) }
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          engines: [
+            { kind: 'tts', label: '字幕引擎', port: '8188', reachable: true, starting: false, canLaunch: true },
+            { kind: 'image', label: '封面生图引擎', port: '8187', reachable: false, starting: true, canLaunch: true },
+          ],
+          gpu: { usedMiB: 9000, totalMiB: 16000, freeMiB: 7000 },
+          memory: { totalMiB: 64000, freeMiB: 12000 },
+        }),
+      }
+    },
+  })
+  const state = await host.bridgeControl(currentAgent)
+  assert.equal(state.available, true)
+  assert.equal(state.baseUrl, 'http://127.0.0.1:8199', '尾斜杠被去掉，拼接路径才不会出双斜杠')
+  assert.deepEqual(state.engines.map((e) => e.kind), ['tts', 'image'])
+  assert.equal(state.engines[0].reachable, true)
+  assert.equal(state.engines[1].reachable, false)
+  assert.equal(state.engines[1].starting, true, '「启动中」要单独读出来，否则界面会把启动中的引擎显示成「未运行」')
+  assert.equal(state.gpu.freeMiB, 7000)
+  assert.equal(state.memory.totalMiB, 64000)
+  assert.ok(calls.length >= 2 && calls.every((url) => url.startsWith('http://127.0.0.1:8199/')), '全部走桥接，不绕过它直接碰引擎')
+})
+
+test('an engine action reaches the bridge with the kind and action it was given', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const seen = []
+  const host = new SpokenVideoMediaHost({
+    projectsStore: { async list() { return [] } },
+    credentials: credentialStore(),
+    environment: { LWB_MEDIA_BRIDGE_URL: 'http://127.0.0.1:8199' },
+    fetch: async (url, init = {}) => {
+      seen.push({ url: String(url), method: init.method || 'GET' })
+      return { ok: true, json: async () => ({ message: '已释放' }) }
+    },
+  })
+  const result = await host.bridgeEngineAction(currentAgent, { kind: 'image', action: 'free' })
+  assert.equal(result.ok, true)
+  assert.equal(result.detail, '已释放')
+  assert.equal(seen[0].url, 'http://127.0.0.1:8199/admin/engines/image/free')
+  assert.equal(seen[0].method, 'POST')
+})
+
+test('an unknown engine action is rejected before any request goes out', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  let called = false
+  const host = new SpokenVideoMediaHost({
+    projectsStore: { async list() { return [] } },
+    credentials: credentialStore(),
+    fetch: async () => { called = true; return { ok: true, json: async () => ({}) } },
+  })
+  // 白名单拦截必须在发请求之前：把「重启」传成 action 若漏出去，桥接会照单执行。
+  await assert.rejects(host.bridgeEngineAction(currentAgent, { kind: 'image', action: 'reboot' }), /引擎操作无效/u)
+  await assert.rejects(host.bridgeEngineAction(currentAgent, { kind: 'gpu', action: 'free' }), /引擎类型无效/u)
+  assert.equal(called, false, '非法参数不该触达桥接')
+})
+
+test('the bridge panel fails soft so a missing bridge never breaks the page', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const host = new SpokenVideoMediaHost({
+    projectsStore: { async list() { return [] } },
+    credentials: credentialStore(),
+    fetch: async () => { throw new Error('ECONNREFUSED') },
+  })
+  // 面板是便利设施，桥接不在时它只能「显示不可用」，绝不能让整个页面报错。
+  const state = await host.bridgeControl(currentAgent)
+  assert.equal(state.available, false)
+  assert.ok(state.reason, '要给出能照着做的一句话')
+  const logs = await host.bridgeLogs(currentAgent, { lines: 20 })
+  assert.equal(logs.available, false)
+  const tasks = await host.bridgeTasks(currentAgent)
+  assert.equal(tasks.available, false)
+})

@@ -382,6 +382,29 @@ window.__ModuleLoader__.load({
       .sv-fail-recent { display:grid; gap:6px; }
       /* 页面内弹窗：与提示音同源同人不在电脑前时的兜底。 */
       .sv-toast-stack { position:fixed; z-index:60; right:18px; bottom:18px; display:grid; gap:9px; width:min(380px,calc(100vw - 36px)); }
+      /* 本地引擎面板 */
+      .sv-engine-panel { display:grid; gap:12px; padding:15px 17px; border:1px solid var(--lwb-line); border-radius:11px; background:var(--lwb-surface); }
+      .sv-engine-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:9px; }
+      .sv-engine-head h3 { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-md,15px); }
+      .sv-engine-actions { display:flex; flex-wrap:wrap; gap:7px; }
+      .sv-engine-usage { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:11px; }
+      .sv-usage { display:grid; gap:3px; }
+      .sv-usage-label { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); font-weight:800; letter-spacing:.06em; }
+      .sv-usage-value { color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); font-weight:700; }
+      .sv-usage-bar { display:block; overflow:hidden; height:6px; border-radius:99px; background:var(--lwb-page); }
+      .sv-usage-fill { display:block; height:100%; background:var(--sv-accent, #3b82f6); border-radius:99px; }
+      .sv-usage-bar[data-level="mid"] .sv-usage-fill { background:#d69a1c; }
+      .sv-usage-bar[data-level="high"] .sv-usage-fill { background:#d1443f; }
+      .sv-engine-row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:10px 12px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-page); }
+      .sv-engine-id { display:grid; gap:2px; flex:1 1 190px; min-width:0; }
+      .sv-engine-id strong { color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); }
+      .sv-engine-buttons { display:flex; flex-wrap:wrap; gap:6px; }
+      .sv-engine-log { display:grid; gap:7px; padding:11px 12px; border:1px dashed var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
+      .sv-engine-log-head { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); font-weight:800; }
+      .sv-log-lines { overflow:auto; max-height:240px; margin:0; padding:0 0 0 18px; color:var(--lwb-muted); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:var(--lwb-text-xs,12px); line-height:1.6; }
+      body[data-ds-dark-theme] .sv-usage-bar { background:#1b2530; }
+      body[data-ds-dark-theme] .sv-engine-row,
+      body[data-ds-dark-theme] .sv-engine-log { background:#1b2530; }
       .sv-toast { display:flex; flex-wrap:wrap; gap:10px; justify-content:space-between; padding:12px 13px; border:1px solid var(--lwb-line); border-left-width:4px; border-radius:9px; background:var(--lwb-surface); box-shadow:0 10px 30px rgba(16,32,48,.18); animation:sv-toast-in .22s ease-out; }
       @keyframes sv-toast-in { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
       .sv-toast[data-level="success"] { border-left-color:#1f9d6b; }
@@ -1221,6 +1244,149 @@ window.__ModuleLoader__.load({
      * 音频上下文必须在用户手势里首次解锁，这是浏览器自动播放策略的要求——
      * 所以开关按钮同时承担「开声音」和「解锁音频」两件事，光勾选不点不会生效。
      */
+    /**
+     * 本地引擎面板：桥接与两个 ComfyUI 引擎的状态、启停、显存释放与日志。
+     *
+     * 此前这些只能在桥接自带的独立网页（127.0.0.1:8199）里操作，而那个页面没有
+     * 任何入口链接——用户得自己记住地址。把它搬进工作台之后，「引擎挂了怎么办」
+     * 这件事从「知道一个隐藏网址」变成「打开这个页面看一眼」。
+     *
+     * 不做的事：不绕过桥接直接操作引擎。桥接才是引擎状态的唯一持有者（它记着
+     * starting、做过空闲回收、知道端口对应哪个 PID），工作台只做数据搬运。
+     */
+    function LocalEnginePanel({ packId }) {
+      const [state, setState] = React.useState(null);
+      const [busy, setBusy] = React.useState(null);
+      const [showLogs, setShowLogs] = React.useState(false);
+      const [logs, setLogs] = React.useState(null);
+      const [tasks, setTasks] = React.useState(null);
+      const [error, setError] = React.useState(null);
+
+      const load = React.useCallback(async () => {
+        try {
+          const next = await remoteStatic('bridgeControl');
+          setState(next); setError(null);
+        } catch (cause) { setError(cause.message); }
+      }, []);
+
+      React.useEffect(() => {
+        let active = true;
+        const tick = async () => { if (active) await load(); };
+        void tick();
+        // 引擎有「正在启动」的中间态，刷新太慢会让人以为按钮没生效。
+        const timer = setInterval(tick, 5000);
+        return () => { active = false; clearInterval(timer); };
+      }, [load]);
+
+      const act = async (kind, action) => {
+        setBusy(`${kind}:${action}`); setError(null);
+        try {
+          const result = await remoteStatic('bridgeEngineAction', { kind, action });
+          if (!result?.ok) setError(result?.reason || '操作失败');
+          await load();
+        } catch (cause) { setError(cause.message); }
+        finally { setBusy(null); }
+      };
+
+      const openLogs = async () => {
+        if (showLogs) { setShowLogs(false); return; }
+        setShowLogs(true);
+        try {
+          const next = await remoteStatic('bridgeLogs', { lines: 80 });
+          setLogs(next); setError(null);
+        } catch (cause) { setError(cause.message); }
+      };
+
+      const openTasks = async () => {
+        try {
+          const next = await remoteStatic('bridgeTasks');
+          setTasks(next); setError(null);
+        } catch (cause) { setError(cause.message); }
+      };
+
+      if (!state) return h('section', { className: 'sv-engine-panel' }, h('p', { className: 'sv-meta' }, '正在读取本地引擎状态…'));
+      if (!state.available) {
+        return h('section', { className: 'sv-engine-panel' },
+          h('header', { className: 'sv-engine-head' },
+            h('h3', null, '本地推理引擎'),
+            h('span', { className: 'sv-tag sv-status-error' }, '桥接未运行')),
+          h('p', { className: 'sv-note' }, `本地媒体桥接不可用：${state.reason || '未知原因'}。请确认它已启动——保活脚本每 5 分钟会自动拉起一次，也可双击 media-bridge 目录下的「启动桥接.cmd」。`),
+          error ? h('p', { className: 'sv-error' }, error) : null);
+      }
+
+      const gpu = state.gpu;
+      const memory = state.memory;
+      const gpuPercent = gpu && gpu.totalMiB ? Math.round((gpu.usedMiB / gpu.totalMiB) * 100) : null;
+      const memPercent = memory && memory.totalMiB ? Math.round(((memory.totalMiB - memory.freeMiB) / memory.totalMiB) * 100) : null;
+
+      return h('section', { className: 'sv-engine-panel' },
+        h('header', { className: 'sv-engine-head' },
+          h('h3', null, '本地推理引擎'),
+          h('div', { className: 'sv-engine-actions' },
+            h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => { void load(); } }, '刷新'),
+            h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => { void openLogs(); } }, showLogs ? '收起日志' : '查看日志'),
+            h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => { void openTasks(); } }, '近期任务'))),
+
+        h('div', { className: 'sv-engine-usage' },
+          gpu && gpu.totalMiB ? h('div', { className: 'sv-usage' },
+            h('span', { className: 'sv-usage-label' }, '显存'),
+            h('span', { className: 'sv-usage-value' }, `${(gpu.usedMiB / 1024).toFixed(1)} / ${(gpu.totalMiB / 1024).toFixed(0)} GB`),
+            h('span', { className: 'sv-usage-bar', 'data-level': gpuPercent >= 90 ? 'high' : gpuPercent >= 70 ? 'mid' : 'low' },
+              h('span', { className: 'sv-usage-fill', style: { width: `${gpuPercent || 0}%` } }))) : null,
+          memory && memory.totalMiB ? h('div', { className: 'sv-usage' },
+            h('span', { className: 'sv-usage-label' }, '内存'),
+            h('span', { className: 'sv-usage-value' }, `${((memory.totalMiB - memory.freeMiB) / 1024).toFixed(1)} / ${(memory.totalMiB / 1024).toFixed(0)} GB`),
+            h('span', { className: 'sv-usage-bar', 'data-level': memPercent >= 90 ? 'high' : memPercent >= 70 ? 'mid' : 'low' },
+              h('span', { className: 'sv-usage-fill', style: { width: `${memPercent || 0}%` } }))) : null),
+
+        (state.engines || []).map((engine) => h('div', { key: engine.kind, className: 'sv-engine-row' },
+          h('div', { className: 'sv-engine-id' },
+            h('strong', null, engine.label || engine.kind),
+            h('span', { className: 'sv-meta' }, `端口 ${engine.port}`),
+            engine.lastError ? h('span', { className: 'sv-error' }, engine.lastError) : null),
+          h('span', {
+            className: `sv-tag ${engine.reachable ? 'sv-stage' : engine.starting ? '' : 'sv-status-error'}`,
+          }, engine.reachable ? '运行中' : engine.starting ? '启动中…' : '未运行'),
+          h('div', { className: 'sv-engine-buttons' },
+            // 释放显存只在跑着的时候有意义；模型没加载时那个按钮是噪声。
+            engine.reachable ? h('button', {
+              type: 'button', className: 'lwb-plain-button', disabled: Boolean(busy),
+              title: '卸载已加载的模型并归还显存，进程保留（下次会自动重新加载）',
+              onClick: () => { void act(engine.kind, 'free'); },
+            }, busy === `${engine.kind}:free` ? '释放中…' : '释放显存') : null,
+            engine.reachable ? h('button', {
+              type: 'button', className: 'lwb-plain-button', disabled: Boolean(busy),
+              title: '结束引擎进程，把内存还给系统（下次任务会自动重新拉起）',
+              onClick: () => { void act(engine.kind, 'stop'); },
+            }, busy === `${engine.kind}:stop` ? '停止中…' : '停止') : null,
+            !engine.reachable && !engine.starting ? h('button', {
+              type: 'button', className: 'lwb-primary-button', disabled: Boolean(busy) || engine.canLaunch === false,
+              title: engine.canLaunch === false ? '引擎路径校验未通过，请检查安装目录' : '拉起引擎并等待就绪（本地模型可能需要 30-180 秒）',
+              onClick: () => { void act(engine.kind, 'launch'); },
+            }, busy === `${engine.kind}:launch` ? '启动中，请稍候…' : '一键启动') : null))),
+
+        error ? h('p', { className: 'sv-error' }, error) : null,
+
+        tasks ? h('div', { className: 'sv-engine-log' },
+          h('p', { className: 'sv-engine-log-head' }, `桥接近期任务（${tasks.tasks?.length || 0}）`),
+          tasks.available === false
+            ? h('p', { className: 'sv-meta' }, tasks.reason || '读取失败')
+            : (tasks.tasks || []).length === 0
+              ? h('p', { className: 'sv-meta' }, '暂无任务记录')
+              : h('ul', { className: 'sv-log-lines' }, (tasks.tasks || []).map((task) => h('li', { key: task.id },
+                `${task.kind} · ${task.status}${task.stage ? ` · ${task.stage}` : ''}${task.error_message ? ` · ${task.error_message}` : ''}`))),
+          h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setTasks(null) }, '收起')) : null,
+
+        logs ? h('div', { className: 'sv-engine-log' },
+          h('p', { className: 'sv-engine-log-head' }, '桥接日志尾部'),
+          logs.available === false
+            ? h('p', { className: 'sv-meta' }, logs.reason || '读取失败')
+            : h('ul', { className: 'sv-log-lines' }, (logs.lines || []).slice(-60).map((line, index) => h('li', { key: `${index}-${line.slice(0,12)}` }, line))),
+          h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setLogs(null) }, '收起')) : null,
+
+        h('p', { className: 'sv-meta' }, `桥接 ${state.baseUrl} · 配音方式：${state.ttsProvider === 'local' ? '本地模型' : '云端'}。引擎空闲时会自动释放显存，长时间空闲则停止进程。`));
+    }
+
     function NotifyToggle() {
       const [sound, setSound] = React.useState(() => notify.settings.sound !== false);
       const [desktop, setDesktop] = React.useState(() => Boolean(notify.settings.desktop));
@@ -5082,7 +5248,7 @@ window.__ModuleLoader__.load({
       const sourceDrawerNode = sourceDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭稿件内容', onClick: () => setSourceDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '稿件内容' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, sourceDrawer.source?.title || '稿件内容'), h('p', { className: 'sv-meta' }, sourceDrawer.source?.kind === 'manual-text' ? '手动输入文稿快照' : '任务创建时冻结的稿件快照')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSourceDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll' }, h('article', { className: 'sv-sc-manuscript' }, sourceDrawer.source?.text || ''))));
       const subtitleDrawerNode = subtitleDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭字幕内容', onClick: () => setSubtitleDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '编辑字幕' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, `字幕 · ${subtitleDrawer.task.source?.title || '手动文稿'}`), h('p', { className: 'sv-meta' }, `${subtitleDrawer.cues.length} 条字幕，可直接校对错别字并保存。`)), h('button', { type: 'button', className: 'lwb-plain-button', disabled: subtitleDrawer.saving, onClick: () => setSubtitleDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll sv-audio-subtitle-editor' }, h('div', { className: 'sv-subtitle-cues' }, subtitleDrawer.cues.map((cue, index) => h('article', { key: cue.id, className: 'sv-subtitle-cue' }, h('time', null, cue.time), h('textarea', { className: 'sv-textarea sv-subtitle-text', value: cue.text, maxLength: 30000, 'aria-label': `第 ${index + 1} 条字幕文本`, onChange: (event) => setSubtitleDrawer((current) => ({ ...current, cues: current.cues.map((currentCue, currentIndex) => currentIndex === index ? { ...currentCue, text: event.target.value } : currentCue) })) }))))), h('div', { className: 'sv-media-drawer-foot' }, h('span', { className: 'sv-meta' }, '时间码来自音频对齐结果，保存将更新字幕文本。'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: subtitleDrawer.saving || !subtitleDrawer.cues.length || subtitleDrawer.cues.some((cue) => !cue.text.trim()), onClick: () => ask({ title: '保存字幕', copy: `将保存这 ${subtitleDrawer.cues.length} 条字幕的文本修改，时间码保持不变。`, confirm: '确认保存', onConfirm: () => { void saveSubtitles(); } }) }, subtitleDrawer.saving ? '正在保存…' : '保存字幕'))));
       const accountTabs = h(AccountTabs, { accountLibrary, activeTab, onChange: setActiveTab, label: '按账号查看配音任务' });
-      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
+      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, h(LocalEnginePanel, { packId }), accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
     }
     /**
      * 视频制作任务的实时进度：步骤条 + 当前阶段用时 + 总耗时 + 阶段明细。
