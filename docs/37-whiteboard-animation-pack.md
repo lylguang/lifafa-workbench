@@ -37,7 +37,7 @@
 1. **字幕顶在画面上半部**：libass 默认 PlayRes 是 384×288，`MarginV=180` 按该坐标系换算等于距底 62%。改为 `MarginV=30`（≈距底 10%），字幕落到常规底部位置。
 2. **分镜师接入的三处接线缺陷**（均为首测抓出）：media host 构造函数漏收 `lineArtPlanner`；`whiteboardLineArtStatus` 签名漏了 agent 参数导致轮询恒 idle；`normalizeLineArtPlan` 用 `sceneIndex` 对齐而 host 传的是 plan items 的 `index`，LLM 结果被整体丢弃走了含旁白的兜底。
 
-改动位置：`本地媒体桥接/bridge.mjs`（negative_prompt/seed）、`spoken-video-whiteboard-art.mjs`（新模块：提示词组装、分镜师提示词与 schema、桥接调用）、`spoken-video-media-host.mjs`（plan/start/status 三个 RPC、描述缓存、缩略图、字幕边距）、`client.js`（线稿准备面板与分阶段提示）、`index.mjs`（分镜师执行器接线）。
+改动位置：`media-bridge/bridge.mjs`（negative_prompt/seed）、`spoken-video-whiteboard-art.mjs`（新模块：提示词组装、分镜师提示词与 schema、桥接调用）、`spoken-video-media-host.mjs`（plan/start/status 三个 RPC、描述缓存、缩略图、字幕边距）、`client.js`（线稿准备面板与分阶段提示）、`index.mjs`（分镜师执行器接线）。
 
 ## 作为口播包的制作方式（2026-10-01 接入）
 
