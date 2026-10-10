@@ -582,6 +582,9 @@ window.__ModuleLoader__.load({
       .sv-media-drawer-copy { margin:5px 0 0; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); line-height:1.5; }
       .sv-media-drawer-body { display:grid; grid-auto-rows:max-content; min-height:0; flex:1; align-content:start; gap:18px; overflow:auto; padding:17px 2px 2px; }
       .sv-media-provider-picker { display:inline-flex; width:max-content; max-width:100%; align-self:start; padding:3px; border:1px solid var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
+      .sv-media-tradeoff { display:grid; gap:4px; padding:10px 12px; border:1px dashed var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
+      .sv-media-tradeoff p { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); line-height:1.6; }
+      .sv-media-tradeoff strong { color:var(--lwb-ink); }
       .sv-media-provider-choice { min-height:30px; padding:0 10px; border:1px solid transparent; border-radius:6px; color:var(--lwb-muted); background:transparent; font:inherit; font-size:var(--lwb-text-sm,13px); font-weight:700; cursor:pointer; }
       .sv-media-provider-choice[data-active="true"] { border-color:var(--sv-accent-line); color:var(--sv-accent-ink); background:var(--lwb-surface); box-shadow:var(--sv-shadow-sm); }
       .sv-media-settings-section { display:grid; grid-auto-rows:max-content; align-content:start; gap:12px; padding-top:16px; border-top:1px solid var(--lwb-line); }
@@ -5975,6 +5978,12 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
             h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '生图渠道' }, ['bailian', 'scitiger'].map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': connectionProvider === id ? 'true' : 'false', disabled: Boolean(connectionBusy), onClick: () => { setConnectionProvider(id); setApiKey(''); } }, service?.providers?.[id]?.label || (id === 'bailian' ? '百炼 BYOK' : 'SciTiger 云端')))),
             h('label', { className: 'sv-media-field' }, h('span', null, connectionProvider === 'bailian' ? '百炼 API Key' : 'SciTiger 云端生图 API Key'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: connectionCredential?.configured ? '已保存；输入新值可更新' : '输入 API Key', onChange: (event) => setApiKey(event.target.value) })),
             h('label', { className: 'sv-media-field' }, h('span', null, '生图模型（可选）'), h('input', { className: 'sv-input', value: connectionModel, maxLength: 120, placeholder: service?.model || '默认模型', onChange: (event) => setConnectionModel(event.target.value) })),
+            // 说清两条路的真实代价，否则用户只能凭猜。2026-10-10 实测：本地生图引擎
+            // （Qwen-Image）常驻时占 5.8 GB 内存 + 大部分 16G 卡显存，而云端通道
+            // 什么都不占——只是每张封面要花钱。
+            h('div', { className: 'sv-media-tradeoff' },
+              h('p', null, h('strong', null, '云端生图'), '：不吃本机内存与显存，封面生成不与配音/渲染抢资源；每张按服务商计费。'),
+              h('p', null, h('strong', null, '本地生图'), '：不花钱、完全离线，但模型常驻要占约 5.8 GB 内存与大部分显存，因此空闲时会自动释放。')),
             h('p', { className: 'sv-note' }, connectionCredential?.configured ? '已保存连接；密钥不会回显。' : '保存后，生成发布信息时会自动生成横竖封面，并支持按提示词单独重生。'),
           ),
           h('div', { className: 'sv-media-drawer-foot' }, h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(connectionBusy) || !connectionCredential?.configured || !connectionCredential?.writable, onClick: () => { void clearConnection(); } }, connectionBusy === 'clear' ? '正在清除…' : '清除密钥'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(connectionBusy), onClick: () => { void saveConnection(); } }, connectionBusy === 'save' ? '正在保存…' : '保存配置')),
