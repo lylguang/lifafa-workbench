@@ -142,15 +142,12 @@ test('launcher leaves the channel unset when no bridge answers', async () => {
   assert.equal(await blank.resolveScitigerBaseUrl({ LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: '   ' }), blank.LOCAL_BRIDGE_URL)
 })
 
-test('the media bridge keeps ffmpeg scratch files off the system drive', async (t) => {
-  // bridge.mjs 位于工作台根目录下的「本地媒体桥接」，不在 lifafa-workbench-main 内，
-  // 标准版交付包不包含它。缺失时跳过而不是让整条测试报 ENOENT——否则客户从仓库
-  // 拉下代码跑 npm test，会看到一个与他的代码无关的失败（2026-10-09 实测）。
-  const bridgePath = fileURLToPath(new URL('../../../../本地媒体桥接/bridge.mjs', import.meta.url))
-  if (!existsSync(bridgePath)) {
-    t.skip('本地媒体桥接未随包交付（标准版）')
-    return
-  }
+test('the media bridge keeps ffmpeg scratch files off the system drive', async () => {
+  // 2026-10-10 起桥接源码在仓库内的 media-bridge/，不再依赖仓库外的目录。
+  // 此前它靠 t.skip 在找不到时静默跳过——也就是说这条断言从未真正跑过，桥接
+  // 里删掉 TEMP 重定向也不会有人知道。现在路径进了仓库，缺失就该报错。
+  const bridgePath = fileURLToPath(new URL('../../../media-bridge/bridge.mjs', import.meta.url))
+  assert.ok(existsSync(bridgePath), `media-bridge/bridge.mjs 必须在仓库内：${bridgePath}`)
   const bridge = await readFile(bridgePath, 'utf8')
   // 重定向必须发生在第一个 ffmpeg 调用之前，否则设置不生效。
   const redirectAt = bridge.indexOf('process.env.TEMP = scratch')
@@ -158,4 +155,16 @@ test('the media bridge keeps ffmpeg scratch files off the system drive', async (
   assert.ok(redirectAt > 0, 'bridge must redirect TEMP')
   assert.ok(firstFfmpegAt > redirectAt, 'bridge must redirect TEMP before invoking ffmpeg')
   assert.match(bridge, /if \(!process\.env\.LWB_TEMP_DIR\)/u)
+})
+
+test('the shipped bridge config template carries no secrets', async () => {
+  // config.example.json 会进交付包。客户从它复制出 config.json 再填密钥，所以模板
+  // 里出现任何真 Key 都等于把它发给了每一个拿到包的人。
+  const examplePath = fileURLToPath(new URL('../../../media-bridge/config.example.json', import.meta.url))
+  assert.ok(existsSync(examplePath), `media-bridge/config.example.json 必须在仓库内：${examplePath}`)
+  const example = JSON.parse(await readFile(examplePath, 'utf8'))
+  assert.equal(example.mimo?.apiKey, '', '模板里的 API Key 必须是空值')
+  // 兜底：任何看起来像真密钥的长串都不该出现在模板里（sk- / Bearer 形态）。
+  const text = await readFile(examplePath, 'utf8')
+  assert.doesNotMatch(text, /sk-[A-Za-z0-9]{16,}/u, '模板里不得出现疑似真实密钥')
 })

@@ -1,0 +1,35 @@
+{
+  "$comment": "本地媒体桥接配置模板。复制为 config.json 后填入自己的值；config.json 含密钥，已被 .gitignore 排除，不要提交。",
+
+  "ttsProvider": "cloud",
+  "$ttsProvider": "cloud = 小米 MiMo / 百炼云端合成；local = 本机 LongCat 合成（本地推理才需要，吃内存）",
+
+  "tts": {
+    "$comment": "仅 ttsProvider=local 时生效。本地合成实测需要约 23 GB 空闲内存，16G 显卡上不能与封面生图同时驻留。",
+    "model": "LongCat-AudioDiT-3.5B-bf16",
+    "steps": 16,
+    "guidance_strength": 4,
+    "guidance_method": "apg",
+    "attention": "auto",
+    "device": "auto",
+    "dtype": "auto"
+  },
+
+  "mimo": {
+    "$comment": "小米 MiMo 云端 TTS。apiKey 在平台申请后填入；传了参考音频会自动走声音复刻并忽略 voice。",
+    "apiKey": "",
+    "voice": "茉莉",
+    "style": "清晰沉稳，适合知识讲解。"
+  },
+
+  "asr": {
+    "$comment": "字幕转写模型，跑在本机 8188 引擎上（Qwen3-ASR）。",
+    "model": "Qwen3-ASR-1.7B"
+  },
+
+  "defaultVoice": "22",
+  "$defaultVoice": "voices/ 目录下的音色文件名（不含扩展名）。22 = 22.m4a。",
+
+  "chineseNumbers": true,
+  "$chineseNumbers": "把稿件里的阿拉伯数字转成中文读法，避免 TTS 念成「二零二五」。"
+}

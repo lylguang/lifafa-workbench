@@ -264,16 +264,29 @@ async function main() {
 
   // 7) 本地增强版才带桥接；标准版客户没有本地引擎，带过去只会让人困惑。
   if (args.edition === 'local') {
-    const bridgeSrc = join(ROOT, '..', '本地媒体桥接')
-    if (!existsSync(bridgeSrc)) throw new Error(`找不到本地媒体桥接目录：${bridgeSrc}`)
+    // 2026-10-10 起从仓库内的 media-bridge/ 取。此前从 ROOT/../本地媒体桥接 取，
+    // 也就是仓库外的一个目录——构建能否成功取决于开发者机器上恰好放了那么一份，
+    // 而那份还不受版本控制（2500 行代码、含密钥配置、随时可能被删）。
+    // 「clone 全新副本重验」这类验收以前根本过不了，原因就在这一行。
+    const bridgeSrc = join(ROOT, 'media-bridge')
+    if (!existsSync(bridgeSrc)) throw new Error(`找不到本地媒体桥接源码：${bridgeSrc}`)
     const bridgeDst = join(outDir, '本地媒体桥接')
     process.stdout.write('[--] 复制本地媒体桥接\n')
-    // 只带代码与音色库，绝不带 data/（缓存 2.4G）与 .bak 备份。
+    // 只带代码与音色库，绝不带 data/（缓存数 G）与 .bak 备份。
+    // 必需文件缺任何一个都要让构建失败，而不是产出一个缺件的交付包——
+    // config.example.json 曾用静默跳过，客户拿到的包里没有配置模板，也不知道要填什么。
     for (const item of ['bridge.mjs', 'chinese-numbers.mjs', 'config.example.json', '启动桥接.cmd', '使用说明.md']) {
       const from = join(bridgeSrc, item)
-      if (existsSync(from)) cpSync(from, join(bridgeDst, item))
+      if (!existsSync(from)) throw new Error(`本地媒体桥接缺少必需文件：${item}`)
+      cpSync(from, join(bridgeDst, item))
     }
-    cpSync(join(bridgeSrc, 'voices'), join(bridgeDst, 'voices'), { recursive: true })
+    // 音色库是用户素材，不在版本控制里；没有它就跳过并说清楚，而不是让构建崩掉。
+    const voices = join(bridgeSrc, 'voices')
+    if (existsSync(voices)) {
+      cpSync(voices, join(bridgeDst, 'voices'), { recursive: true })
+    } else {
+      process.stdout.write('[!!] 未找到音色库，已跳过（参考音色不可用，需另行提供）\n')
+    }
     mkdirSync(join(bridgeDst, 'data'), { recursive: true })
   }
 
