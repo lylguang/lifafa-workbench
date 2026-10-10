@@ -13,6 +13,8 @@ import {
   imageTaskState,
   inspectPublishImage,
   normalizePublishResult,
+  shortenCoverTitle,
+  coverImagePrompt,
   publishImageConfig,
   publishImageCredentialRef,
   publishImageRequest,
@@ -193,7 +195,8 @@ test('normalizePublishResult clips, de-duplicates tags and rejects incomplete ou
   const normalized = normalizePublishResult(packagingResult())
   assert.deepEqual(normalized.content.tags, ['发布', '工作流', '闸门'])
   assert.equal(normalized.content.title, '发布必须有闸门')
-  assert.equal(normalized.prompts.negative, '水印、二维码、小字')
+  // 2026-10-10 起提示词按固定句式重写，negative 不再往下传。
+  assert.equal(normalized.prompts.negative, '')
 
   assert.equal(normalizePublishResult(packagingResult({ tags: ['a', 'a', '##b'] })).content.tags.join(','), 'a,b')
   assert.equal(normalizePublishResult(packagingResult({ tags: Array.from({ length: 20 }, (_, index) => `tag${index}`) })).content.tags.length, 10)
@@ -624,7 +627,10 @@ test('regenerateCover reuses a hand-edited prompt for one direction and keeps th
   assert.deepEqual(packaging.content.tags, ['人工'])
   assert.equal(packaging.prompts.landscape, '手改后的横屏提示词')
   assert.equal(packaging.prompts.negative, '手改负面')
-  assert.equal(packaging.prompts.portrait, '竖屏封面：人物半身 + 顶部标题。', 'the other direction keeps its prompt')
+  // 另一个方向没被手改，走的是自动生成的固定句式。
+  // 主题取的是 **startPackaging 那一轮**的标题（「发布必须有闸门」）——那轮跑在
+  // 人工改标题之前，而「重新生成封面」只重生图片、不重算文案与提示词主题。
+  assert.equal(packaging.prompts.portrait, '根据提供的主题做一张视频封面，主题：发布必须有闸门')
   assert.match(packaging.covers.landscape.file, /^media\/publish-covers\/landscape-[a-f0-9-]+\.png$/u)
   assert.equal(packaging.covers.landscape.source, 'generated')
   assert.equal(packaging.covers.portrait.file, beforePortrait.file, 'the other direction keeps its frozen cover')
@@ -686,7 +692,8 @@ test('updatePackaging rewrites only the human-editable content fields', async (t
   const fresh = await store.get(currentAgent, { projectId: project.id })
   assert.equal(fresh.artifacts.packaging.data.mode, 'manual-update')
   assert.deepEqual(fresh.artifacts.packaging.data.content.tags, ['人工', '审核'])
-  assert.equal(fresh.artifacts.packaging.data.prompts.landscape, '横屏封面：深色背景 + 白色标题字。')
+  // 人工编辑保存：提示词按固定句式生成，但用户改过的内容必须原样留住。
+  assert.match(fresh.artifacts.packaging.data.prompts.landscape, /^根据提供的主题做一张视频封面，主题：/u)
 
   await assert.rejects(
     host.updatePackaging(currentAgent, { projectId: project.id, expectedRevision: fresh.revision, content: { title: '无标签', copy: '文案', description: '描述', tags: [] } }),
@@ -930,8 +937,10 @@ test('the portrait cover is generated at 3:4 so nothing important falls outside 
   // 尺寸改由一个 size 变量决定（自定义渠道要复用它），但取值必须没变。
   assert.match(source, /const size = kind === 'landscape' \? '1280\*720' : '1080\*1440'/u)
   const prompt = buildPublishPrompt({ project: { title: '测试', artifacts: {} } })
-  assert.match(prompt, /竖屏 3:4/u, 'the packaging agent is told to compose for 3:4')
-  assert.match(prompt, /竖屏 3:4 比横版更高更窄/u, 'the portrait layout must differ from the landscape one')
+  // 2026-10-10 起提示词简化成固定句式，不再指导构图——3:4 这件事由 size 参数
+  // 落实（1080*1440），不需要在提示词里再说一遍。这里守住句式本身。
+  assert.match(prompt, /根据提供的主题做一张视频封面，主题：<短标题>/u)
+  assert.doesNotMatch(prompt, /竖屏 3:4 比横版更高更窄/u, '构图规则已从提示词移除')
 })
 
 test('a busy title zone is reported instead of silently stacking text over artwork', async () => {
@@ -983,26 +992,19 @@ test('the headline wraps at punctuation instead of orphaning a trailing characte
   const strip = (value) => [...String(value)].filter((ch) => ch.trim() !== '').join('')
   assert.equal(strip(lines.join('')), strip('苹果收紧 Mac 磁盘权限，你的 AI 工具还能跑吗'), 'wrapping must not drop characters')
 })
-test('the cover prompt asks the image model to write the headline as the visual subject', async () => {
-  // 2026-10-08 实测推翻了旧方案：本机 Qwen-Image 直接写中文标题零乱码，横竖两版都
-  // 一次成功。旧提示词把文字、人物、纵深全禁掉（「不要任何文字」「纯图形、无真人面孔」
-  // 「极简」），产出的是正确但没人会点的抽象符号图。现在标题就是画面主体。
+test('the cover prompt is one fixed sentence with no styling instructions', async () => {
+  // 2026-10-10 用户简化：此前十条硬性规则（风格/场景/人物/蓝调时刻/标题字号/
+  // 倾斜角度/橙色强调…）让模型自由发挥，结果每张封面长得都不一样，规则越多越
+  // 容易跑偏。实测 tt-image-2.5 本身对中文标题的渲染已经很好，不需要用提示词
+  // 反复约束它——现在只给固定句式 + 一个主题，画面交给模型自己的审美。
   const source = await readFile(new URL('../spoken-video-publish.mjs', import.meta.url), 'utf8')
-  assert.match(source, /【封面生图提示词的硬性要求】/u)
-  // 不再禁止文字 —— 反而点名要哪几行。
-  assert.match(source, /标题就是画面主体/u)
-  assert.match(source, /标题文字\*\*必须与本条视频的真实标题完全一致\*\*/u)
-  assert.match(source, /超粗黑体（小标题体）/u)
-  assert.match(source, /微微倾斜约 -4 度/u)
-  assert.match(source, /高饱和亮橙色单独强调/u)
-  // 场景要具象、要有人物、要电影感光影，而不是抽象符号。
-  assert.match(source, /必须有人物/u)
-  assert.match(source, /具象可辨/u)
-  assert.match(source, /蓝调时刻/u)
-  // 旧的三条禁令必须消失。
-  assert.ok(!source.includes('不要出现任何文字、字母、数字、标点'), 'the no-text rule is gone')
-  assert.ok(!source.includes('纯图形封面（不出现真人面孔）'), 'the no-people rule is gone')
-  assert.ok(!source.includes('必须真的留空'), 'the reserved-title-band rule is gone')
+  assert.match(source, /根据提供的主题做一张视频封面，主题：/u, '固定句式必须逐字保留')
+  // 旧的十条规则整体消失——它们是「每张封面不一样」的根源。
+  for (const gone of ['【封面生图提示词的硬性要求】', '标题就是画面主体', '蓝调时刻', '微微倾斜约 -4 度', '高饱和亮橙色单独强调', '必须有人物', '具象可辨']) {
+    assert.equal(source.includes(gone), false, `旧规则「${gone}」应已移除`)
+  }
+  // 而「不许写文字」那类禁令更不能回来——模型写中文标题零乱码正是我们要的。
+  assert.ok(!source.includes('不要出现任何文字、字母、数字、标点'), 'the no-text rule must stay gone')
 })
 
 test('the cover host inspects the title instead of stamping over it', async () => {
@@ -1205,3 +1207,60 @@ test('a service-side rejection is not disguised as an unreachable service', asyn
   const between = source.slice(rejectedMarker, source.indexOf('等待超过 5 分钟'))
   assert.equal(between.includes('已计费'), false, '拒绝分支不得出现计费提醒——参数被拒时并未扣费')
 });
+
+/* ------------------------- 封面提示词：固定句式 + 标题优化 ------------------------- */
+
+test('the cover prompt is the fixed sentence with only the topic filled in', () => {
+  // 2026-10-10 用户要求：提示词固定成「根据提供的主题做一张视频封面，主题：<短标题>」。
+  // 逐字照写，不加任何修饰——此前十条自由发挥的规则让每张封面长得都不一样。
+  assert.equal(coverImagePrompt('AI 大模型价格战'), '根据提供的主题做一张视频封面，主题：AI 大模型价格战')
+  const prompt = buildPublishPrompt({ project: { title: 'x', artifacts: {} } })
+  assert.match(prompt, /根据提供的主题做一张视频封面，主题：<短标题>/u, '给 Agent 的句式模板必须逐字一致')
+  assert.match(prompt, /不超过 20 个字/u, '要告诉 Agent 短标题的长度上限')
+})
+
+test('a title within the limit is passed through untouched', () => {
+  // 短标题本来就合格时不要改写——模型擅自「优化」会让封面文字与视频标题对不上，
+  // 用户一眼就能看出不对。
+  assert.equal(shortenCoverTitle('AI 大模型价格战'), 'AI 大模型价格战')
+  assert.equal(shortenCoverTitle('短'), '短')
+  assert.equal(shortenCoverTitle(''), '')
+})
+
+test('a long title keeps the subject and the number, not the first N characters', () => {
+  // 「美英军机连夜调动、中东打仗：明年你的跨境运费和时效，就看这两条线」
+  // 按字数截前 20 字会丢掉主体「美英军机」，画面就不知道该画什么。
+  const first = shortenCoverTitle('美英军机连夜调动、中东打仗：明年你的跨境运费和时效，就看这两条线')
+  assert.match(first, /美英/u, '主体词必须留下——封面要靠它决定画什么')
+  assert.ok([...first].length <= 20, `超出上限：${[...first].length} 字`)
+
+  // 「千万别再用这个方法做短视频了，效率提升 10 倍，团队都在用」
+  // 真正的信息点是「效率提升 10 倍」，不是开头的祈使句。
+  const second = shortenCoverTitle('千万别再用这个方法做短视频了，效率提升 10 倍，团队都在用')
+  assert.match(second, /10\s*倍/u, '带数字的结果句才是钩子，必须选中')
+  assert.doesNotMatch(second, /千万别/u, '开头的祈使句是铺垫，不该占封面')
+  assert.ok([...second].length <= 20)
+})
+
+test('shortening never invents punctuation and always respects the cap', () => {
+  const long = '这是一个没有任何标点符号的超长标题需要被强制截断处理掉多余的字'
+  const cut = shortenCoverTitle(long)
+  assert.ok([...cut].length <= 21, `截断结果过长：${[...cut].length}`)
+  assert.ok(cut.endsWith('…'), '句子内部的硬截断要标出省略，否则读者以为是完整标题')
+})
+
+test('the publish result carries the fixed prompt, not whatever the agent wrote', () => {
+  // Agent 总爱在提示词里加修饰词；句式既然是固定的，就不该指望模型听话。
+  const result = normalizePublishResult({
+    title: 'AI 大模型价格战开始了',
+    copy: 'c', description: 'd', tags: ['a', 'b'],
+    landscapePrompt: '一幅极具视觉冲击力的商业海报，8K 超清，戏剧性光影…',
+    portraitPrompt: '同样一堆修饰词',
+    negativePrompt: '不要模糊、不要畸变',
+  })
+  const expected = `根据提供的主题做一张视频封面，主题：${result.coverTitle}`
+  assert.equal(result.prompts.landscape, expected)
+  assert.equal(result.prompts.portrait, expected, '横竖用同一个短标题——两个视觉主体会让画面失焦')
+  assert.equal(result.prompts.negative, '', '固定句式里没有「不要什么」，negative 不再往下传')
+  assert.match(result.coverTitle, /^AI 大模型价格战/u)
+})

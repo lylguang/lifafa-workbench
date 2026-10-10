@@ -18,6 +18,7 @@ import {
   CUSTOM_IMAGE_PRESET,
   customOpenAiImageRequest,
   customOpenAiImageUrl,
+  coverImagePrompt,
   PUBLISH_IMAGE_PROVIDERS,
   PUBLISH_PACKAGE_SCHEMA,
   publishImageConfig,
@@ -425,14 +426,31 @@ export class SpokenVideoPublishHost {
         onDshStarted: (run) => this.#recordTaskDshStarted(root, taskId, run),
         onDshEvent: (event) => this.#recordTaskDshEvent(root, taskId, event),
       }))
-      await this.#mutateTask(root, taskId, (item) => { item.result = generated; executionEvent(item, '发布文案与封面提示词已生成', { actor: 'DSH' }) })
+      // 用户手改过的提示词要保住。
+      //
+      // 固定句式只在「从没被人工编辑过」时套用——否则「重新生成发布信息」会把
+      // 用户在发布页手写的提示词悄悄换掉，而他完全不知情（2026-10-10 实测踩到：
+      // 手改的横屏提示词被固定句式覆盖）。
+      //
+      // 判据是与**本轮生成的固定句式**不同。不能拿上一轮的句式去比：上一轮存的
+      // 正是那个句式，拿它比会得出「没手改」的相反结论（第一版就是这么写错的，
+      // 判据恒为假，手改内容照被覆盖）。
+      const previous = detail.artifacts?.packaging?.data?.prompts || {}
+      const fixed = coverImagePrompt(generated.coverTitle)
+      const prompts = { ...generated.prompts }
+      for (const kind of ['landscape', 'portrait']) {
+        if (previous[kind] && previous[kind] !== fixed) prompts[kind] = previous[kind]
+      }
+      const result = { ...generated, prompts }
+
+      await this.#mutateTask(root, taskId, (item) => { item.result = result; executionEvent(item, '发布文案与封面提示词已生成', { actor: 'DSH' }) })
       const covers = { landscape: null, portrait: null }
       const coverErrors = { landscape: null, portrait: null }
       if (task.imageProvider) {
         await this.#mutateTask(root, taskId, (item) => { item.phase = 'covers' })
         await Promise.all(['landscape', 'portrait'].map(async (kind) => {
           try {
-            covers[kind] = await this.#generateCover(agent, task, kind, generated.prompts[kind], generated.prompts.negative)
+            covers[kind] = await this.#generateCover(agent, task, kind, result.prompts[kind], result.prompts.negative)
             await this.#mutateTask(root, taskId, (item) => { item.result = { ...generated, covers: { ...(item.result?.covers || {}), [kind]: covers[kind] } }; executionEvent(item, `${kind === 'landscape' ? '横版' : '竖版'}封面已生成`, { actor: '封面生图服务', detail: covers[kind] }) })
           }
           catch (error) { coverErrors[kind] = error instanceof Error ? error.message : String(error); await this.#mutateTask(root, taskId, (item) => { executionEvent(item, `${kind === 'landscape' ? '横版' : '竖版'}封面生成失败`, { actor: '封面生图服务', status: 'error', detail: coverErrors[kind] }) }) }
@@ -442,9 +460,9 @@ export class SpokenVideoPublishHost {
       if (current.revision !== task.expectedRevision) fail('SPOKEN_VIDEO_REVISION_CONFLICT', '项目已更新，旧版本发布任务已取消。')
       const committed = await this.projectsStore.commitProduced(agent, {
         projectId: task.projectId, expectedRevision: task.expectedRevision, stage: 'packaging', idempotencyKey: `publish-${task.id}`, source: 'spoken-video/publish-agent',
-        payload: { mode: 'agent', taskId: task.id, ...generated, covers, imageProvider: task.imageProvider, coverErrors, generatedAt: new Date().toISOString() },
+        payload: { mode: 'agent', taskId: task.id, ...result, covers, imageProvider: task.imageProvider, coverErrors, generatedAt: new Date().toISOString() },
       })
-      await this.#mutateTask(root, taskId, (item) => { item.status = 'succeeded'; item.phase = 'ready'; item.completedAt = new Date().toISOString(); item.coverErrors = coverErrors; item.result = { ...generated, covers, coverErrors }; item.resultRevision = committed.project.revision })
+      await this.#mutateTask(root, taskId, (item) => { item.status = 'succeeded'; item.phase = 'ready'; item.completedAt = new Date().toISOString(); item.coverErrors = coverErrors; item.result = { ...result, covers, coverErrors }; item.resultRevision = committed.project.revision })
     } catch (error) {
       await this.#mutateTask(root, taskId, (item) => { item.status = 'failed'; item.phase = 'failed'; item.error = error instanceof Error ? error.message : String(error); item.completedAt = new Date().toISOString() }).catch(() => {})
     }

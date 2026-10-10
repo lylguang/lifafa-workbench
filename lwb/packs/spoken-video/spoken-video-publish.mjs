@@ -150,6 +150,72 @@ export function publishImageConfig(environment = process.env) {
   }
 }
 
+/**
+ * 把视频标题压成适合印在封面上的短句。
+ *
+ * 2026-10-10 用户要求：封面提示词固定成「根据提供的主题做一张视频封面，主题：<短标题>」，
+ * 所以这里只需要产出那个「短标题」本身。
+ *
+ * 为什么不直接用原标题：信息流缩略图很小，字数一多就必然缩小字号，而标题缩小
+ * 就失去「一眼看清」的意义。20 字是个实测下来比较稳的上限——两行、每行十来个字，
+ * 仍然能占据画面主体。
+ *
+ * 纯字符串处理，不调模型：省一次调用，也避免模型把标题改写成与视频标题不一致的
+ * 说法（封面文字与视频标题对不上，用户一眼就能看出不对）。
+ */
+export function shortenCoverTitle(title, { maxLength = 20 } = {}) {
+  const raw = String(title || '').trim()
+  if (!raw) return ''
+  if ([...raw].length <= maxLength) return raw
+
+  // 超过上限时挑一句，而不是从头硬砍。
+  //
+  // 中文短视频标题的钩子经常在中段：「千万别再用这个方法做短视频了，效率提升
+  // 10 倍，团队都在用」——按字数截前 20 字会得到「千万别再用这个方法做短视频了，
+  // 效率提升」，信息点（10 倍）被砍掉，钩子（别再用）又太套路。
+  // 而「效率提升 10 倍」才是真正让人点进去的那句。
+  //
+  // 打分规则很朴素：句子越长信息量越大，带数字的更值钱（具体数字比形容词有说服力），
+  // 含结果/对比意味的词再加权。取分最高的那些句子，拼到字数上限为止。
+  const parts = raw.split(/[，,。.；;！!？?、：:]/u).map((part) => part.trim()).filter(Boolean)
+  if (parts.length > 1) {
+    // 打分只用来**选第一句**（封面只能承载一个视觉主体，多个主体会让画面失焦）。
+    // 长度不参与打分，否则最长的句子必然胜出——「明年你的跨境运费和时效，就看
+    // 这两条线」比「美英军机连夜调动」长，于是胜出，可它丢了主体，画面就不知道
+    // 该画什么。
+    const scored = parts.map((part, index) => {
+      const hasNumber = /\d/u.test(part) ? 3 : 0
+      const hasHook = /(提升|翻倍|增长|省下|降低|超过|倍|万|亿|免费|必看|揭秘|真相|居然|竟然)/u.test(part) ? 3 : 0
+      return { part, index, score: hasNumber + hasHook }
+    }).sort((left, right) => right.score - left.score || left.index - right.index)
+
+    const picked = []
+    let used = 0
+    for (const { part } of scored) {
+      const cost = [...part].length + (picked.length ? 1 : 0)
+      if (used + cost > maxLength) continue
+      picked.push(part)
+      used += cost
+    }
+    if (picked.length) {
+      // 按原文顺序读回去——挑选是为了选内容，语序仍要跟原标题一致。
+      return parts.filter((part) => picked.includes(part)).join('，')
+    }
+  }
+
+  // 没有可分句的（整句就是很长）：在空格或连接词处断开，读起来比硬砍自然。
+  const head = [...raw].slice(0, maxLength).join('')
+  const lastSpace = Math.max(head.lastIndexOf(' '), head.lastIndexOf('·'), head.lastIndexOf('：'))
+  if (lastSpace >= Math.floor(maxLength * 0.5)) return head.slice(0, lastSpace)
+  // 刻意不加分句号：封面标题带标点会显得像残句。
+  return `${head}…`
+}
+
+/** 封面生图提示词的固定句式。短标题由标题优化那一步给出。 */
+export function coverImagePrompt(shortTitle) {
+  return `根据提供的主题做一张视频封面，主题：${shortTitle}`
+}
+
 export function buildPublishPrompt({ project }) {
   const topic = project?.artifacts?.topic?.data || {}
   const script = project?.artifacts?.script?.data?.body || ''
@@ -158,26 +224,22 @@ export function buildPublishPrompt({ project }) {
   return [
     '你是短视频发布包装 Agent。根据已冻结的账号定位、稿件、成片规格和质检结论，生成可供人工确认的发布资料。',
     '标题要准确、有信息量，不得编造稿件之外的事实；视频文案适合随视频发布；描述用于平台详情；标签输出 3-10 个，不带 #。',
-    '同时分别编写横屏 16:9 与竖屏 3:4 封面生图提示词。',
-    // 封面分工：**AI 直接在图上写中文标题**。
+    // 封面提示词：**固定句式，只填主题**。
     //
-    // 2026-10-08 实测推翻了旧结论：本机 Qwen-Image（20B）写汉字完全正确、零乱码，
-    // 横竖两版都一次成功。所以不再需要「底图留空 + 程序叠字」那套——那样产出的封面
-    // 是「正确但没人会点」的：把文字、人物、纵深全禁掉，只剩抽象符号和图标。
+    // 2026-10-10 用户简化：此前十条规则（风格/场景/人物/色调/标题样式/分行…）让
+    // 模型自由发挥，结果每张封面长得都不一样，而且规则越多越容易跑偏。实测
+    // tt-image-2.5 本身对中文标题的渲染已经很好（零乱码、关键词可着色），不需要
+    // 用提示词去反复约束它。
     //
-    // 现在的要求是把标题当**视觉主体**来写：巨大、倾斜、有描边、关键词着色，
-    // 配实景摄影感的场景。信息流缩略图里「一眼看清讲什么」比画面精美重要得多。
-    '【封面生图提示词的硬性要求】',
-    '1. 风格：高品质商业海报封面，实景摄影质感，戏剧化的电影级光影。不要扁平图标风、不要极简示意图、不要抽象符号堆砌。',
-    '2. 场景要**具象可辨**：用真实世界里能认出主题的实物与场景（如港口货柜与货轮、仓库货架、工厂车间、办公室与电脑屏、后市交易屏幕等），而不是箭头、柱状图、地球轮廓这类抽象图形。',
-    '3. **必须有人物**：出现一到两位专业人士的侧后方身影或背影（商务人士、工程师、店主皆可），面部不可见或被背对，用来传递「正在处理这件事」的代入视角。人物要低调，不抢标题。',
-    '4. 时间与色调：优先傍晚或夜间的**蓝调时刻**，深靛蓝主调配橙色暖色点缀（货柜、灯光、霓虹招牌等），形成互补色对比与纵深，不要灰白平光的平淡日光。',
-    '5. **标题就是画面主体**：在画面上部（横屏左上、竖屏上半部）叠加超大号中文标题，占据画面显著面积，不要小字。',
-    '6. 标题样式：超粗黑体（小标题体），字面纯白，带 6 像素左右深色硬描边加柔和投影，形成立体 pops 效果；整体**微微倾斜约 -4 度**，有手写海报的随性感，**不要端正平铺**。',
-    '7. 标题必须**分两行**：第一行是较短的铺垫（含一个英文缩写或专有名词，如 WTO），第二行是**字号最大、最醒目**的核心悬念句。把关键词（如 WTO、GPT、AI）用高饱和亮橙色单独强调，其余文字白色，形成主次分明的视觉层级。',
-    '8. 标题文字**必须与本条视频的真实标题完全一致**，逐字照写，不得改写、缩写或编造；字形必须清晰正确、不能出现错字乱码或扭曲。',
-    '9. 标题之外不要再出现任何其他文字、字母、数字、水印或二维码。',
-    '10. 竖屏 3:4 比横版更高更窄：标题占画面上半部约 45%-50%，场景元素集中在下半部（集装箱、桌面、人物背影），不要沿用横版的左右分栏构图。',
+    // 现在只给一句固定前缀 + 一个主题，画面怎么画交给模型自己的审美——这反而
+    // 更稳，也让人一眼看懂提示词在说什么。
+    '【封面生图提示词】',
+    '固定句式，逐字照写，只把 <短标题> 替换成本条视频的封面短标题：',
+    '根据提供的主题做一张视频封面，主题：<短标题>',
+    '<短标题> 要求：不超过 20 个字；保留视频标题里的核心专有名词与数字（如 WTO、GPT、AI、50%）；',
+    '不要写成完整句子、不要加标点结尾、不要出现「视频」「封面」这类词。',
+    '横屏与竖屏用同一个短标题。',
+    '不要输出 negativePrompt（留空即可）。',
     '只返回 schema 要求的结构化结果，不输出 Markdown 或额外说明。',
     `项目标题：${project?.title || topic.title || '未命名'}`,
     `账号快照：${JSON.stringify(topic.account || null)}`,
@@ -193,14 +255,27 @@ export function normalizePublishResult(value) {
   const description = clipped(value?.description, 1000)
   const landscape = clipped(value?.landscapePrompt, 3000)
   const portrait = clipped(value?.portraitPrompt, 3000)
-  const negative = clipped(value?.negativePrompt, 1000)
+  // negativePrompt 不再往下传：固定句式里没有「不要什么」，画面交给模型自己的审美。
+  // Agent 仍然需要返回非空值（下面校验），但它的内容不再影响出图。
   const tags = [...new Set((Array.isArray(value?.tags) ? value.tags : [])
     .map((tag) => clipped(tag, 30).replace(/^#+/u, '').trim())
     .filter(Boolean))].slice(0, 10)
   if (!title || !copy || !description || !landscape || !portrait || tags.length < 1) {
     fail('SPOKEN_VIDEO_PUBLISH_AGENT_INVALID', '发布 Agent 返回的标题、文案、描述、标签或封面提示词不完整。')
   }
-  return { content: { title, copy, description, tags }, prompts: { landscape, portrait, negative } }
+  // 提示词不再直接采用 Agent 返回的内容——统一按固定句式重写，主题取封面短标题。
+  //
+  // 为什么不信任 Agent 给的提示词：句式是固定的，而模型总会「顺手」加些修饰
+  // （风格词、场景描述）。2026-10-10 用户要求逐字照写成「根据提供的主题做一张
+  // 视频封面，主题：<短标题>」，那就在这里保证它一定成立，而不是指望模型听话。
+  // Agent 返回的两版提示词仍要求非空（上面已校验），作为「它确实思考过封面」的信号。
+  const shortTitle = shortenCoverTitle(title)
+  const prompt = coverImagePrompt(shortTitle)
+  return {
+    content: { title, copy, description, tags },
+    prompts: { landscape: prompt, portrait: prompt, negative: '' },
+    coverTitle: shortTitle,
+  }
 }
 
 export function publishImageRequest({ model, prompt, negativePrompt, size }) {
