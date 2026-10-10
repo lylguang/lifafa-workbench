@@ -496,10 +496,18 @@ export class SpokenVideoPublishHost {
             signal: AbortSignal.timeout(300_000),
           }, label)
         } catch (error) {
-          // 超时或断连**不代表失败**：任务通常仍在服务端跑完并正常计费（按次计费的
-          // 服务商如此，萝卜Ai 的接入文档明确写了这点）。所以文案里必须说清
-          // 「别重复提交」，否则用户会点「重新生成」而付两次钱。
+          // 三类要分开，不能一律说「不可访问」：
+          //   - 超时/断连：按次计费下任务多半仍在服务端跑完并已结算，**必须**劝用户
+          //     别重复提交，否则付两次钱；
+          //   - 服务端明确报错（4xx，如「模型不存在」「Key 无效」）：根本没扣费，
+          //     重试是安全的，而且必须让人看见原始原因——套上「不可访问」会把
+          //     「模型名写错了」说成「网络不通」，用户会往错的方向查
+          //     （2026-10-10 实测踩过：模型名是测试残留的假值，报错却是「不可访问」，
+          //     而 Key 与地址其实都对）。
           const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError'
+          const code = typeof error?.code === 'string' ? error.code : ''
+          const rejected = code === 'SPOKEN_VIDEO_PUBLISH_SERVICE_FAILED'
+          if (rejected) throw error
           fail('SPOKEN_VIDEO_PUBLISH_SERVICE_UNREACHABLE', timedOut
             ? `${label}等待超过 5 分钟仍未返回。该服务是同步出图，任务多半仍在服务端继续并已计费——请先到服务商后台确认，不要重复提交（会重复付费）。`
             : `${label}不可访问：${error instanceof Error ? error.message : String(error)}。若这是超时或断连，任务可能仍在服务端继续并已计费，请先到服务商后台确认。`)

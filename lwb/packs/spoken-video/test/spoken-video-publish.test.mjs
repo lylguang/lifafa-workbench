@@ -1178,3 +1178,30 @@ test('the synchronous OpenAI endpoint is given a long timeout and a no-retry war
   assert.match(source, /不要重复提交/u, '超时要劝用户别重试——按次计费下重复提交等于付两次钱')
   assert.match(source, /已计费/u, '还要点明「可能已经计费」这件事')
 })
+
+test('a service-side rejection is not disguised as an unreachable service', async () => {
+  // 2026-10-10 实测踩到：自定义生图返回「模型 'x' 不存在」，却被套成
+  // 「不可访问：…不可访问」并补一句「可能已计费」。两个问题叠在一起：
+  // 真正的错因（模型名写错）被网络故障的措辞盖住，人会往错方向查；而
+  // 「可能已计费」纯属误导——参数被拒时服务端根本没扣费，反而让人不敢重试。
+  //
+  // 这段逻辑在私有的 #generateCover 里，端到端要真的打一次付费 API，所以用
+  // 源码契约守住。
+  const source = await readFile(new URL('../spoken-video-publish-host.mjs', import.meta.url), 'utf8')
+  assert.match(
+    source,
+    /if \(rejected\) throw error/u,
+    '服务端明确拒绝（4xx）时必须原样抛出，让真实原因透出来，而不是进「不可访问」分支',
+  )
+  assert.match(
+    source,
+    /不要重复提交/u,
+    '超时文案仍要劝用户别重试——按次计费下这一条是对的，不能一起删掉',
+  )
+  // 「已计费」只属于超时分支；参数被拒时提「可能已计费」是误导。
+  const timeoutBranch = source.slice(source.indexOf('等待超过 5 分钟'))
+  const rejectedMarker = source.indexOf('if (rejected) throw error')
+  assert.ok(rejectedMarker > 0 && timeoutBranch.includes('已计费'), '计费提醒只出现在超时分支')
+  const between = source.slice(rejectedMarker, source.indexOf('等待超过 5 分钟'))
+  assert.equal(between.includes('已计费'), false, '拒绝分支不得出现计费提醒——参数被拒时并未扣费')
+});
