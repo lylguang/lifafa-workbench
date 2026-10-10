@@ -380,6 +380,20 @@ window.__ModuleLoader__.load({
       .sv-fail-sig { overflow:hidden; margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); text-overflow:ellipsis; white-space:nowrap; }
       .sv-fail-remedy { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); line-height:1.55; }
       .sv-fail-recent { display:grid; gap:6px; }
+      /* 页面内弹窗：与提示音同源同人不在电脑前时的兜底。 */
+      .sv-toast-stack { position:fixed; z-index:60; right:18px; bottom:18px; display:grid; gap:9px; width:min(380px,calc(100vw - 36px)); }
+      .sv-toast { display:flex; flex-wrap:wrap; gap:10px; justify-content:space-between; padding:12px 13px; border:1px solid var(--lwb-line); border-left-width:4px; border-radius:9px; background:var(--lwb-surface); box-shadow:0 10px 30px rgba(16,32,48,.18); animation:sv-toast-in .22s ease-out; }
+      @keyframes sv-toast-in { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:none; } }
+      .sv-toast[data-level="success"] { border-left-color:#1f9d6b; }
+      .sv-toast[data-level="warn"] { border-left-color:#d69a1c; }
+      .sv-toast[data-level="error"] { border-left-color:#d1443f; }
+      .sv-toast-main { display:grid; gap:3px; min-width:0; flex:1 1 190px; }
+      .sv-toast-title { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-md,15px); font-weight:700; line-height:1.45; }
+      .sv-toast-detail { margin:0; overflow:hidden; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); line-height:1.5; text-overflow:ellipsis; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; }
+      .sv-toast-remedy { margin:0; color:#486277; font-size:var(--lwb-text-sm,13px); line-height:1.55; }
+      .sv-toast-actions { display:flex; flex:none; gap:6px; align-self:flex-end; }
+      body[data-ds-dark-theme] .sv-toast { background:#1b2530; }
+      body[data-ds-dark-theme] .sv-toast-remedy { color:#a9c9e6; }
       .sv-as-adv { display:grid; gap:10px; padding:11px; border:1px dashed var(--lwb-line); border-radius:9px; }
       .sv-as-adv-title { margin:0; color:var(--sv-accent-ink); font-size:var(--lwb-text-base,14px); font-weight:700; }
       .sv-as-grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:9px; }
@@ -3146,7 +3160,9 @@ window.__ModuleLoader__.load({
       '娓娓道来，适合故事讲述。',
       '热情推荐，适合好物种草。',
     ];
-    const AS_RUN_STATUS = { running: '执行中', completed: '已完成', partial: '部分完成', failed: '失败', missed: '已错过', cancelled: '已停止' };
+    // interrupted/blocked 是断点续跑与开工前体检引入的终态，界面上必须能认出来：
+    // interrupted 的下一步是「等它自动续跑」，blocked 的下一步是「去改配置」。
+    const AS_RUN_STATUS = { running: '执行中', completed: '已完成', partial: '部分完成', failed: '失败', missed: '已错过', cancelled: '已停止', interrupted: '已中断·待续跑', blocked: '体检未过·未启动' };
     const AS_ITEM_STATUS = { running: '进行中', completed: '已完成', failed: '失败', cancelled: '已停止' };
     const AS_STAGE_TONE = { done: 'sv-stage', failed: 'sv-status-error', running: '', skipped: 'sv-status-disabled' };
     function emptyScheduleForm() {
@@ -3446,21 +3462,94 @@ window.__ModuleLoader__.load({
       // 上一次已知的轮次状态，用来发现「刚刚落到终态」这件事。放在 ref 而不是
       // state：它是轮询的副产物，不该触发重渲染。
       const seenRunStates = React.useRef(new Map());
+      // 本页打开的时刻。用来区分「我开着的时候跑完了」与「我打开前就跑完了」——
+      // 后者不该弹窗，否则每次打开页面都会被几十条历史轮次刷屏。
+      const openedAt = React.useRef(Date.now());
       const [queue, setQueue] = React.useState({ active: 0, waiting: [], recent: [] });
       const [failures, setFailures] = React.useState(null);
-      const [notifyOpen, setNotifyOpen] = React.useState(false);
+      const [toasts, setToasts] = React.useState([]);
 
       /**
-       * 提示音与桌面通知的唯一触发点。
+       * 弹窗自动消失。定时任务的完成提示没人会盯着看，占着屏幕不走反而碍事；
+       * 12 秒足够读完一行标题加一句修法。需要留着细看时点「查看」进历史抽屉。
        *
-       * 放在轮询结果上比对，而不是由后端推事件：这一页本来就在按 1.5 秒轮询，
-       * 复用它零成本；代价是页面不在时听不见——那条由 alerts.json 加独立的
-       * Windows 计划任务兜底，不依赖浏览器。
-       *
-       * 只在「首次见到某条已是终态的轮次」时响，避免刷新页面就响一片；同一条
-       * 终态被后续轮询反复读到也只响一次。
+       * 每条带自己的到期时刻，而不是「数组变化就重置一个定时器」——后者会让
+       * 先到的弹窗被后到的不断顺延，四条提示能挂上好几分钟才消第一条。
        */
-      const announceRuns = React.useCallback((nextRuns) => {
+      const dismissToast = React.useCallback((id) => {
+        setToasts((current) => current.filter((toast) => toast.id !== id));
+      }, []);
+
+      React.useEffect(() => {
+        if (!toasts.length) return undefined;
+        const now = Date.now();
+        const expired = toasts.filter((toast) => toast.expiresAt <= now).map((toast) => toast.id);
+        if (expired.length) {
+          setToasts((current) => current.filter((toast) => !expired.includes(toast.id)));
+          return undefined;
+        }
+        // 只等最近一条到期的那段：更早的会在下一轮被上面那段清掉。
+        const wait = Math.max(200, Math.min(...toasts.map((toast) => toast.expiresAt)) - now);
+        const timer = setTimeout(() => {
+          setToasts((current) => {
+            const at = Date.now();
+            const kept = current.filter((toast) => toast.expiresAt > at);
+            // 全部过期时清空，避免留下永远不再触发的空数组。
+            return kept.length === current.length ? current : kept;
+          });
+        }, wait);
+        return () => clearTimeout(timer);
+      }, [toasts]);
+
+    /**
+     * 页面内弹窗提示（toast）。
+     *
+     * 与提示音是同一套事件的两条通道：声音解决「人不在电脑前也该知道」，弹窗解决
+     * 「人在电脑前但盯别的标签页」。两者各自都有失效场景——浏览器静音策略会让网页
+     * 声音在后台标签页被节流，而弹窗在页面没打开时根本不存在——所以必须都有。
+     *
+     * 只做展示，不承担任何控制职责：点「查看」只是把对应轮次的历史抽屉拉起来，
+     * 关掉弹窗不会影响已经在跑的轮次。
+     */
+    const TOAST_LIMIT = 4;
+    const TOAST_TTL_MS = 12_000;
+    function ToastStack({ toasts, onDismiss, onOpenRun }) {
+      if (!toasts.length) return null;
+      return h('div', { className: 'sv-toast-stack', role: 'status', 'aria-live': 'polite' },
+        toasts.map((toast) => h('div', {
+          key: toast.id,
+          className: 'sv-toast',
+          'data-level': toast.level,
+        },
+          h('div', { className: 'sv-toast-main' },
+            h('p', { className: 'sv-toast-title' }, toast.title),
+            toast.detail ? h('p', { className: 'sv-toast-detail' }, toast.detail) : null,
+            toast.remedy ? h('p', { className: 'sv-toast-remedy' }, toast.remedy) : null),
+          h('div', { className: 'sv-toast-actions' },
+            toast.runId && onOpenRun
+              ? h('button', {
+                type: 'button', className: 'lwb-plain-button',
+                onClick: () => { onOpenRun(toast.runId); onDismiss(toast.id); },
+              }, '查看')
+              : null,
+            h('button', {
+              type: 'button', className: 'lwb-plain-button',
+              'aria-label': `关闭提示：${toast.title}`,
+              onClick: () => onDismiss(toast.id),
+            }, '关闭')))));
+    }
+
+    /**
+     * 提示音与桌面通知的唯一触发点。
+     *
+     * 放在轮询结果上比对，而不是由后端推事件：这一页本来就在按 1.5 秒轮询，
+     * 复用它零成本；代价是页面不在时听不见——那条由 alerts.json 加独立的
+     * Windows 计划任务兜底，不依赖浏览器。
+     *
+     * 只在「首次见到某条已是终态的轮次」时弹/响，避免刷新页面就响一片；同一条
+     * 终态被后续轮询反复读到也只报一次。
+     */
+      const announceRuns = React.useCallback((nextRuns, nameOf) => {
         const seen = seenRunStates.current;
         for (const run of nextRuns || []) {
           if (!run || !run.id) continue;
@@ -3468,20 +3557,34 @@ window.__ModuleLoader__.load({
           const terminal = ['completed', 'partial', 'failed', 'blocked', 'interrupted'].includes(status);
           if (!terminal) { seen.set(run.id, status); continue; }
           if (seen.get(run.id) === status) continue;
-          const firstSight = !seen.has(run.id);
           seen.set(run.id, status);
-          if (!firstSight) continue;
+          // 只播报「这一页开着的时候刚发生」的那些。
+          //
+          // 分页历史里有几十条终态轮次，页面一打开就全弹一遍等于用旧消息刷屏，
+          // 用户会立刻学会忽略这个弹窗——那它对真正的新失败也就失效了。判据是
+          // 结束时间落在「本页首次取数」之后：早于它的都是打开前就发生的事。
+          const finishedAt = Date.parse(run.completedAt || run.triggeredAt || '') || 0;
+          if (finishedAt && finishedAt < openedAt.current) continue;
           const minutes = run.elapsedMs ? `，耗时 ${Math.round(run.elapsedMs / 60000)} 分钟` : '';
-          if (status === 'completed') {
-            notify.playOnce(run.id, 'success');
-            notify.notifyDesktop(`自动化已完成${minutes}`, run.message || '');
-          } else if (status === 'partial') {
-            notify.playOnce(run.id, 'attention');
-            notify.notifyDesktop(`自动化部分完成${minutes}`, run.message || '');
-          } else {
-            notify.playOnce(run.id, 'error');
-            notify.notifyDesktop('自动化失败', run.remedy || run.error || run.message || '');
-          }
+          const name = nameOf ? nameOf(run) : '';
+          const label = name ? `${name}：自动化` : '自动化';
+          let level = 'error';
+          let title = `${label}失败`;
+          let voice = 'error';
+          if (status === 'completed') { level = 'success'; voice = 'success'; title = `${label}已完成${minutes}`; }
+          else if (status === 'partial') { level = 'warn'; voice = 'attention'; title = `${label}部分完成${minutes}`; }
+          else if (status === 'blocked') { title = `${label}未启动（开工前体检未通过）`; }
+          else if (status === 'interrupted') { level = 'warn'; voice = 'attention'; title = `${label}被中断，将自动续跑`; }
+          // 弹窗正文优先用修复建议：失败时「该做什么」比「错在哪」更有用。
+          const detail = run.remedy || run.message || run.error || '';
+          notify.playOnce(run.id, voice);
+          notify.notifyDesktop(title, detail);
+          setToasts((current) => [{
+            id: run.id, level, title, detail,
+            runId: run.id, scheduleId: run.scheduleId,
+            // 到期时刻在入栈时定死：渲染阶段算会因重渲染而漂移。
+            expiresAt: Date.now() + TOAST_TTL_MS,
+          }, ...current].slice(0, TOAST_LIMIT));
         }
         // 长时间开着页面不能让这张表无限增长。
         if (seen.size > 200) {
@@ -3494,10 +3597,32 @@ window.__ModuleLoader__.load({
         try {
           const next = await remote(packId, 'listSchedules');
           setSchedules(next.schedules || []); setRuns(next.runs || []); setError(null);
-          announceRuns(next.runs);
           return next;
         } catch (cause) { fail(cause.message); return { schedules: [], runs: [] }; }
-      }, [packId, setError, fail, announceRuns]);
+      }, [packId, setError, fail]);
+
+      /**
+       * 终态播报必须读完整历史，不能挂在 loadSchedules 上。
+       *
+       * listSchedules 是任务卡专用的轻量视图：只返回「最新一条 + 所有 running」
+       * （见 host 的注释，那是刻意的性能优化）。而一次轮询里结束的任务往往不止
+       * 一条——多任务排队后更常见——所以挂在它上面会漏掉除最新一条外的所有终态。
+       *
+       * 走分页历史接口：它的返回字段是 `items`（不是 `runs`），并且每行已经带好
+       * `scheduleName`，省掉一次任务表联查。
+       */
+      React.useEffect(() => {
+        if (!packId) return undefined;
+        let active = true;
+        const check = async () => {
+          const page = await remote(packId, 'listScheduleRuns', { limit: 20 }).catch(() => null);
+          if (!active || !page) return;
+          announceRuns(page.items || [], (run) => run.scheduleName || '');
+        };
+        void check();
+        const timer = setInterval(() => { if (active) void check(); }, 4000);
+        return () => { active = false; clearInterval(timer); };
+      }, [packId, announceRuns]);
 
       // 队列与故障档案：低频刷新即可，它们的变化节奏远慢于轮次列表本身。
       React.useEffect(() => {
@@ -3934,7 +4059,7 @@ window.__ModuleLoader__.load({
         { label: '启用中任务', value: String(enabledSchedules.length), tone: 'brand' },
         { label: '下次执行', value: nextRun ? formatTime(nextRun) : '—', tone: nextRun ? 'green' : undefined },
         { label: '最近产出', value: lastRun ? `${lastRun.itemCount || 0} 条` : '—', tone: lastRun?.itemCount ? 'brand' : undefined },
-        { label: '最近结果', value: lastRun ? AS_RUN_STATUS[lastRun.status] || lastRun.status : '—', tone: lastRun ? (['failed', 'cancelled'].includes(lastRun.status) ? 'red' : lastRun.status === 'partial' ? 'orange' : lastRun.status === 'missed' ? undefined : 'green') : undefined },
+        { label: '最近结果', value: lastRun ? AS_RUN_STATUS[lastRun.status] || lastRun.status : '—', tone: lastRun ? (['failed', 'cancelled', 'blocked'].includes(lastRun.status) ? 'red' : ['partial', 'interrupted'].includes(lastRun.status) ? 'orange' : lastRun.status === 'missed' ? undefined : 'green') : undefined },
       ] });
 
       const signalsDrawerNode = signalDrawer && h(React.Fragment, null,
@@ -3953,7 +4078,20 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sv-drawer-scroll' }, h(ScheduleRunHistory, { key: historySchedule.id, packId, scheduleId: historySchedule.id, refreshKey: historyRefresh, onPublish: goPublish, onContinue: continueItem })),
         ),
       );
+      // 弹窗上的「查看」：直接跳到那条轮次所属任务的执行记录抽屉，并刷新一次，
+      // 这样用户点进来看到的就是刚结束那轮，而不是抽屉里停留的旧读数。
+      const openRunFromToast = React.useCallback((toast) => {
+        const schedule = schedules.find((item) => item.id === toast.scheduleId);
+        if (!schedule) return;
+        setHistorySchedule(schedule);
+        setHistoryRefresh((value) => value + 1);
+      }, [schedules]);
+
       return h(PackFrame, { packId, openConversation, title: '内容安排', accent: 'sky', copy: '按账号配置定时任务：到点后由主机侧调度器无人值守跑完「选题 → 写稿 → 配音字幕 → 成片质检 → 发布资料 → 投递到平台」。深度决定跑到哪一步；选到成片及以后会自动确认 AI 稿件。选「投递到平台」时，默认停在平台的发布按钮前等你确认；只有把投递方式设为「自动提交」，才会无人值守直接发布。', hero, introActions: h(NotifyToggle) },
+        h(ToastStack, { toasts, onDismiss: dismissToast, onOpenRun: (toastId) => {
+          const toast = toasts.find((item) => item.id === toastId);
+          if (toast) openRunFromToast(toast);
+        } }),
         h(Notice, { error }),
         h(QueueBar, { queue }),
         h(FailurePanel, { failures, busy, onResume: resumeInterrupted }),

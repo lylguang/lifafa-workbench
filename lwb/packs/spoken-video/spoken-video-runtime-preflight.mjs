@@ -17,8 +17,25 @@
  */
 
 const DEFAULT_BRIDGE = 'http://127.0.0.1:8199'
-const DEFAULT_MEMORY_FLOOR_MIB = 12_000
-const DEFAULT_DISK_FLOOR_BYTES = 20 * 1024 * 1024 * 1024
+/** 本地模型合成（Local LongCat）实测要 23 GB 空闲，12 GB 是保守下限。 */
+const LOCAL_MODEL_MEMORY_FLOOR_MIB = 12_000
+/** 走云端配音时不需要大内存，只挡真正会崩的极端情况。 */
+const CLOUD_MEMORY_FLOOR_MIB = 2_000
+
+/**
+ * 本轮是否真的要跑本地模型。
+ *
+ * 桥接的 `local` 通道才是本地合成；`scitiger` 走的是桥接的云端转发（小米/百炼），
+ * 内存占用和纯云端没区别。把这两者混为一谈会让预检在不该拦的时候拦下整轮
+ * ——2026-10-09 实测：机器空闲 9.8 GB，走云端配音却被 12 GB 门槛挡成 blocked。
+ */
+function providerUsesLocalModel(mediaStatus) {
+  const provider = mediaStatus?.connection?.provider || ''
+  const bridge = mediaStatus?.connection?.providers?.[provider]?.bridge
+  if (bridge === 'local' || bridge === 'localLongCat') return true
+  // 媒体 host 自己会声明本地通道；拿不到就按「不需要本地模型」处理。
+  return mediaStatus?.localModelRequired === true
+}
 
 function bridgeBase() {
   const configured = process.env.LWB_MEDIA_BRIDGE_URL
@@ -193,23 +210,41 @@ export async function runPreflight({ steps = [], mediaStatus = null, publishStat
   }
 
   // --- 封面生图服务 ---
-  if (wantsCover && publishStatus) {
-    checks.push(publishStatus.configured === true
-      ? ok('image.credential', '封面生图服务', '已配置')
-      : blocked('image.credential', '封面生图服务', '未配置封面生图服务', '请到「连接配置」配置生图服务；未配置时封面需人工上传，任务仍会继续', 'media-connection'))
+  // 只在「确实读到状态且明确未配置」时才阻断。读不到状态（服务未加载、探测失败）
+  // 只能提示不能拦：把「不知道」当成「坏了」，会在依赖探测本身出问题的环境里
+  // 拦下所有轮次——那比不做预检更糟。真正的缺失会在 packaging 阶段以
+  // coverState=none 呈现，提示人工上传，流程仍然走完。
+  if (wantsCover) {
+    if (!publishStatus) {
+      checks.push(degraded('image.credential', '封面生图服务', '未能读取封面生图服务状态（不阻断）', '如需自动生成封面，请确认「发布与账号管理」能力包已加载并完成配置'))
+    } else {
+      checks.push(publishStatus.configured === true
+        ? ok('image.credential', '封面生图服务', '已配置')
+        : blocked('image.credential', '封面生图服务', '未配置封面生图服务', '请到「连接配置」配置生图服务；未配置时封面需人工上传，任务仍会继续', 'media-connection'))
+    }
   }
 
   // --- 内存 ---
+  // 门槛按「本轮真的要跑本地推理」来定，不是无条件卡。
+  //
+  // 2026-10-09 踩过：机器上空闲 9.8 GB，被 12 GB 的固定门槛拦成 blocked，可这一轮
+  // 走的是云端配音，根本不需要那 23 GB。本地合成才是内存大户（Local LongCat
+  // 实测要 23 GB 空闲），所以只有它才配得上这道门槛。
+  const localModelNeeded = wantsMedia && providerUsesLocalModel(mediaStatus)
   let freeMiB = null
   try {
     const { freemem } = await import('node:os')
     freeMiB = Math.round(freemem() / 1024 / 1024)
   } catch { /* 拿不到就跳过这项检查 */ }
   if (freeMiB !== null) {
-    const floor = Number(process.env.LWB_PREFLIGHT_MEMORY_FLOOR_MIB) || DEFAULT_MEMORY_FLOOR_MIB
+    const floor = Number(process.env.LWB_PREFLIGHT_MEMORY_FLOOR_MIB)
+      || (localModelNeeded ? LOCAL_MODEL_MEMORY_FLOOR_MIB : CLOUD_MEMORY_FLOOR_MIB)
     checks.push(freeMiB >= floor
       ? ok('resources.memory', '可用内存', `${freeMiB} MB`)
-      : blocked('resources.memory', '可用内存', `仅剩 ${freeMiB} MB，低于 ${floor} MB 门槛`, '请关闭占内存的程序（浏览器、剪辑软件等）后重试；本地配音需要约 23 GB 空闲内存'))
+      : blocked('resources.memory', '可用内存', `仅剩 ${freeMiB} MB，低于 ${floor} MB 门槛${localModelNeeded ? '（本地模型合成需要较大内存）' : ''}`,
+        localModelNeeded
+          ? '请关闭占内存的程序（浏览器、剪辑软件等）后重试；本地合成需要约 23 GB 空闲内存，或把配音服务切换到云端。'
+          : '请关闭占内存的程序后重试。'))
   }
 
   // --- 磁盘 ---

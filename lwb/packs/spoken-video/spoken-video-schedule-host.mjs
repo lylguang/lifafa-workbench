@@ -420,7 +420,9 @@ export class SpokenVideoScheduleHost {
   async listScheduleRuns(agent, request = {}) {
     const { scheduleId, accountId, general = false, status = 'all', trigger = 'all', query = '', offset = 0, limit = 8 } = request
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) invalid('执行记录分页参数无效。')
-    if (!['all', 'running', 'completed', 'partial', 'failed', 'missed', 'cancelled'].includes(status)) invalid('执行状态筛选无效。')
+    // `interrupted` 与 `blocked` 是断点续跑与开工前体检引入的终态，筛选器必须能
+    // 单独选中它们——「哪些轮次被中断了、哪些被体检拦下了」正是要回答的问题。
+    if (!['all', 'running', 'completed', 'partial', 'failed', 'missed', 'cancelled', 'interrupted', 'blocked'].includes(status)) invalid('执行状态筛选无效。')
     if (!['all', 'manual', 'automatic'].includes(trigger)) invalid('触发方式筛选无效。')
     if (typeof query !== 'string' || query.length > 160) invalid('搜索内容不能超过 160 字。')
     const paths = await this.paths(agent)
@@ -438,6 +440,9 @@ export class SpokenVideoScheduleHost {
       id: run.id, scheduleId: run.scheduleId, scheduleName: schedules.get(run.scheduleId)?.name || '已删除任务',
       status: run.status, trigger: run.trigger, triggeredAt: run.triggeredAt, completedAt: run.completedAt,
       elapsedMs: run.elapsedMs, step: run.step, depthLabel: DEPTH_LABEL[run.depth] || null, message: run.message, error: run.error,
+      // 分类与修复建议必须跟着走：失败弹窗的正文优先显示 remedy（"该做什么"），
+      // 而不是笼统的 error。少了这两列，弹窗就退化成一句没用的报错。
+      remedy: run.remedy, failureCategory: run.failureCategory, resumeCount: run.resumeCount,
       itemCount: run.items.length, completedCount: run.items.filter((item) => item.status === 'completed').length,
       items: await Promise.all(run.items.map(async (item) => {
         let project = null

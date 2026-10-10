@@ -429,6 +429,10 @@ async function setup(t, options = {}) {
     workspacePath: cwd,
     pollIntervalMs: 2,
     tickIntervalMs: 60_000,
+    // 开工前预检会去探 127.0.0.1:8199（真桥接）。测试必须离线，所以默认注入
+    // 一个「一切正常」的引擎钩子——预检本身的拦截行为由下面那条专门用例覆盖，
+    // 不能因为这里绕开就把它漏掉。
+    ensureLocalEngine: async () => ({ ok: true, reason: 'stub' }),
     ...options.hostOptions,
   })
   // A round left in flight (the neverDone fixtures poll until their deadline)
@@ -1110,6 +1114,67 @@ test('tick skips a task that is not due on the current weekday', async (t) => {
   assert.equal(data.schedules[0].lastRunAt, null)
 })
 
+test('a blocked preflight stops the round before it burns a whole pipeline', async (t) => {
+  // 2026-10 审计的核心修复：密钥在流水线第 5 个阶段才暴露，前面 20 多分钟已经
+  // 烧光。预检把它提到第一秒——但只有在「真拦下来」时才成立，所以这里断言的
+  // 是「一阶段都没跑」。
+  //
+  // 用磁盘当触发项而不是内存：内存门槛按「是否走本地模型」浮动（本机实测云端
+  // 配音只要 2 GB 门槛），在跑测试的这台机器上不能稳定触发；磁盘门槛是固定值，
+  // 把它抬到 absurd 高就能确定触发，不依赖机器实时状态。
+  const originalFloor = process.env.LWB_PREFLIGHT_DISK_FLOOR_GB
+  process.env.LWB_PREFLIGHT_DISK_FLOOR_GB = '999999'
+  t.after(() => {
+    if (originalFloor === undefined) delete process.env.LWB_PREFLIGHT_DISK_FLOOR_GB
+    else process.env.LWB_PREFLIGHT_DISK_FLOOR_GB = originalFloor
+  })
+
+  const { host, currentAgent, fake, file } = await setup(t)
+  fake.hosts.media.status = async () => ({
+    connection: { provider: 'bailian', providers: { bailian: { configured: true } } },
+    ttsConfigured: true,
+    renderers: { remotion: true },
+  })
+
+  const created = await createTask(host, currentAgent, { depth: 'packaging' })
+  host.now = () => new Date('2026-09-11T21:00:05').toISOString()
+  await host.tick()
+
+  const data = JSON.parse(await readFile(file, 'utf8'))
+  const blockedRun = data.runs.find((run) => run.status === 'blocked')
+  assert.ok(blockedRun, '体检未过会记一条 blocked，而不是让轮次跑起来再失败')
+  assert.equal(data.runs.filter((run) => run.status === 'running').length, 0, '没有任何轮次进入执行态')
+  assert.equal(fake.calls.some((call) => call.name === 'startTopicGeneration'), false, '一阶段都没跑，几十分钟的流水线没有被烧掉')
+  assert.equal(fake.calls.some((call) => call.name === 'startVoiceover'), false)
+  assert.match(blockedRun.error, /磁盘|内存|引擎|桥接|凭据/u, 'blocked 记录要说清是哪一项挡住了')
+  assert.ok(blockedRun.remedy, '并给出可执行的修法')
+  assert.equal(blockedRun.failureCategory, 'preflight.blocked')
+})
+
+test('cloud voiceover is not blocked by the local-model memory floor', async (t) => {
+  // 回归锁：2026-10-09 机器空闲 9.8 GB，走云端配音却被 12 GB 的本地模型门槛
+  // 挡成 blocked。12 GB 只属于本地合成；云端通道不该被它卡住。
+  const original = process.env.LWB_PREFLIGHT_MEMORY_FLOOR_MIB
+  process.env.LWB_PREFLIGHT_MEMORY_FLOOR_MIB = '1'
+  t.after(() => {
+    if (original === undefined) delete process.env.LWB_PREFLIGHT_MEMORY_FLOOR_MIB
+    else process.env.LWB_PREFLIGHT_MEMORY_FLOOR_MIB = original
+  })
+  const { runPreflight } = await import('../spoken-video-runtime-preflight.mjs')
+  const report = await runPreflight({
+    steps: ['voiceover'],
+    mediaStatus: {
+      connection: { provider: 'bailian', providers: { bailian: { configured: true } } },
+      ttsConfigured: true,
+    },
+    publishStatus: null,
+    ensureEngine: async () => ({ ok: true }),
+  })
+  const memory = report.checks.find((item) => item.key === 'resources.memory')
+  assert.ok(memory, '内存项总会被检查')
+  assert.notEqual(memory.status, 'blocked', '云端配音不被内存门槛拦下')
+})
+
 test('a slot missed while the host was down is logged once and never backfilled', async (t) => {
   const { host, currentAgent, fake, file } = await setup(t, { neverDone: 'topic' })
   const created = await createTask(host, currentAgent, { days: [5], time: '21:00' })
@@ -1266,12 +1331,9 @@ test('a record that stays unreadable fails fast instead of burning the whole sta
   const created = await createTask(host, currentAgent, { depth: 'script' })
   const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
 
-  let run = null
-  for (let attempt = 0; attempt < 500; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    run = (await host.scheduleRun(currentAgent, { runId })).run
-    if (run.status !== 'running') break
-  }
+  // 用公共的 settleRun 而不是就地轮询：全量测试并行跑时机器资源争抢，
+  // 就地那个 5 秒上限偶尔会不够（2026-10-09 出现过一次 flake）。
+  const run = await settleRun(host, currentAgent, runId)
   assert.equal(run.status, 'failed', 'a permanently unreadable record ends the round')
   assert.match(run.error, /仍读不到/u, 'the error names the real cause instead of timing out silently')
   assert.match(run.error, /重新执行本轮/u, 'and tells the operator what to do next')
