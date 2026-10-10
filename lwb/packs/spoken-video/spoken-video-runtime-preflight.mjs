@@ -37,8 +37,8 @@ function providerUsesLocalModel(mediaStatus) {
   return mediaStatus?.localModelRequired === true
 }
 
-function bridgeBase() {
-  const configured = process.env.LWB_MEDIA_BRIDGE_URL
+function bridgeBase(environment = process.env) {
+  const configured = environment.LWB_MEDIA_BRIDGE_URL
   return (configured || DEFAULT_BRIDGE).replace(/\/+$/u, '')
 }
 
@@ -89,8 +89,8 @@ function degraded(key, label, detail, remedy) {
  * 等待预算与 bridge.mjs 的 ENGINE_BOOT_TIMEOUT_MS（180 秒）保持一致：本地模型
  * 从冷启动到可用真的要那么久，早于它判定失败只会造成反复拉起的假象。
  */
-export async function ensureLocalEngine(kind, { reason = '', timeoutMs = 180_000 } = {}) {
-  const base = bridgeBase()
+export async function ensureLocalEngine(kind, { reason = '', timeoutMs = 180_000, environment = process.env } = {}) {
+  const base = bridgeBase(environment)
   const before = await probeJson(`${base}/admin/engines`)
   if (!before.ok) return { ok: false, reason: 'bridge-unreachable', detail: before.error }
   const engine = (before.body?.engines || []).find((item) => item.kind === kind)
@@ -136,14 +136,14 @@ async function waitForEngine(base, kind, timeoutMs) {
  * @param {Function} [options.ensureEngine] 注入的引擎拉起函数，测试用
  * @returns {Promise<{ok: boolean, checks: object[], blockers: object[], repaired: string[]}>}
  */
-export async function runPreflight({ steps = [], mediaStatus = null, publishStatus = null, ensureEngine = ensureLocalEngine } = {}) {
+export async function runPreflight({ steps = [], mediaStatus = null, publishStatus = null, ensureEngine = ensureLocalEngine, environment = process.env } = {}) {
   const checks = []
   const repaired = []
   const wantsMedia = steps.some((step) => ['voiceover', 'subtitles', 'video'].includes(step))
   const wantsCover = steps.includes('packaging') || steps.includes('publish')
 
   // --- 本地桥接 ---
-  const base = bridgeBase()
+  const base = bridgeBase(environment)
   const health = await probeJson(`${base}/health`)
   if (!health.ok) {
     // 桥接不在：这是唯一「先修再判」的一项，保活脚本会在 5 分钟内拉起它，
@@ -178,7 +178,7 @@ export async function runPreflight({ steps = [], mediaStatus = null, publishStat
       }
       // 引擎不在线：本地配音确实需要它，所以尝试拉起；封面引擎起不来时，
       // packaging 会记 coverState=none 并提示人工上传，不阻断整轮。
-      const fixed = await ensureEngine(kind).catch(() => ({ ok: false }))
+      const fixed = await ensureEngine(kind, { environment }).catch(() => ({ ok: false }))
       if (fixed.ok) {
         repaired.push(`engine.${kind}`)
         checks.push(ok(`engine.${kind}`, label, `已自动拉起（${fixed.reason}）`))
@@ -237,7 +237,7 @@ export async function runPreflight({ steps = [], mediaStatus = null, publishStat
     freeMiB = Math.round(freemem() / 1024 / 1024)
   } catch { /* 拿不到就跳过这项检查 */ }
   if (freeMiB !== null) {
-    const floor = Number(process.env.LWB_PREFLIGHT_MEMORY_FLOOR_MIB)
+    const floor = Number(environment.LWB_PREFLIGHT_MEMORY_FLOOR_MIB)
       || (localModelNeeded ? LOCAL_MODEL_MEMORY_FLOOR_MIB : CLOUD_MEMORY_FLOOR_MIB)
     checks.push(freeMiB >= floor
       ? ok('resources.memory', '可用内存', `${freeMiB} MB`)
@@ -250,9 +250,9 @@ export async function runPreflight({ steps = [], mediaStatus = null, publishStat
   // --- 磁盘 ---
   try {
     const { statfs } = await import('node:fs/promises')
-    const stats = await statfs(process.env.LWB_PREFLIGHT_DISK_PATH || process.cwd())
+    const stats = await statfs(environment.LWB_PREFLIGHT_DISK_PATH || process.cwd())
     const freeBytes = Number(stats.bavail) * Number(stats.bsize)
-    const floor = Number(process.env.LWB_PREFLIGHT_DISK_FLOOR_GB || 20) * 1024 ** 3
+    const floor = Number(environment.LWB_PREFLIGHT_DISK_FLOOR_GB || 20) * 1024 ** 3
     checks.push(freeBytes >= floor
       ? ok('resources.disk', '工作盘剩余空间', `${(freeBytes / 1024 ** 3).toFixed(1)} GB`)
       : blocked('resources.disk', '工作盘剩余空间', `仅剩 ${(freeBytes / 1024 ** 3).toFixed(1)} GB，低于 ${floor / 1024 ** 3} GB 门槛`, '渲染中间产物与成片需要较大空间，请清理磁盘后重试'))

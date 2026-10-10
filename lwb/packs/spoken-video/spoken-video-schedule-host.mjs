@@ -163,6 +163,7 @@ export class SpokenVideoScheduleHost {
     presetId = 'standard',
     pollIntervalMs = SCHEDULE_POLL_INTERVAL_MS,
     tickIntervalMs = TICK_INTERVAL_MS,
+    environment = process.env,
     now = stamp,
     ensureLocalEngine = null,
   } = {}) {
@@ -194,6 +195,9 @@ export class SpokenVideoScheduleHost {
     this.pollIntervalMs = Number.isSafeInteger(pollIntervalMs) && pollIntervalMs >= 1 ? pollIntervalMs : SCHEDULE_POLL_INTERVAL_MS
     this.tickIntervalMs = Number.isSafeInteger(tickIntervalMs) && tickIntervalMs >= 1 ? tickIntervalMs : TICK_INTERVAL_MS
     this.now = now
+    // 预检门槛（内存/磁盘/桥接地址）按实例读取，不直接摸全局——否则测试里
+    // 临时抬高一个门槛会连带影响同一进程内其它测试的预检结果。
+    this.environment = environment
     // 引擎自愈钩子。默认走 runtime-preflight 的真实实现；测试注入假实现，
     // 这样「预检拉起引擎」这条路径可以离线验证。
     this.ensureLocalEngine = ensureLocalEngine || ((kind, options) => ensureEngineDefault(kind, options))
@@ -1718,6 +1722,28 @@ export class SpokenVideoScheduleHost {
     })
     if (!entry) return
 
+    // 预检与真正启动都放到 detached 里跑。
+    //
+    // 2026-10-10 实测踩到：预检要对桥接与引擎做 HTTP 探测（单个探测 4 秒超时），
+    // 之前它被 await 在 tick 的同步路径上——于是「tick 必须在 1 秒内返回」这个
+    // 约定被打破（实测 3 秒）。更糟的是它拖慢的不只是这一轮，而是**整个调度器**：
+    // 30 秒一次的 tick 里只要有一次预检慢，下一个槽位就整体延后。
+    //
+    // 队列条已经标了 active（上面写过盘），所以即便这里 detached，界面上也立刻
+    // 看到「执行中 1 项」，不会以为它没跑。
+    void this.background(this.#launchQueued(paths, entry).catch((error) => {
+      const message = reasonOf(error)
+      return this.#settleQueue(paths, entry.id, 'failed', message)
+        .then(() => this.#alert(paths, { level: 'error', title: `${entry.scheduleName || '内容安排'}：任务未能启动`, detail: message }))
+    }))
+  }
+
+  /**
+   * 从队列取到一个条目后的真正启动流程：体检 → 开工。
+   *
+   * 独立于 tick 是为了让调度器永不被预检的网络探测拖住（见调用处注释）。
+   */
+  async #launchQueued(paths, entry) {
     try {
       const data = await this.serial(paths.workspace, () => this.readFile(paths))
       const schedule = data.schedules.find((candidate) => candidate.id === entry.scheduleId)
@@ -1730,6 +1756,7 @@ export class SpokenVideoScheduleHost {
         mediaStatus: await this.media.status().catch(() => null),
         publishStatus: await this.publish.status().catch(() => null),
         ensureEngine: this.ensureLocalEngine,
+        environment: this.environment,
       })
       if (!report.ok) {
         await this.#recordBlocked(paths, schedule, report)
@@ -1743,20 +1770,21 @@ export class SpokenVideoScheduleHost {
       })
       await this.#settleQueue(paths, entry.id, 'done', started.runId)
     } catch (error) {
-      // 只有「真的跑不起来」才留在队列里等下一轮；启动成功后的失败由 #execute 负责。
+      // 只有「真的跑不起来」才记失败；启动成功后的失败由 #execute 负责。
       const message = reasonOf(error)
+      const failure = classifyFailure({ error })
       await this.#settleQueue(paths, entry.id, 'failed', message)
       await this.#appendFailure(paths, {
         scheduleId: entry.scheduleId,
         scheduleName: entry.scheduleName,
         step: null,
         attempt: 1,
-        category: classifyFailure({ error }).category,
-        categoryLabel: CATEGORY_LABEL[classifyFailure({ error }).category] || '',
-        signature: classifyFailure({ error }).signature,
+        category: failure.category,
+        categoryLabel: CATEGORY_LABEL[failure.category] || '',
+        signature: failure.signature,
         message: String(error?.message || error),
-        remedy: classifyFailure({ error }).remedy,
-        remedyTarget: classifyFailure({ error }).remedyTarget,
+        remedy: failure.remedy,
+        remedyTarget: failure.remedyTarget,
       }).catch(() => {})
       await this.#alert(paths, { level: 'error', title: `${entry.scheduleName || '内容安排'}：任务未能启动`, detail: message })
     }
@@ -1890,6 +1918,7 @@ export class SpokenVideoScheduleHost {
       publishStatus: await this.publish.status().catch(() => null),
       // 只读报告不主动拉引擎：180 秒的等待不该发生在「打开表单」这种场合。
       ensureEngine: async () => ({ ok: false, detail: '体检报告模式不自动拉起引擎' }),
+      environment: this.environment,
     })
     return { ...report, summary: preflightSummary(report) }
   }

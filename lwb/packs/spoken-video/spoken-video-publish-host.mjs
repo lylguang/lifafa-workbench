@@ -15,6 +15,7 @@ import {
   normalizePublishResult,
   parseCustomImageConfig,
   customImageDefaults,
+  CUSTOM_IMAGE_PRESET,
   customOpenAiImageRequest,
   customOpenAiImageUrl,
   PUBLISH_IMAGE_PROVIDERS,
@@ -223,6 +224,8 @@ export class SpokenVideoPublishHost {
       providers,
       // 界面用它预填自定义表单；没配过时给一份能直接改的默认值，而不是空表单。
       customDefaults: customImageDefaults(this.environment),
+      // 把预设的展示信息一并给前端：填 Key 前用户就该知道这是哪家服务、怎么用。
+      customPreset: { ...CUSTOM_IMAGE_PRESET },
       custom: settings.customImage || null,
       imageMaxBytes: MAX_IMAGE_BYTES,
     }
@@ -482,16 +485,32 @@ export class SpokenVideoPublishHost {
         : {}
       const submitUrl = `${custom.baseUrl}${custom.path || ''}`
       if (custom.protocol === 'openai') {
-        result = await this.#json(submitUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders },
-          body: JSON.stringify(customOpenAiImageRequest({ model: task.imageProvider.model, prompt, size, negativePrompt })),
-        }, label)
+        try {
+          result = await this.#json(submitUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders },
+            body: JSON.stringify(customOpenAiImageRequest({ model: task.imageProvider.model, prompt, size, negativePrompt })),
+            // OpenAI 兼容的生图端点是**同步阻塞**的：请求一直挂到出图为止，常见
+            // 1~3 分钟，4K / 高画质更久。不给上限的话 fetch 会无限期挂住，而封面
+            // 生成又在 detached 任务里跑——用户看到的是「进行中」永远不变。
+            signal: AbortSignal.timeout(300_000),
+          }, label)
+        } catch (error) {
+          // 超时或断连**不代表失败**：任务通常仍在服务端跑完并正常计费（按次计费的
+          // 服务商如此，萝卜Ai 的接入文档明确写了这点）。所以文案里必须说清
+          // 「别重复提交」，否则用户会点「重新生成」而付两次钱。
+          const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError'
+          fail('SPOKEN_VIDEO_PUBLISH_SERVICE_UNREACHABLE', timedOut
+            ? `${label}等待超过 5 分钟仍未返回。该服务是同步出图，任务多半仍在服务端继续并已计费——请先到服务商后台确认，不要重复提交（会重复付费）。`
+            : `${label}不可访问：${error instanceof Error ? error.message : String(error)}。若这是超时或断连，任务可能仍在服务端继续并已计费，请先到服务商后台确认。`)
+        }
       } else {
         result = await this.#json(submitUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders },
           body: JSON.stringify(publishImageRequest({ model: task.imageProvider.model, prompt, negativePrompt, size })),
+          // 异步协议只是提交，应当很快返回；给它 60 秒足够，超出说明服务端有问题。
+          signal: AbortSignal.timeout(60_000),
         }, label)
         const taskId = imageTaskId(result)
         // 通用异步协议的取图地址：优先用服务自己回的，回了相对路径就按 baseUrl 拼。

@@ -90,13 +90,31 @@ export function parseCustomImageConfig(input = {}) {
 }
 
 /** 自定义生图配置的默认值：新配时用它填充表单，而不是留空让人猜。 */
+/**
+ * 自定义生图的表单预填值。
+ *
+ * 默认指向萝卜Ai（TT Image 2.5）：它是少数把 OpenAI 图片协议原样暴露出来的
+ * 服务商——base_url 换成它、填个 Key 就能用，不需要任何适配。选择 OpenAI 官方
+ * 作默认反而更坑：官方 gpt-image 系**不支持 response_format=url**，而现有链路
+ * 正是按 URL 取图再下载的，用官方会卡在这一步。
+ */
+export const CUSTOM_IMAGE_PRESET = Object.freeze({
+  label: '萝卜Ai · TT Image 2.5',
+  baseUrl: 'https://api.lk888.ai/v1',
+  protocol: 'openai',
+  path: '/images/generations',
+  model: 'tt-image-2.5',
+  authHeader: 'bearer',
+  note: 'OpenAI 兼容协议，填 Key 即可用。同步出图，通常 20 秒~2 分钟。',
+})
+
 export function customImageDefaults(environment = process.env) {
   return parseCustomImageConfig({
-    baseUrl: environment.LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_BASE_URL || 'https://api.openai.com/v1',
-    protocol: environment.LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_PROTOCOL || 'openai',
+    baseUrl: environment.LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_BASE_URL || CUSTOM_IMAGE_PRESET.baseUrl,
+    protocol: environment.LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_PROTOCOL || CUSTOM_IMAGE_PRESET.protocol,
     path: environment.LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_PATH || '',
-    model: environment.LWB_SPOKEN_VIDEO_IMAGE_MODEL || PUBLISH_IMAGE_MODEL,
-    authHeader: environment.LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_AUTH_HEADER || 'bearer',
+    model: environment.LWB_SPOKEN_VIDEO_IMAGE_MODEL || CUSTOM_IMAGE_PRESET.model,
+    authHeader: environment.LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_AUTH_HEADER || CUSTOM_IMAGE_PRESET.authHeader,
   })
 }
 

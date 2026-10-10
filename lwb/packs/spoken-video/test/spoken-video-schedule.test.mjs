@@ -429,10 +429,14 @@ async function setup(t, options = {}) {
     workspacePath: cwd,
     pollIntervalMs: 2,
     tickIntervalMs: 60_000,
-    // 开工前预检会去探 127.0.0.1:8199（真桥接）。测试必须离线，所以默认注入
-    // 一个「一切正常」的引擎钩子——预检本身的拦截行为由下面那条专门用例覆盖，
-    // 不能因为这里绕开就把它漏掉。
+    // 开工前预检会探桥接（HTTP）与本地引擎。测试必须完全离线，所以两样都注入桩：
+    //   - ensureLocalEngine：引擎一律「就绪」，不 spawn 任何东西；
+    //   - environment.LWB_MEDIA_BRIDGE_URL：指向 127.0.0.1:1，连接被立刻拒绝
+    //     （毫秒级），而不是等 4 秒超时。此前只桩了引擎、桥接仍在打真实网络，
+    //     单条测试要 3 秒，并发跑时更会互相拖慢——那条「预检拦截」的用例正是
+    //     因此变成随机挂的。预检本身的拦截行为由下面的专门用例覆盖。
     ensureLocalEngine: async () => ({ ok: true, reason: 'stub' }),
+    environment: { LWB_MEDIA_BRIDGE_URL: 'http://127.0.0.1:1', ...(options.hostOptions?.environment || {}) },
     ...options.hostOptions,
   })
   // A round left in flight (the neverDone fixtures poll until their deadline)
@@ -1080,8 +1084,18 @@ test('the scheduler starts due rounds detached and refuses a second one in the s
   // A detached round must not block the tick: this is the defect the old
   // inline await had, where one long pipeline froze every workspace.
   assert.ok(Date.now() - started < 1000, 'tick returned while the round is still running')
-  const data = JSON.parse(await readFile(file, 'utf8'))
-  assert.equal(data.runs.length, 1)
+  // 轮次的启动是 detached 的（见 host 里 #launchQueued 的注释：预检要探测桥接，
+  // await 在 tick 上会把 30 秒一次的调度整体拖慢）。所以这里要等它把 running
+  // 记录写下去，而不是假定 tick 返回时已经写好。
+  // 2000 次与 settleRun 对齐：全量并行跑时机器忙，500 次（约 1 秒）偶尔不够，
+  // 那会让这条测试变成 flake——而它守的正是「detached 仍会启动」这条语义。
+  let data = null
+  for (let attempt = 0; attempt < 2000; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    data = JSON.parse(await readFile(file, 'utf8'))
+    if (data.runs.length) break
+  }
+  assert.equal(data.runs.length, 1, 'detached 的轮次最终仍会启动并落盘')
   assert.equal(data.runs[0].status, 'running')
   assert.equal(data.runs[0].trigger, 'automatic')
 
@@ -1122,14 +1136,13 @@ test('a blocked preflight stops the round before it burns a whole pipeline', asy
   // 用磁盘当触发项而不是内存：内存门槛按「是否走本地模型」浮动（本机实测云端
   // 配音只要 2 GB 门槛），在跑测试的这台机器上不能稳定触发；磁盘门槛是固定值，
   // 把它抬到 absurd 高就能确定触发，不依赖机器实时状态。
-  const originalFloor = process.env.LWB_PREFLIGHT_DISK_FLOOR_GB
-  process.env.LWB_PREFLIGHT_DISK_FLOOR_GB = '999999'
-  t.after(() => {
-    if (originalFloor === undefined) delete process.env.LWB_PREFLIGHT_DISK_FLOOR_GB
-    else process.env.LWB_PREFLIGHT_DISK_FLOOR_GB = originalFloor
+  //
+  // 关键：门槛通过 host 构造参数注入，**不改 process.env**。node:test 在同一
+  // 进程里跑所有测试文件，改全局会让并发的其它测试读到被抬高的门槛——
+  // 表现为「单独跑全过、全量跑随机挂」，而且挂的还不是这一条。
+  const { host, currentAgent, fake, file } = await setup(t, {
+    hostOptions: { environment: { LWB_PREFLIGHT_DISK_FLOOR_GB: '999999' } },
   })
-
-  const { host, currentAgent, fake, file } = await setup(t)
   fake.hosts.media.status = async () => ({
     connection: { provider: 'bailian', providers: { bailian: { configured: true } } },
     ttsConfigured: true,
@@ -1140,7 +1153,14 @@ test('a blocked preflight stops the round before it burns a whole pipeline', asy
   host.now = () => new Date('2026-09-11T21:00:05').toISOString()
   await host.tick()
 
-  const data = JSON.parse(await readFile(file, 'utf8'))
+  // 预检跑在 detached 里（不能拖慢调度器），所以要等它把 blocked 记录写下去。
+  // 等待次数同样对齐 2000，理由见上一处。
+  let data = null
+  for (let attempt = 0; attempt < 2000; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    data = JSON.parse(await readFile(file, 'utf8'))
+    if (data.runs.some((run) => run.status === 'blocked')) break
+  }
   const blockedRun = data.runs.find((run) => run.status === 'blocked')
   assert.ok(blockedRun, '体检未过会记一条 blocked，而不是让轮次跑起来再失败')
   assert.equal(data.runs.filter((run) => run.status === 'running').length, 0, '没有任何轮次进入执行态')
@@ -1154,12 +1174,8 @@ test('a blocked preflight stops the round before it burns a whole pipeline', asy
 test('cloud voiceover is not blocked by the local-model memory floor', async (t) => {
   // 回归锁：2026-10-09 机器空闲 9.8 GB，走云端配音却被 12 GB 的本地模型门槛
   // 挡成 blocked。12 GB 只属于本地合成；云端通道不该被它卡住。
-  const original = process.env.LWB_PREFLIGHT_MEMORY_FLOOR_MIB
-  process.env.LWB_PREFLIGHT_MEMORY_FLOOR_MIB = '1'
-  t.after(() => {
-    if (original === undefined) delete process.env.LWB_PREFLIGHT_MEMORY_FLOOR_MIB
-    else process.env.LWB_PREFLIGHT_MEMORY_FLOOR_MIB = original
-  })
+  //
+  // 门槛同样走注入的 environment，不改全局——理由见上一条测试。
   const { runPreflight } = await import('../spoken-video-runtime-preflight.mjs')
   const report = await runPreflight({
     steps: ['voiceover'],
@@ -1169,6 +1185,7 @@ test('cloud voiceover is not blocked by the local-model memory floor', async (t)
     },
     publishStatus: null,
     ensureEngine: async () => ({ ok: true }),
+    environment: { LWB_PREFLIGHT_MEMORY_FLOOR_MIB: '1' },
   })
   const memory = report.checks.find((item) => item.key === 'resources.memory')
   assert.ok(memory, '内存项总会被检查')

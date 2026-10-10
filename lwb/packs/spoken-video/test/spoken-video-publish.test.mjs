@@ -18,6 +18,7 @@ import {
   publishImageRequest,
   parseCustomImageConfig,
   customImageDefaults,
+  CUSTOM_IMAGE_PRESET,
   customOpenAiImageRequest,
   customOpenAiImageUrl,
   CUSTOM_IMAGE_PROTOCOLS,
@@ -1134,4 +1135,46 @@ test('a custom image service that returns inline base64 still produces a cover',
   // 关键断言：内联 base64 不能再被当成无效地址拒掉。封面最终是否被标题区质检
   // 留下是另一回事（那张测试图是纯色方图，本就该被判掉），与协议无关。
   assert.deepEqual(Object.values(done.coverErrors), [null, null], '两张封面都没有因地址无效而失败')
+})
+
+/* ------------------- OpenAI 兼容生图服务商（萝卜Ai TT Image 2.5） ------------------- */
+
+test('the custom image form defaults to a service that actually speaks the protocol', () => {
+  // 2026-10-10 实测：萝卜Ai（TT Image 2.5）把 OpenAI 图片协议原样暴露出来，
+  // base_url 一换、Key 一填就能用，不需要任何适配。而 OpenAI 官方 gpt-image 系
+  // **不支持 response_format=url**，现有链路正是按 URL 取图再下载的——把它
+  // 当默认会让人一填就卡住。
+  const preset = customImageDefaults({})
+  assert.equal(preset.baseUrl, CUSTOM_IMAGE_PRESET.baseUrl)
+  assert.equal(preset.model, 'tt-image-2.5')
+  assert.equal(preset.protocol, 'openai')
+  assert.equal(preset.authHeader, 'bearer')
+  assert.match(CUSTOM_IMAGE_PRESET.baseUrl, /^https:\/\/.+\/v1$/u, 'base_url 必须带 /v1，否则路径会拼错')
+  assert.ok(CUSTOM_IMAGE_PRESET.note && CUSTOM_IMAGE_PRESET.note.length > 10, '预设要带一句说明，让用户知道怎么用')
+})
+
+test('environment overrides still win over the preset', () => {
+  // 换服务商时不该被预设挡住。
+  const custom = customImageDefaults({
+    LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_BASE_URL: 'https://my-proxy.internal/v1',
+    LWB_SPOKEN_VIDEO_IMAGE_MODEL: 'my-image-model',
+  })
+  assert.equal(custom.baseUrl, 'https://my-proxy.internal/v1')
+  assert.equal(custom.model, 'my-image-model')
+})
+
+test('the synchronous OpenAI endpoint is given a long timeout and a no-retry warning', async () => {
+  // 该端点同步阻塞出图（20 秒~2 分钟，4K/高画质更久）。两个后果：
+  //   1) 不给上限，fetch 无限期挂住，而封面生成在 detached 任务里跑——界面
+  //      永远显示「进行中」，人只能干等；
+  //   2) 超时不代表失败：任务多半在服务端跑完并正常计费，文案必须劝用户别
+  //      重复提交，否则一次超时付两次钱。
+  //
+  // 这两条只能靠源码契约守住：真实等待 5 分钟的测试不现实，而少了 signal
+  // 整个行为是「静默变慢」，别的测试都发现不了。
+  const source = await readFile(new URL('../spoken-video-publish-host.mjs', import.meta.url), 'utf8')
+  assert.match(source, /AbortSignal\.timeout\(300_000\)/u, '同步出图端点必须有 300 秒上限')
+  assert.match(source, /AbortSignal\.timeout\(60_000\)/u, '异步提交端点应给 60 秒')
+  assert.match(source, /不要重复提交/u, '超时要劝用户别重试——按次计费下重复提交等于付两次钱')
+  assert.match(source, /已计费/u, '还要点明「可能已经计费」这件事')
 })
