@@ -22,7 +22,7 @@
     "delivery:build": "node scripts/build-delivery.mjs",
     "test": "npm run pack:link && npm run check && npm run profile:check && npm run pack:profile-check && npm run unit:test",
     "upstream:check": "sh lwb/upgrade/check-upstream.sh",
-    "unit:test": "node --test lwb/pack-sdk/test/*.test.mjs lwb/dsh-bundle/test/pack-*.test.mjs lwb/dsh-bundle/test/client-style-contract.test.mjs lwb/dsh-bundle/test/launcher-temp-redirect.test.mjs lwb/dsh-bundle/test/pack-runtime-links.test.mjs lwb/packs/spoken-video/test/*.test.mjs lwb/packs/benchmark/test/*.test.mjs lwb/packs/whiteboard/test/*.test.mjs lwb/packs/publisher/test/*.test.mjs"
+    "unit:test": "node --test lwb/pack-sdk/test/*.test.mjs lwb/dsh-bundle/test/pack-*.test.mjs lwb/dsh-bundle/test/client-style-contract.test.mjs lwb/dsh-bundle/test/launcher-temp-redirect.test.mjs lwb/dsh-bundle/test/ops-scripts.test.mjs lwb/dsh-bundle/test/pack-runtime-links.test.mjs lwb/packs/spoken-video/test/*.test.mjs lwb/packs/benchmark/test/*.test.mjs lwb/packs/whiteboard/test/*.test.mjs lwb/packs/publisher/test/*.test.mjs"
   },
   "packageManager": "pnpm@11.23.0+sha512.f00082e5b283a199b74e079da28d155c008fe232f44c8a06ea7ddfa014ecf719fc362f790ecc67b28106ddac2afb24c49a9a079159da560b2ce7d1e98efd11af",
   "dependencies": {
