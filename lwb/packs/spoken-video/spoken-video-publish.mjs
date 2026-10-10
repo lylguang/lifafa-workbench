@@ -1,8 +1,22 @@
-export const PUBLISH_IMAGE_PROVIDERS = Object.freeze(['bailian', 'scitiger'])
+export const PUBLISH_IMAGE_PROVIDERS = Object.freeze(['bailian', 'scitiger', 'custom'])
 export const PUBLISH_IMAGE_CREDENTIALS = Object.freeze({
   bailian: 'DASHSCOPE_API_KEY',
   scitiger: 'LWB_SPOKEN_VIDEO_CLOUD_IMAGE_API_KEY',
+  // 自定义云端生图的密钥。与内置渠道一样只存 DSH 私有凭据库，不写进发布资料。
+  custom: 'LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_API_KEY',
 })
+/**
+ * 自定义云端生图的请求/响应协议。
+ *
+ * `openai`：OpenAI 兼容的 /images/generations。自建中转、各家聚合服务都基本照抄了
+ *   这套，所以它是默认值——填一个地址就能用的场景远多于需要异步轮询的场景。
+ * `async-generic`：提交返回任务 id、再轮询取图的异步协议（百炼与 SciTiger 用的就是
+ *   它）。字段名按 SciTiger 那套的常见形态去取，兼容面较广。
+ *
+ * 只做这两种是因为它们覆盖了绝大多数自建与中转服务；真要接一个别的协议，
+ * 更好的做法是在桥接里加一个适配端点，而不是在这里无限加分支。
+ */
+export const CUSTOM_IMAGE_PROTOCOLS = Object.freeze(['openai', 'async-generic'])
 export const PUBLISH_IMAGE_MODEL = 'wan2.7-image'
 export const PUBLISH_PACKAGE_SCHEMA = Object.freeze({
   type: 'object',
@@ -48,6 +62,66 @@ export function publishImageCredentialRef(provider) {
   const normalized = String(provider || '').trim().toLowerCase()
   if (!PUBLISH_IMAGE_PROVIDERS.includes(normalized)) fail('SPOKEN_VIDEO_PUBLISH_INVALID_INPUT', '生图渠道无效。')
   return PUBLISH_IMAGE_CREDENTIALS[normalized]
+}
+
+/**
+ * 解析并校验自定义云端生图的连接设置。
+ *
+ * 刻意不接受路径、查询串和账号密码：这些会被拼进请求地址，出现在日志和错误
+ * 消息里就是凭据泄漏。地址必须是干净的 http(s) 根地址。
+ */
+export function parseCustomImageConfig(input = {}) {
+  const baseUrl = endpoint(input.baseUrl, '自定义生图地址')
+  const protocol = String(input.protocol || 'openai').trim().toLowerCase()
+  if (!CUSTOM_IMAGE_PROTOCOLS.includes(protocol)) {
+    fail('SPOKEN_VIDEO_PUBLISH_CONFIG_INVALID', '自定义生图协议无效，请选择 OpenAI 兼容或通用异步。')
+  }
+  return {
+    provider: 'custom',
+    baseUrl,
+    protocol,
+    // 空路径按协议给默认端点：OpenAI 兼容几乎一定是 /images/generations。
+    path: String(input.path || (protocol === 'openai' ? '/images/generations' : '/api/v1/services/aigc/image-generation/generation')).trim() || null,
+    model: clipped(input.model, 120) || PUBLISH_IMAGE_MODEL,
+    // 密钥形态不是所有服务都要：自建可能不校验，但留空就发不出 Authorization。
+    // 由调用方决定是否填写，这里不强制。
+    authHeader: String(input.authHeader || 'bearer').trim().toLowerCase() || 'bearer',
+  }
+}
+
+/** 自定义生图配置的默认值：新配时用它填充表单，而不是留空让人猜。 */
+export function customImageDefaults(environment = process.env) {
+  return parseCustomImageConfig({
+    baseUrl: environment.LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_BASE_URL || 'https://api.openai.com/v1',
+    protocol: environment.LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_PROTOCOL || 'openai',
+    path: environment.LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_PATH || '',
+    model: environment.LWB_SPOKEN_VIDEO_IMAGE_MODEL || PUBLISH_IMAGE_MODEL,
+    authHeader: environment.LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_AUTH_HEADER || 'bearer',
+  })
+}
+
+/** OpenAI 兼容的生图请求体。 */
+export function customOpenAiImageRequest({ model, prompt, size, negativePrompt }) {
+  return {
+    model: clipped(model, 120) || PUBLISH_IMAGE_MODEL,
+    prompt,
+    n: 1,
+    // OpenAI 只接受 `WIDTHxHEIGHT` 这种写法，不是百炼的 `1280*720`。
+    size: String(size || '1280*720').replace('*', 'x'),
+    ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
+    response_format: 'url',
+  }
+}
+
+/** OpenAI 兼容响应的图片地址。返回 data URL 之外的普通 URL 即可，下载走同一条路。 */
+export function customOpenAiImageUrl(value) {
+  const first = Array.isArray(value?.data) ? value.data[0] : null
+  const candidate = first?.url || first?.b64_json
+  if (typeof candidate !== 'string' || !candidate.trim()) return null
+  // b64_json 是裸 base64，包成 data URL 交给现有的下载/校验链路统一处理。
+  return candidate.startsWith('data:') || /^https?:\/\//iu.test(candidate)
+    ? candidate.trim()
+    : `data:image/png;base64,${candidate.trim()}`
 }
 
 export function publishImageConfig(environment = process.env) {

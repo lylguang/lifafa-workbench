@@ -13,12 +13,24 @@ import {
   imageTaskState,
   inspectPublishImage,
   normalizePublishResult,
+  parseCustomImageConfig,
+  customImageDefaults,
+  customOpenAiImageRequest,
+  customOpenAiImageUrl,
+  PUBLISH_IMAGE_PROVIDERS,
   PUBLISH_PACKAGE_SCHEMA,
   publishImageConfig,
   publishImageCredentialRef,
   publishImageRequest,
   SpokenVideoPublishError,
 } from './spoken-video-publish.mjs'
+
+/** 渠道的人话名，错误提示与界面共用一份，避免两处各写一遍。 */
+const PROVIDER_LABEL = Object.freeze({
+  bailian: '百炼 BYOK',
+  scitiger: 'SciTiger 云端',
+  custom: '自定义云端生图',
+})
 import { appendDshTrace, dshChildStarted, dshTrace, ensureDshTrace, projectDshSessionEvent } from './spoken-video-dsh-trace.mjs'
 import { inspectCoverTitleZone } from './spoken-video-cover-text.mjs'
 
@@ -191,12 +203,16 @@ export class SpokenVideoPublishHost {
 
   async status() {
     const settings = this.connectionSettings?.get?.() || {}
-    const provider = ['bailian', 'scitiger'].includes(settings.provider) ? settings.provider : 'bailian'
+    const provider = PUBLISH_IMAGE_PROVIDERS.includes(settings.provider) ? settings.provider : 'bailian'
     const providers = {
-      bailian: { label: '百炼 BYOK', credential: await this.#credentialStatus('bailian') },
-      scitiger: { label: 'SciTiger 云端', credential: await this.#credentialStatus('scitiger') },
+      bailian: { label: PROVIDER_LABEL.bailian, credential: await this.#credentialStatus('bailian') },
+      scitiger: { label: PROVIDER_LABEL.scitiger, credential: await this.#credentialStatus('scitiger') },
+      // 自定义渠道的「可用」不看密钥：自建服务可能完全不校验，密钥留空也能用。
+      custom: { label: PROVIDER_LABEL.custom, credential: await this.#credentialStatus('custom'), custom: true },
     }
-    const configured = providers[provider].credential.configured === true
+    const configured = provider === 'custom'
+      ? Boolean(settings.customImage?.baseUrl)
+      : providers[provider].credential.configured === true
     return {
       // `enabled` remains as a compatibility alias for existing consumers. A
       // saved credential is now the single source of truth for availability.
@@ -205,6 +221,9 @@ export class SpokenVideoPublishHost {
       provider,
       model: typeof settings.model === 'string' && settings.model.trim() ? settings.model.trim() : publishImageConfig(this.environment).model,
       providers,
+      // 界面用它预填自定义表单；没配过时给一份能直接改的默认值，而不是空表单。
+      customDefaults: customImageDefaults(this.environment),
+      custom: settings.customImage || null,
       imageMaxBytes: MAX_IMAGE_BYTES,
     }
   }
@@ -212,11 +231,23 @@ export class SpokenVideoPublishHost {
   async configureConnection(request) {
     const input = object(request, '生图配置')
     const provider = text(input.provider || 'bailian', '生图渠道', 40).toLowerCase()
+    if (!PUBLISH_IMAGE_PROVIDERS.includes(provider)) fail('SPOKEN_VIDEO_PUBLISH_INVALID_INPUT', '生图渠道无效。')
     const ref = publishImageCredentialRef(provider)
     const apiKey = typeof input.apiKey === 'string' && input.apiKey.trim() ? text(input.apiKey, 'API Key', 512) : null
     if (!this.connectionSettings?.update) fail('SPOKEN_VIDEO_PUBLISH_CONNECTION_UNAVAILABLE', '当前环境不支持保存生图设置。')
     if (apiKey) await this.#credentials().set(ref, apiKey)
-    await this.connectionSettings.update({ provider, model: text(input.model || publishImageConfig(this.environment).model, '生图模型', 120) })
+    const patch = { provider, model: text(input.model || publishImageConfig(this.environment).model, '生图模型', 120) }
+    // 自定义渠道必须带一个能用的地址，否则「已配置」是假的。
+    if (provider === 'custom') {
+      patch.customImage = parseCustomImageConfig({
+        baseUrl: input.custom?.baseUrl ?? input.baseUrl ?? this.connectionSettings.get?.()?.customImage?.baseUrl,
+        protocol: input.custom?.protocol ?? this.connectionSettings.get?.()?.customImage?.protocol,
+        path: input.custom?.path,
+        model: patch.model,
+        authHeader: input.custom?.authHeader,
+      })
+    }
+    await this.connectionSettings.update(patch)
     return this.status()
   }
 
@@ -278,7 +309,9 @@ export class SpokenVideoPublishHost {
       id: randomUUID(), projectId: id, projectTitle: detail.title, account: detail.account || null,
       status: 'queued', phase: 'agent', error: null, expectedRevision, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null,
       sourceSnapshot: { script: detail.artifacts?.script?.data, topic: detail.artifacts?.topic?.data, video: detail.artifacts?.video?.data },
-      imageProvider: skipCovers ? null : (settings.configured ? { provider: settings.provider, model: settings.model } : null),
+      // 自定义渠道的地址/协议要随任务一起冻结：用户中途改了配置，不该让已在跑的
+      // 这一轮中途换服务。
+      imageProvider: skipCovers ? null : (settings.configured ? { provider: settings.provider, model: settings.model, ...(settings.provider === 'custom' ? { custom: settings.custom } : {}) } : null),
       skipCovers: skipCovers || undefined,
       coverErrors: {},
       dsh: dshTrace(),
@@ -423,32 +456,108 @@ export class SpokenVideoPublishHost {
     return body
   }
 
+  /**
+   * 按当前渠道生成一张封面。
+   *
+   * 三条渠道共用同一条「提交 →（异步时）轮询 → 下载 → 校验」的流水线，只有请求
+   * 构造、认证头和地址解析三处不同——把它们做成三份拷贝正是日后改一处漏两处的
+   * 起点。自定义渠道走 OpenAI 兼容或通用异步协议，字段差异都收敛在
+   * buildCustomCoverRequest 这一个函数里。
+   */
   async #generateCover(agent, task, kind, prompt, negativePrompt) {
     const provider = task.imageProvider.provider
     const resolved = await this.#credentials().resolve(publishImageCredentialRef(provider))
-    if (!resolved?.value) fail('SPOKEN_VIDEO_PUBLISH_CREDENTIAL_REQUIRED', `${provider === 'bailian' ? '百炼 BYOK' : 'SciTiger 云端'}尚未保存 API Key。`)
-    const config = publishImageConfig(this.environment)
-    const baseUrl = provider === 'bailian' ? config.bailianBaseUrl : config.scitigerBaseUrl
-    // DashScope's async image API uses a different route from synchronous multimodal generation.
-    const generationPath = provider === 'bailian' ? 'image-generation/generation' : 'multimodal-generation/generation'
+    const label = PROVIDER_LABEL[provider] || '封面生成服务'
+    if (!resolved?.value && provider !== 'custom') fail('SPOKEN_VIDEO_PUBLISH_CREDENTIAL_REQUIRED', `${label}尚未保存 API Key。`)
     // 竖版用 3:4 而不是 9:16：抖音、小红书的信息流封面都按 3:4 展示，9:16 生成的
     // 上下会被裁掉约 25%，主体很容易被切到。按展示形态生成，主体天然落在必留区里。
-    const body = publishImageRequest({ model: task.imageProvider.model, prompt, negativePrompt, size: kind === 'landscape' ? '1280*720' : '1080*1440' })
-    let result = await this.#json(`${baseUrl}/api/v1/services/aigc/${generationPath}`, { method: 'POST', headers: { Authorization: `Bearer ${resolved.value}`, 'Content-Type': 'application/json', ...(provider === 'bailian' ? { 'X-DashScope-Async': 'enable' } : {}) }, body: JSON.stringify(body) }, '封面生成服务')
+    const size = kind === 'landscape' ? '1280*720' : '1080*1440'
+    let result
+    let pollUrl = null
+    if (provider === 'custom') {
+      const custom = task.imageProvider.custom
+      if (!custom?.baseUrl) fail('SPOKEN_VIDEO_PUBLISH_CONFIG_INVALID', '自定义生图缺少服务地址，请在「封面生图」里补全配置。')
+      const authHeaders = resolved?.value
+        ? { Authorization: custom.authHeader === 'bearer' ? `Bearer ${resolved.value}` : resolved.value }
+        : {}
+      const submitUrl = `${custom.baseUrl}${custom.path || ''}`
+      if (custom.protocol === 'openai') {
+        result = await this.#json(submitUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify(customOpenAiImageRequest({ model: task.imageProvider.model, prompt, size, negativePrompt })),
+        }, label)
+      } else {
+        result = await this.#json(submitUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders },
+          body: JSON.stringify(publishImageRequest({ model: task.imageProvider.model, prompt, negativePrompt, size })),
+        }, label)
+        const taskId = imageTaskId(result)
+        // 通用异步协议的取图地址：优先用服务自己回的，回了相对路径就按 baseUrl 拼。
+        if (taskId) {
+          pollUrl = /^\//u.test(String(result?.output?.task_url || ''))
+            ? `${custom.baseUrl}${result.output.task_url}`
+            : `${custom.baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`
+        }
+      }
+      const url = customOpenAiImageUrl(result) || extractPublishImageUrl(result)
+      if (url) result = { ...result, output: { ...(result?.output || {}), choices: [{ message: { content: [{ url }] } }] } }
+    } else {
+      const config = publishImageConfig(this.environment)
+      const baseUrl = provider === 'bailian' ? config.bailianBaseUrl : config.scitigerBaseUrl
+      // DashScope's async image API uses a different route from synchronous multimodal generation.
+      const generationPath = provider === 'bailian' ? 'image-generation/generation' : 'multimodal-generation/generation'
+      const body = publishImageRequest({ model: task.imageProvider.model, prompt, negativePrompt, size })
+      result = await this.#json(`${baseUrl}/api/v1/services/aigc/${generationPath}`, { method: 'POST', headers: { Authorization: `Bearer ${resolved.value}`, 'Content-Type': 'application/json', ...(provider === 'bailian' ? { 'X-DashScope-Async': 'enable' } : {}) }, body: JSON.stringify(body) }, label)
+      const taskId = imageTaskId(result)
+      if (taskId) pollUrl = `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`
+    }
     const remoteTaskId = imageTaskId(result)
-    await this.#mutateTask(await publishRootFor(agent), task.id, (item) => { executionEvent(item, `${kind === 'landscape' ? '横版' : '竖版'}封面请求已提交`, { actor: '封面生图服务', detail: { taskId: remoteTaskId || null, model: task.imageProvider.model, prompt, negativePrompt } }) })
-    if (!extractPublishImageUrl(result) && remoteTaskId) {
+    await this.#mutateTask(await publishRootFor(agent), task.id, (item) => { executionEvent(item, `${kind === 'landscape' ? '横版' : '竖版'}封面请求已提交`, { actor: '封面生图服务', detail: { taskId: remoteTaskId || null, provider, model: task.imageProvider.model, prompt, negativePrompt } }) })
+    if (!extractPublishImageUrl(result) && remoteTaskId && pollUrl) {
       const deadline = Date.now() + this.maxPollMs
+      const authHeaders = resolved?.value
+        ? { Authorization: provider === 'custom' && task.imageProvider.custom?.authHeader !== 'bearer' ? resolved.value : `Bearer ${resolved.value}` }
+        : {}
       while (Date.now() < deadline) {
         if (this.pollIntervalMs > 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, this.pollIntervalMs))
-        result = await this.#json(`${baseUrl}/api/v1/tasks/${encodeURIComponent(remoteTaskId)}`, { method: 'GET', headers: { Authorization: `Bearer ${resolved.value}` } }, '封面生成任务')
+        result = await this.#json(pollUrl, { method: 'GET', headers: authHeaders }, '封面生成任务')
         const state = imageTaskState(result)
         if (['FAILED', 'CANCELED', 'CANCELLED', 'UNKNOWN'].includes(state)) fail('SPOKEN_VIDEO_PUBLISH_SERVICE_FAILED', '封面生成任务失败。')
+        // 自定义的通用异步协议未必用百炼那套 choices 结构，取图地址要再解一次。
+        const customUrl = provider === 'custom' ? customOpenAiImageUrl(result) : null
+        if (customUrl) {
+          result = { ...result, output: { ...(result?.output || {}), choices: [{ message: { content: [{ url: customUrl }] } }] } }
+          break
+        }
         if (extractPublishImageUrl(result)) break
       }
     }
     const url = extractPublishImageUrl(result)
     if (!url) fail('SPOKEN_VIDEO_PUBLISH_SERVICE_FAILED', '封面生成服务未返回图片。')
+    // data URL 是自建/中转服务常见的返回形态（OpenAI 的 b64_json、以及不少国产
+    // 服务）：图片就在响应里，没有第二个地址可下。这里直接解 base64；其余情况
+    // 仍走「再发一次 GET 下载」的原有路径。
+    if (url.startsWith('data:')) {
+      const comma = url.indexOf(',')
+      const meta = url.slice(5, comma)
+      const isBase64 = /;base64$/iu.test(meta)
+      const payload = url.slice(comma + 1)
+      let bytes
+      try {
+        bytes = isBase64
+          ? Buffer.from(payload, 'base64')
+          : Buffer.from(decodeURIComponent(payload), 'utf8')
+      } catch {
+        fail('SPOKEN_VIDEO_PUBLISH_IMAGE_INVALID', '封面生图服务返回的内联图片无法解码。')
+      }
+      if (!bytes.length) fail('SPOKEN_VIDEO_PUBLISH_IMAGE_INVALID', '封面生图服务返回了空的内联图片。')
+      if (bytes.length > MAX_IMAGE_BYTES) fail('SPOKEN_VIDEO_PUBLISH_FILE_TOO_LARGE', '生成的封面超过 20 MiB。')
+      const inlineInspected = inspectPublishImage(bytes)
+      const inlineTitled = await this.#overlayCoverTitle(agent, task, kind, bytes, inlineInspected)
+      return this.#freezeCover(agent, task.projectId, kind, inlineTitled.bytes, inlineTitled.inspected, 'generated')
+    }
     let response
     try { response = await this.fetch(boundedUrl(url, '封面生成服务'), { method: 'GET' }) } catch (error) { fail('SPOKEN_VIDEO_PUBLISH_SERVICE_UNREACHABLE', `生成的封面无法下载：${error instanceof Error ? error.message : String(error)}`) }
     if (!response.ok) fail('SPOKEN_VIDEO_PUBLISH_SERVICE_FAILED', `生成的封面下载失败：HTTP ${response.status}`)

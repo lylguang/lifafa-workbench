@@ -583,6 +583,7 @@ window.__ModuleLoader__.load({
       .sv-media-drawer-body { display:grid; grid-auto-rows:max-content; min-height:0; flex:1; align-content:start; gap:18px; overflow:auto; padding:17px 2px 2px; }
       .sv-media-provider-picker { display:inline-flex; width:max-content; max-width:100%; align-self:start; padding:3px; border:1px solid var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
       .sv-media-tradeoff { display:grid; gap:4px; padding:10px 12px; border:1px dashed var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
+      .sv-custom-image { display:grid; gap:12px; padding:13px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-page); }
       .sv-media-tradeoff p { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); line-height:1.6; }
       .sv-media-tradeoff strong { color:var(--lwb-ink); }
       .sv-media-provider-choice { min-height:30px; padding:0 10px; border:1px solid transparent; border-radius:6px; color:var(--lwb-muted); background:transparent; font:inherit; font-size:var(--lwb-text-sm,13px); font-weight:700; cursor:pointer; }
@@ -3165,6 +3166,7 @@ window.__ModuleLoader__.load({
     ];
     // interrupted/blocked 是断点续跑与开工前体检引入的终态，界面上必须能认出来：
     // interrupted 的下一步是「等它自动续跑」，blocked 的下一步是「去改配置」。
+    const IMAGE_PROVIDER_SHORT = { bailian: '百炼', scitiger: 'SciTiger', custom: '自定义' };
     const AS_RUN_STATUS = { running: '执行中', completed: '已完成', partial: '部分完成', failed: '失败', missed: '已错过', cancelled: '已停止', interrupted: '已中断·待续跑', blocked: '体检未过·未启动' };
     const AS_ITEM_STATUS = { running: '进行中', completed: '已完成', failed: '失败', cancelled: '已停止' };
     const AS_STAGE_TONE = { done: 'sv-stage', failed: 'sv-status-error', running: '', skipped: 'sv-status-disabled' };
@@ -4687,6 +4689,25 @@ window.__ModuleLoader__.load({
       const [connectionOpen, setConnectionOpen] = React.useState(false);
       const [connectionProvider, setConnectionProvider] = React.useState('bailian');
       const [apiKey, setApiKey] = React.useState('');
+      // 自定义云端生图的表单。默认值由后端给（可被环境变量覆盖），这样打开抽屉
+      // 就能改，而不是面对四个空框猜该填什么。
+      const [customBaseUrl, setCustomBaseUrl] = React.useState('');
+      const [customProtocol, setCustomProtocol] = React.useState('openai');
+      const [customPath, setCustomPath] = React.useState('');
+      const [customAuthHeader, setCustomAuthHeader] = React.useState('bearer');
+      // 首次拿到 status 时用后端默认值预填一次，之后以用户输入为准。
+      const [customSeeded, setCustomSeeded] = React.useState(false);
+      React.useEffect(() => {
+        if (customSeeded || !service) return;
+        const preset = service.custom || service.customDefaults;
+        if (preset) {
+          if (preset.baseUrl) setCustomBaseUrl(preset.baseUrl);
+          if (preset.protocol) setCustomProtocol(preset.protocol);
+          if (preset.path) setCustomPath(preset.path);
+          if (preset.authHeader) setCustomAuthHeader(preset.authHeader);
+        }
+        setCustomSeeded(true);
+      }, [service, customSeeded]);
       const [connectionBusy, setConnectionBusy] = React.useState(null);
       const [pickerOpen, setPickerOpen] = React.useState(false);
       const [accountLibrary, setAccountLibrary] = React.useState({ accounts: [], defaultAccountId: null });
@@ -5720,7 +5741,14 @@ window.__ModuleLoader__.load({
       const saveConnection = async () => {
         setConnectionBusy('save');
         try {
-          await remoteStatic('configurePublishConnection', { provider: connectionProvider, model: connectionModel.trim(), ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}) });
+          await remoteStatic('configurePublishConnection', {
+            provider: connectionProvider,
+            model: connectionModel.trim(),
+            ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+            // 自定义渠道要带上完整的服务描述；不传时后端会沿用已存的值，
+            // 这样只改模型名不会把地址冲掉。
+            ...(connectionProvider === 'custom' ? { custom: { baseUrl: customBaseUrl.trim(), protocol: customProtocol, path: customPath.trim(), authHeader: customAuthHeader } } : {}),
+          });
           setApiKey(''); await refreshService(); setError(null);
         } catch (cause) { setError(cause.message); } finally { setConnectionBusy(null); }
       };
@@ -5937,7 +5965,7 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
                   h('textarea', { className: 'sv-textarea', style: { minHeight: '52px' }, value: prompts.negative, maxLength: 1000, disabled: busy || running, onChange: (event) => setPrompts((prev) => ({ ...prev, negative: event.target.value })) }),
                 ),
               ),
-              openTask ? h('section', { className: 'sv-pb-section sv-pb-generation' }, h('div', { className: 'sv-sc-view-head' }, h('h4', null, '最近一次生成'), h('p', null, `${openTask.status === 'succeeded' ? '已完成' : openTask.status === 'failed' ? '失败' : '进行中'} · ${formatTime(openTask.createdAt)}${openTask.imageProvider ? ` · 封面 ${openTask.imageProvider.provider === 'bailian' ? '百炼' : 'SciTiger'}` : ' · 未配置生图服务'}`)), openTask.status === 'failed' ? h('p', { className: 'sv-error' }, openTask.error || '生成失败。') : null, h(ExecutionButton, { kind: 'publish', id: openTask.id, projectId: openTask.projectId }), h(ExecutionHistory, { kind: 'publish', projectId: openTask.projectId, refreshKey: openTask.status })) : null,
+              openTask ? h('section', { className: 'sv-pb-section sv-pb-generation' }, h('div', { className: 'sv-sc-view-head' }, h('h4', null, '最近一次生成'), h('p', null, `${openTask.status === 'succeeded' ? '已完成' : openTask.status === 'failed' ? '失败' : '进行中'} · ${formatTime(openTask.createdAt)}${openTask.imageProvider ? ` · 封面 ${IMAGE_PROVIDER_SHORT[openTask.imageProvider.provider] || openTask.imageProvider.provider}` : ' · 未配置生图服务'}`)), openTask.status === 'failed' ? h('p', { className: 'sv-error' }, openTask.error || '生成失败。') : null, h(ExecutionButton, { kind: 'publish', id: openTask.id, projectId: openTask.projectId }), h(ExecutionHistory, { kind: 'publish', projectId: openTask.projectId, refreshKey: openTask.status })) : null,
             ),
       );
       const drawerFoot = detail && h('div', { className: 'sv-tp-drawer-foot' },
@@ -5975,8 +6003,17 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
         h('aside', { className: 'sv-drawer sv-media-config-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '封面生图配置' },
           h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { className: 'sv-media-drawer-title' }, '封面生图配置'), h('p', { className: 'sv-media-drawer-copy' }, 'API Key 保存到 DSH 私有凭据库，不会写入发布资料或浏览器存储。保存当前渠道的 API Key 后，生成发布信息时会自动生成封面。')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setConnectionOpen(false) }, '关闭')),
           h('div', { className: 'sv-media-drawer-body' },
-            h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '生图渠道' }, ['bailian', 'scitiger'].map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': connectionProvider === id ? 'true' : 'false', disabled: Boolean(connectionBusy), onClick: () => { setConnectionProvider(id); setApiKey(''); } }, service?.providers?.[id]?.label || (id === 'bailian' ? '百炼 BYOK' : 'SciTiger 云端')))),
-            h('label', { className: 'sv-media-field' }, h('span', null, connectionProvider === 'bailian' ? '百炼 API Key' : 'SciTiger 云端生图 API Key'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: connectionCredential?.configured ? '已保存；输入新值可更新' : '输入 API Key', onChange: (event) => setApiKey(event.target.value) })),
+            h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '生图渠道' }, ['bailian', 'scitiger', 'custom'].map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': connectionProvider === id ? 'true' : 'false', disabled: Boolean(connectionBusy), onClick: () => { setConnectionProvider(id); setApiKey(''); } }, service?.providers?.[id]?.label || (id === 'bailian' ? '百炼 BYOK' : id === 'scitiger' ? 'SciTiger 云端' : '自定义 API')))),
+            // 自定义渠道的四个字段。刻意不给「一键测试」：一次测试要真的生一张图，
+            // 既花钱又慢，而配置正误在下一张封面上立刻可见。
+            connectionProvider === 'custom' ? h('div', { className: 'sv-custom-image' },
+              h('label', { className: 'sv-media-field' }, h('span', null, '服务地址'), h('input', { className: 'sv-input', value: customBaseUrl, maxLength: 500, placeholder: 'https://api.example.com/v1', onChange: (event) => setCustomBaseUrl(event.target.value) })),
+              h('label', { className: 'sv-media-field' }, h('span', null, '协议'), h('select', { className: 'sv-select', value: customProtocol, onChange: (event) => setCustomProtocol(event.target.value) }, h('option', { value: 'openai' }, 'OpenAI 兼容（同步返回图片）'), h('option', { value: 'async-generic' }, '通用异步（提交后轮询取图）'))),
+              h('label', { className: 'sv-media-field' }, h('span', null, '请求路径（留空按协议默认）'), h('input', { className: 'sv-input', value: customPath, maxLength: 300, placeholder: customProtocol === 'openai' ? '/images/generations' : '/api/v1/services/aigc/image-generation/generation', onChange: (event) => setCustomPath(event.target.value) })),
+              h('label', { className: 'sv-media-field' }, h('span', null, '认证方式'), h('select', { className: 'sv-select', value: customAuthHeader, onChange: (event) => setCustomAuthHeader(event.target.value) }, h('option', { value: 'bearer' }, 'Bearer（Authorization: Bearer <key>）'), h('option', { value: 'raw' }, '原始值（Authorization: <key>）'))),
+              h('label', { className: 'sv-media-field' }, h('span', null, 'API Key（服务不校验时可留空）'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: connectionCredential?.configured ? '已保存；输入新值可更新' : '可留空', onChange: (event) => setApiKey(event.target.value) })),
+              h('p', { className: 'sv-note' }, '自建服务、第三方中转与各类聚合服务都走这条路。地址请填到路径之前，不要带查询串或账号密码。')
+            ) : h('label', { className: 'sv-media-field' }, h('span', null, connectionProvider === 'bailian' ? '百炼 API Key' : 'SciTiger 云端生图 API Key'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: connectionCredential?.configured ? '已保存；输入新值可更新' : '输入 API Key', onChange: (event) => setApiKey(event.target.value) })),
             h('label', { className: 'sv-media-field' }, h('span', null, '生图模型（可选）'), h('input', { className: 'sv-input', value: connectionModel, maxLength: 120, placeholder: service?.model || '默认模型', onChange: (event) => setConnectionModel(event.target.value) })),
             // 说清两条路的真实代价，否则用户只能凭猜。2026-10-10 实测：本地生图引擎
             // （Qwen-Image）常驻时占 5.8 GB 内存 + 大部分 16G 卡显存，而云端通道
@@ -5996,7 +6033,7 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
         { label: '可发布成片', value: String(items.length), tone: 'brand' },
         { label: '发布资料就绪', value: String(readyCount), tone: 'green' },
         { label: '待生成', value: String(pendingCount), tone: pendingCount ? 'orange' : 'green' },
-        { label: '封面生图', value: service?.configured ? (service.provider === 'bailian' ? '百炼' : 'SciTiger') : '待配置', tone: service?.configured ? 'green' : undefined },
+        { label: '封面生图', value: service?.configured ? IMAGE_PROVIDER_SHORT[service.provider] || service.provider : '待配置', tone: service?.configured ? 'green' : undefined },
       ] });
 
       return h(PackFrame, { packId, openConversation, title: '发布', accent: 'red', copy: '这里直接陈列上一模块生成的成片，可点开播放。点「发布」查看或生成发布资料：标题、文案、描述、标签与横竖封面。资料齐备即视为可发布，复制到平台即可；封面可按提示词重生，也可自行上传。本页只准备资料，不会向任何平台直发；要自动投递请用「发布与账号管理」能力包。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !service.configured ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '封面生图', h('span', { className: 'sv-config-state' }, !service ? '读取中' : service.configured ? '已连接' : '待配置'))) },

@@ -22,8 +22,16 @@ const MediaConnectionSettings = z.object({
 // generation availability is derived from the selected provider's credential.
 const PublishConnectionSettings = z.object({
   enabled: z.boolean().default(false),
-  provider: z.union(['bailian', 'scitiger']).default('bailian'),
+  provider: z.union(['bailian', 'scitiger', 'custom']).default('bailian'),
   model: z.string().default(''),
+  // 自定义云端生图的服务描述。只在 provider === 'custom' 时有意义，随任务一起
+  // 冻结进 imageProvider，让已在跑的那一轮不会因为中途改配置而换服务。
+  customImage: z.object({
+    baseUrl: z.string().default(''),
+    protocol: z.union(['openai', 'async-generic']).default('openai'),
+    path: z.string().default(''),
+    authHeader: z.union(['bearer', 'raw']).default('bearer'),
+  }).default({ baseUrl: '', protocol: 'openai', path: '', authHeader: 'bearer' }),
 })
 
 /**

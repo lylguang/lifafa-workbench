@@ -16,6 +16,11 @@ import {
   publishImageConfig,
   publishImageCredentialRef,
   publishImageRequest,
+  parseCustomImageConfig,
+  customImageDefaults,
+  customOpenAiImageRequest,
+  customOpenAiImageUrl,
+  CUSTOM_IMAGE_PROTOCOLS,
 } from '../spoken-video-publish.mjs'
 import { coverHeadline, coverLayoutFor, wrapCoverHeadline } from '../spoken-video-cover-text.mjs'
 
@@ -921,7 +926,8 @@ test('the portrait cover is generated at 3:4 so nothing important falls outside 
   // 抖音、小红书的信息流封面都按 3:4 展示。9:16 生成的图上下会被裁掉约 25%，
   // 主体很容易被切到——按展示形态生成，主体天然落在必留区里。
   const source = await readFile(new URL('../spoken-video-publish-host.mjs', import.meta.url), 'utf8')
-  assert.match(source, /size: kind === 'landscape' \? '1280\*720' : '1080\*1440'/u)
+  // 尺寸改由一个 size 变量决定（自定义渠道要复用它），但取值必须没变。
+  assert.match(source, /const size = kind === 'landscape' \? '1280\*720' : '1080\*1440'/u)
   const prompt = buildPublishPrompt({ project: { title: '测试', artifacts: {} } })
   assert.match(prompt, /竖屏 3:4/u, 'the packaging agent is told to compose for 3:4')
   assert.match(prompt, /竖屏 3:4 比横版更高更窄/u, 'the portrait layout must differ from the landscape one')
@@ -1013,4 +1019,119 @@ test('the cover host inspects the title instead of stamping over it', async () =
   assert.match(cover, /const zoneHeight = Math\.max\(8, Math\.round\(height \* \(landscape \? 0\.42 : 0\.5\)\)\)/u)
   // 阈值要落在实测分布的中间：艺术字 28~30，有标题的工整字 9.8，无标题的繁复底图 7.7。
   assert.match(cover, /busy: value > 18/u)
+})
+/* ------------------------- 自定义云端生图 ------------------------- */
+
+test('a custom image address must be a clean http(s) root', () => {
+  // 地址会被拼进请求并出现在日志与错误消息里，带查询串或账号密码等于泄漏凭据。
+  assert.throws(() => parseCustomImageConfig({ baseUrl: 'https://api.example.com/v1?key=abc' }), /无效/u)
+  assert.throws(() => parseCustomImageConfig({ baseUrl: 'https://user:pass@api.example.com' }), /无效/u)
+  assert.throws(() => parseCustomImageConfig({ baseUrl: 'ftp://api.example.com' }), /无效/u)
+  assert.throws(() => parseCustomImageConfig({ baseUrl: 'not a url' }), /URL/u)
+  const parsed = parseCustomImageConfig({ baseUrl: 'https://api.example.com/v1/' })
+  assert.equal(parsed.baseUrl, 'https://api.example.com/v1', '尾斜杠被去掉，避免拼出 //')
+  assert.equal(parsed.protocol, 'openai', '默认走 OpenAI 兼容——自建与中转服务里它最常见')
+  assert.equal(parsed.path, '/images/generations')
+})
+
+test('an unknown custom protocol is rejected rather than silently defaulted', () => {
+  assert.deepEqual(CUSTOM_IMAGE_PROTOCOLS, ['openai', 'async-generic'])
+  assert.throws(() => parseCustomImageConfig({ baseUrl: 'https://api.example.com', protocol: 'grpc' }), /协议无效/u)
+})
+
+test('the async protocol defaults to the async-generation route', () => {
+  const parsed = parseCustomImageConfig({ baseUrl: 'https://api.example.com', protocol: 'async-generic' })
+  assert.equal(parsed.path, '/api/v1/services/aigc/image-generation/generation')
+  // 显式给的路径优先于协议默认。
+  const explicit = parseCustomImageConfig({ baseUrl: 'https://api.example.com', protocol: 'async-generic', path: '/v2/tasks' })
+  assert.equal(explicit.path, '/v2/tasks')
+})
+
+test('custom image defaults can be pre-seeded from the environment', () => {
+  // 界面靠这份默认值预填表单，否则用户打开抽屉面对的是四个空框。
+  const defaults = customImageDefaults({
+    LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_BASE_URL: 'https://my-proxy.internal/v1/',
+    LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_PROTOCOL: 'async-generic',
+    LWB_SPOKEN_VIDEO_IMAGE_MODEL: 'my-image-model',
+  })
+  assert.equal(defaults.baseUrl, 'https://my-proxy.internal/v1')
+  assert.equal(defaults.protocol, 'async-generic')
+  assert.equal(defaults.model, 'my-image-model')
+})
+
+test('the OpenAI-compatible body uses the size spelling that API actually accepts', () => {
+  const body = customOpenAiImageRequest({ model: 'gpt-image-1', prompt: '一张封面', size: '1080*1440', negativePrompt: '不要字' })
+  // 百炼用 1280*720，OpenAI 只收 1280x720 —— 这个差异不换会让每次调用都报参数错。
+  assert.equal(body.size, '1080x1440')
+  assert.equal(body.model, 'gpt-image-1')
+  assert.equal(body.prompt, '一张封面')
+  assert.equal(body.n, 1)
+  assert.equal(body.negative_prompt, '不要字')
+  assert.equal(body.response_format, 'url')
+})
+
+test('an OpenAI response is read from data[0], and b64_json becomes a data URL', () => {
+  assert.equal(customOpenAiImageUrl({ data: [{ url: 'https://cdn.example.com/a.png' }] }), 'https://cdn.example.com/a.png')
+  // 自建服务常直接回 base64；包成 data URL 才能走现有的下载与尺寸校验链路。
+  assert.equal(customOpenAiImageUrl({ data: [{ b64_json: 'AAAABBBB' }] }), 'data:image/png;base64,AAAABBBB')
+  // 已经是 data URL 的不重复包。
+  const inline = 'data:image/png;base64,ZZZZ'
+  assert.equal(customOpenAiImageUrl({ data: [{ url: inline }] }), inline)
+  assert.equal(customOpenAiImageUrl({}), null)
+  assert.equal(customOpenAiImageUrl({ data: [] }), null)
+})
+
+test('a custom provider is a first-class channel with its own credential slot', () => {
+  assert.equal(publishImageCredentialRef('custom'), 'LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_API_KEY')
+  assert.throws(() => publishImageCredentialRef('nope'), /渠道无效/u)
+})
+
+test('a custom image service that returns inline base64 still produces a cover', async (t) => {
+  // 端到端回归锁：OpenAI 兼容服务（以及不少国产中转）常用 b64_json 直接把图塞进
+  // 响应，没有第二个 URL 可下。2026-10-10 实测踩过——转成 data URL 之后被
+  // boundedUrl 以「封面生成服务返回的地址无效」拒掉，两张封面静默失败，
+  // 而任务本身仍然报 succeeded。
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await projectAtQc(currentAgent, store, { title: '自定义生图项目' })
+
+  const base = 'http://127.0.0.1:8321/v1'
+  const requested = []
+  const host = publishHost({
+    store,
+    executor: async () => packagingResult(),
+    credentials: {
+      resolve: async () => ({ value: 'sk-custom' }),
+      describe: async () => ({ configured: true, source: 'test', writable: true }),
+    },
+    settings: {
+      get: () => ({
+        provider: 'custom', model: 'my-image-model',
+        customImage: { provider: 'custom', baseUrl: base, protocol: 'openai', path: '/images/generations', authHeader: 'bearer', model: 'my-image-model' },
+      }),
+      update: async () => {},
+    },
+    fetch: async (url, init = {}) => {
+      if (String(url) !== `${base}/images/generations`) throw new Error(`unexpected fetch: ${url}`)
+      const body = JSON.parse(init.body)
+      requested.push({ size: body.size, auth: init.headers?.Authorization })
+      // 真实图片字节，避免被尺寸校验或标题区检查判掉。
+      return { ok: true, json: async () => ({ data: [{ b64_json: png(1024, 1024).toString('base64') }] }) }
+    },
+  })
+
+  const task = await host.startPackaging(currentAgent, { projectId: project.id, expectedRevision: project.revision, skipCovers: false })
+  const done = await waitForTask(host, currentAgent, task.id)
+
+  assert.equal(done.imageProvider.provider, 'custom')
+  assert.equal(done.imageProvider.custom.protocol, 'openai')
+  assert.ok(requested.length >= 1, '至少请求了一张封面')
+  assert.ok(requested.every((row) => row.auth === 'Bearer sk-custom'), '每次请求都带 Bearer 密钥')
+  // OpenAI 只认 WIDTHxHEIGHT；把百炼的 1280*720 原样发过去会每次都报参数错。
+  assert.ok(requested.some((row) => row.size === '1280x720'), '横版尺寸按 OpenAI 写法')
+  assert.ok(requested.some((row) => row.size === '1080x1440'), '竖版尺寸按 OpenAI 写法')
+  // 关键断言：内联 base64 不能再被当成无效地址拒掉。封面最终是否被标题区质检
+  // 留下是另一回事（那张测试图是纯色方图，本就该被判掉），与协议无关。
+  assert.deepEqual(Object.values(done.coverErrors), [null, null], '两张封面都没有因地址无效而失败')
 })
