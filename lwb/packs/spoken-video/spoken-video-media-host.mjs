@@ -1166,6 +1166,160 @@ export class SpokenVideoMediaHost {
     }
   }
 
+  /**
+   * 桥接配置（配音方式、本地合成参数、小米音色与语气、ASR 模型、默认音色）。
+   *
+   * **绝不回传 API Key。** 桥接的 /admin/config 会把整份 config.json 原样返回，
+   * 其中 mimo.apiKey 是明文。这里只回「有没有配」，不回值本身——密钥经浏览器
+   * 走一圈就等于泄漏到前端日志、devtools 与任何截屏里。要改就通过下面的
+   * bridgeConfigUpdate 提交，桥接落盘后这里仍然只回报布尔值。
+   */
+  async bridgeConfig() {
+    const base = localBridgeBase(this.environment)
+    try {
+      const body = await this.#externalJson(`${base}/admin/config`, { signal: AbortSignal.timeout(6000) }, '桥接配置')
+      return {
+        available: true,
+        ttsProvider: body.ttsProvider === 'local' ? 'local' : 'cloud',
+        tts: body.tts && typeof body.tts === 'object' ? body.tts : {},
+        asr: body.asr && typeof body.asr === 'object' ? body.asr : {},
+        mimo: {
+          // 只有布尔，没有值。
+          apiKeyConfigured: typeof body.mimo?.apiKey === 'string' && Boolean(body.mimo.apiKey.trim()),
+          voice: typeof body.mimo?.voice === 'string' ? body.mimo.voice : '',
+          style: typeof body.mimo?.style === 'string' ? body.mimo.style : '',
+        },
+        defaultVoice: typeof body.defaultVoice === 'string' ? body.defaultVoice : '',
+        chineseNumbers: body.chineseNumbers !== false,
+      }
+    } catch (error) {
+      return { available: false, reason: mediaErrorMessage(error) }
+    }
+  }
+
+  /**
+   * 更新桥接配置。
+   *
+   * apiKey 传空字符串表示「不动它」——界面上那个框只在用户真的要换 Key 时才填，
+   * 而每次保存都把空值提交过去会把已配好的密钥清掉。
+   */
+  async bridgeConfigUpdate(agent, request) {
+    const input = object(request, '桥接配置')
+    const base = localBridgeBase(this.environment)
+    const patch = {}
+    const provider = stringAt(input, ['ttsProvider'])
+    if (provider === 'local' || provider === 'cloud') patch.ttsProvider = provider
+    const defaultVoice = stringAt(input, ['defaultVoice'])
+    if (defaultVoice !== null) patch.defaultVoice = defaultVoice
+    if (typeof input.chineseNumbers === 'boolean') patch.chineseNumbers = input.chineseNumbers
+    const voice = stringAt(input, ['mimo', 'voice'])
+    const style = stringAt(input, ['mimo', 'style'])
+    // 桥接把 style 当可选的语气指令，空串就是「用默认」，不是「清空风格」。
+    const mimo = {}
+    if (voice !== null) mimo.voice = voice
+    if (style !== null) mimo.style = style
+    const apiKey = stringAt(input, ['mimo', 'apiKey'])
+    if (apiKey) mimo.apiKey = apiKey
+    if (Object.keys(mimo).length) patch.mimo = mimo
+    const asrModel = stringAt(input, ['asr', 'model'])
+    if (asrModel) patch.asr = { model: asrModel }
+    try {
+      await this.#externalJson(`${base}/admin/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+        signal: AbortSignal.timeout(10_000),
+      }, '保存桥接配置')
+      return this.bridgeConfig()
+    } catch (error) {
+      return { available: false, reason: mediaErrorMessage(error) }
+    }
+  }
+
+  /**
+   * 合成一小段试听音频，验证 Key、音色与语气是否真的可用。
+   *
+   * 这是唯一能证明「配置对了」的办法——Key 格式合法不代表它还有额度，而额度用尽
+   * 时只有真正合成一次才会暴露。音频走桥接的 /audio-files/ 拿，不经工作台转发。
+   */
+  async bridgeVoiceTest(agent, request) {
+    const input = request ? object(request, '试听请求') : {}
+    const base = localBridgeBase(this.environment)
+    const body = {}
+    const voice = stringAt(input, ['voice'])
+    const style = stringAt(input, ['style'])
+    const apiKey = stringAt(input, ['apiKey'])
+    if (voice) body.voice = voice
+    if (style) body.style = style
+    if (apiKey) body.apiKey = apiKey
+    try {
+      const result = await this.#externalJson(`${base}/admin/mimo-test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        // 真的去云端合成一段再回传，可能要几十秒。
+        signal: AbortSignal.timeout(90_000),
+      }, '小米语音试听')
+      return {
+        ok: result?.ok === true,
+        bytes: result?.bytes ?? null,
+        seconds: result?.seconds ?? null,
+        audioUrl: result?.url ? `${base}${result.url}` : null,
+        reason: result?.ok === true ? null : (result?.message || '试听失败'),
+      }
+    } catch (error) {
+      return { ok: false, reason: mediaErrorMessage(error) }
+    }
+  }
+
+  /**
+   * 参考音色库。
+   *
+   * 音频本体由桥接提供（/voices-files/<name>），这里只列元信息。删除走桥接——
+   * 它才知道一个音色对应哪几个文件（音频 + 转写文本 + 参数 json）。
+   */
+  async bridgeVoices() {
+    const base = localBridgeBase(this.environment)
+    try {
+      const list = await this.#externalJson(`${base}/admin/voices`, { signal: AbortSignal.timeout(8000) }, '桥接音色库')
+      return {
+        available: true,
+        baseUrl: base,
+        voices: (Array.isArray(list) ? list : [])
+          .filter((voice) => voice && typeof voice.id === 'string' && voice.id.trim())
+          .map((voice) => ({
+            id: voice.id.trim(),
+            ext: voice.ext || '',
+            size: voice.size ?? null,
+            hasTxt: voice.hasTxt === true,
+            hasJson: voice.hasJson === true,
+            audioUrl: `${base}/voices-files/${encodeURIComponent(`${voice.id}.${voice.ext}`)}`,
+          })),
+      }
+    } catch (error) {
+      return { available: false, reason: mediaErrorMessage(error) }
+    }
+  }
+
+  /** 删除一个参考音色。桥接会连同它的转写文本与参数文件一起清掉。 */
+  async bridgeVoiceDelete(agent, request) {
+    const input = object(request, '音色删除')
+    const id = String(stringAt(input, ['id']) ?? '').trim()
+    if (!id) fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音色标识不能为空。')
+    // 音色 id 会拼进删除路径，必须先挡住穿越字符——否则 ../ 能删到 voices/ 之外。
+    if (!/^[A-Za-z0-9\u4e00-\u9fa5_-]{1,64}$/u.test(id)) fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音色标识无效。')
+    const base = localBridgeBase(this.environment)
+    try {
+      const result = await this.#externalJson(`${base}/admin/voices/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        signal: AbortSignal.timeout(8000),
+      }, '删除音色')
+      return { ok: true, removed: result?.removed ?? 0 }
+    } catch (error) {
+      return { ok: false, reason: mediaErrorMessage(error) }
+    }
+  }
+
   async configureConnection(request) {
     const input = object(request, '连接设置')
     const ref = mediaCredentialRef(input.provider)

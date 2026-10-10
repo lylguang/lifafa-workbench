@@ -2409,3 +2409,107 @@ test('the bridge panel fails soft so a missing bridge never breaks the page', as
   const tasks = await host.bridgeTasks(currentAgent)
   assert.equal(tasks.available, false)
 })
+
+/* ------------------ 桥接配置与音色库（密钥与路径安全） ------------------ */
+
+test('the bridge config never hands the MiMo API key back to the browser', async (t) => {
+  // 桥接的 /admin/config 会把整份 config.json 原样返回，其中 mimo.apiKey 是明文。
+  // 经工作台走一圈就等于把它送进前端日志、devtools 与任何一次截屏——所以这里
+  // 只回「有没有配」，绝不回值本身。
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const secret = 'sk-live-abcdefghijklmnopqrstuvwxyz012345'
+  const host = new SpokenVideoMediaHost({
+    projectsStore: { async list() { return [] } },
+    credentials: credentialStore(),
+    environment: { LWB_MEDIA_BRIDGE_URL: 'http://127.0.0.1:8199' },
+    fetch: async () => ({
+      ok: true,
+      json: async () => ({
+        ttsProvider: 'cloud',
+        tts: { model: 'LongCat-AudioDiT-3.5B-bf16' },
+        asr: { model: 'Qwen3-ASR-1.7B' },
+        mimo: { apiKey: secret, voice: '茉莉', style: '沉稳' },
+        defaultVoice: '22',
+        chineseNumbers: true,
+      }),
+    }),
+  })
+  const config = await host.bridgeConfig(currentAgent)
+  assert.equal(config.available, true)
+  assert.equal(config.mimo.apiKeyConfigured, true, '只回布尔，不回值')
+  assert.equal(config.mimo.apiKey, undefined, '密钥字段必须不存在')
+  assert.equal(JSON.stringify(config).includes(secret), false, '序列化后也不能带出密钥')
+  assert.equal(config.mimo.voice, '茉莉', '非敏感字段照常返回')
+})
+
+test('saving the bridge config leaves an untouched API key alone', async (t) => {
+  // 界面上的 Key 输入框只在用户真要换时才填。保存其它字段时若把空串提交过去，
+  // 桥接的 config.mimo.apiKey = '' 会把已配好的密钥清掉——那是最难察觉的一种
+  // 破坏：下次合成才报「未配置 API Key」。
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const bodies = []
+  const host = new SpokenVideoMediaHost({
+    projectsStore: { async list() { return [] } },
+    credentials: credentialStore(),
+    environment: { LWB_MEDIA_BRIDGE_URL: 'http://127.0.0.1:8199' },
+    fetch: async (url, init = {}) => {
+      if (init.method === 'POST') bodies.push(JSON.parse(init.body))
+      return { ok: true, json: async () => ({ ttsProvider: 'cloud', mimo: { voice: '茉莉', style: '' }, defaultVoice: '', chineseNumbers: true }) }
+    },
+  })
+  await host.bridgeConfigUpdate(currentAgent, { ttsProvider: 'cloud', mimo: { voice: '茉莉', style: '' } })
+  assert.equal(bodies.length, 1)
+  assert.equal(bodies[0].mimo.apiKey, undefined, '没填 Key 就不该把 apiKey 放进补丁')
+  // 真要换 Key 时才带，且带的是新值。
+  await host.bridgeConfigUpdate(currentAgent, { mimo: { apiKey: 'sk-new-key' } })
+  assert.equal(bodies[1].mimo.apiKey, 'sk-new-key')
+})
+
+test('a voice id that could escape the voices directory is rejected before any request', async (t) => {
+  // 音色 id 会拼进 DELETE /admin/voices/<id>。不校验的话 "../" 能删到 voices/
+  // 之外去——桥接那边只挡了音轨文件的存在性，没挡路径穿越。
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  let called = false
+  const host = new SpokenVideoMediaHost({
+    projectsStore: { async list() { return [] } },
+    credentials: credentialStore(),
+    fetch: async () => { called = true; return { ok: true, json: async () => ({}) } },
+  })
+  for (const bad of ['../config', 'a/b', 'a\b', '', '   ', 'x'.repeat(65)]) {
+    await assert.rejects(host.bridgeVoiceDelete(currentAgent, { id: bad }), /音色/u)
+  }
+  assert.equal(called, false, '非法 id 不得触达桥接')
+  // 正常的中文 id 必须能通过。
+  const ok = await host.bridgeVoiceDelete(currentAgent, { id: '测试音色' })
+  assert.equal(ok.ok, true)
+})
+
+test('the voice library lists metadata and playable URLs without proxying audio', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const urls = []
+  const host = new SpokenVideoMediaHost({
+    projectsStore: { async list() { return [] } },
+    credentials: credentialStore(),
+    environment: { LWB_MEDIA_BRIDGE_URL: 'http://127.0.0.1:8199' },
+    fetch: async (url) => {
+      urls.push(String(url))
+      return {
+        ok: true,
+        json: async () => [
+          { id: '22', ext: 'm4a', size: 900, hasTxt: true, hasJson: false },
+          { id: 'voice-mul6jh28', ext: 'mp3', size: 1200, hasTxt: true, hasJson: true },
+        ],
+      }
+    },
+  })
+  const library = await host.bridgeVoices(currentAgent)
+  assert.equal(library.available, true)
+  assert.equal(library.voices.length, 2)
+  assert.deepEqual(library.voices[0], { id: '22', ext: 'm4a', size: 900, hasTxt: true, hasJson: false, audioUrl: 'http://127.0.0.1:8199/voices-files/22.m4a' })
+  // 音频本体由浏览器直接向桥接取，不经工作台转发——大文件过一次进程没有意义。
+  assert.ok(urls.every((url) => url.endsWith('/admin/voices')))
+})

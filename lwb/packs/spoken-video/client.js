@@ -400,6 +400,18 @@ window.__ModuleLoader__.load({
       .sv-engine-id strong { color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); }
       .sv-engine-buttons { display:flex; flex-wrap:wrap; gap:6px; }
       .sv-engine-log { display:grid; gap:7px; padding:11px 12px; border:1px dashed var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
+      /* 参考音色库与本地配音配置 */
+      .sv-voice-panel { display:grid; gap:11px; padding:15px 17px; border:1px solid var(--lwb-line); border-radius:11px; background:var(--lwb-surface); }
+      .sv-voice-list { display:grid; gap:7px; margin:0; padding:0; list-style:none; }
+      .sv-voice-row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:9px 11px; border:1px solid var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
+      .sv-voice-id { display:grid; gap:2px; flex:1 1 190px; min-width:0; }
+      .sv-voice-id strong { color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); }
+      .sv-voice-buttons { display:flex; flex-wrap:wrap; gap:6px; }
+      .sv-voice-audio { width:100%; max-width:340px; height:34px; margin-top:4px; }
+      .sv-bridge-fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:11px; }
+      .sv-bridge-test { display:grid; gap:5px; padding:10px 12px; border:1px dashed var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
+      body[data-ds-dark-theme] .sv-voice-row,
+      body[data-ds-dark-theme] .sv-bridge-test { background:#1b2530; }
       .sv-engine-log-head { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); font-weight:800; }
       .sv-log-lines { overflow:auto; max-height:240px; margin:0; padding:0 0 0 18px; color:var(--lwb-muted); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:var(--lwb-text-xs,12px); line-height:1.6; }
       body[data-ds-dark-theme] .sv-usage-bar { background:#1b2530; }
@@ -1254,6 +1266,175 @@ window.__ModuleLoader__.load({
      * 不做的事：不绕过桥接直接操作引擎。桥接才是引擎状态的唯一持有者（它记着
      * starting、做过空闲回收、知道端口对应哪个 PID），工作台只做数据搬运。
      */
+    /**
+     * 参考音色库。
+     *
+     * 音频本体始终在桥接的 voices/ 目录里（那是本机素材，不在版本控制中）；这里
+     * 只列元信息并给出试听地址。删除交给桥接执行——只有它知道一个音色对应哪几个
+     * 文件（音频 + 转写文本 + 参数 json），工作台只发一个 id。
+     */
+    function VoiceLibraryPanel() {
+      const [state, setState] = React.useState(null);
+      const [busy, setBusy] = React.useState(null);
+      const [error, setError] = React.useState(null);
+      const [audio, setAudio] = React.useState(null);
+
+      const load = React.useCallback(async () => {
+        try { const next = await remoteStatic('bridgeVoices'); setState(next); setError(null); }
+        catch (cause) { setError(cause.message); }
+      }, []);
+
+      React.useEffect(() => { void load(); }, [load]);
+
+      const remove = async (id) => {
+        setBusy(id); setError(null);
+        try {
+          const result = await remoteStatic('bridgeVoiceDelete', { id });
+          if (!result?.ok) setError(result?.reason || '删除失败');
+          else { setAudio(null); await load(); }
+        } catch (cause) { setError(cause.message); }
+        finally { setBusy(null); }
+      };
+
+      if (!state) return h('section', { className: 'sv-voice-panel' }, h('p', { className: 'sv-meta' }, '正在读取音色库…'));
+      if (!state.available) return null;
+
+      // 拆出中间变量而不是一路套下去：三层 h() 嵌套加 map() 再加三元，括号数到
+      // 第四层就没法靠眼睛数了（这次就数错过一次）。
+      const voiceMeta = (voice) => [
+        voice.ext.toUpperCase(),
+        voice.size ? `${Math.round(voice.size / 1024)} KB` : null,
+        voice.hasTxt ? '含转写' : null,
+        voice.hasJson ? '含参数' : null,
+      ].filter(Boolean).join(' · ');
+
+      const voiceRow = (voice) => h('li', { key: voice.id, className: 'sv-voice-row' },
+        h('div', { className: 'sv-voice-id' },
+          h('strong', null, voice.id),
+          h('span', { className: 'sv-meta' }, voiceMeta(voice))),
+        h('div', { className: 'sv-voice-buttons' },
+          h('button', {
+            type: 'button', className: 'lwb-plain-button',
+            onClick: () => setAudio(audio === voice.id ? null : voice.id),
+          }, audio === voice.id ? '收起' : '试听'),
+          h('button', {
+            type: 'button', className: 'lwb-plain-button', disabled: busy === voice.id,
+            title: '删除该音色及其转写文本与参数文件',
+            onClick: () => { void remove(voice.id); },
+          }, busy === voice.id ? '删除中…' : '删除')),
+        audio === voice.id
+          ? h('audio', { className: 'sv-voice-audio', controls: true, src: voice.audioUrl })
+          : null);
+
+      return h('section', { className: 'sv-voice-panel' },
+        h('header', { className: 'sv-engine-head' },
+          h('h3', null, '参考音色库'),
+          h('div', { className: 'sv-engine-actions' },
+            h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => { void load(); } }, '刷新'))),
+        state.voices.length === 0
+          ? h('p', { className: 'sv-meta' }, '还没有参考音色。传了参考音频时配音会自动走声音复刻。')
+          : h('ul', { className: 'sv-voice-list' }, state.voices.map(voiceRow)),
+        error ? h('p', { className: 'sv-error' }, error) : null);
+    }
+
+    /**
+     * 桥接配置：配音方式、小米音色与语气、默认音色、数字中文读法。
+     *
+     * **API Key 不回显。** 桥接的 /admin/config 会把整份 config.json 原样返回，
+     * 其中 mimo.apiKey 是明文；这里只显示「已配置 / 未配置」。真要换 Key 去 8199
+     * 的配置中心——那个网页本来就要保留，它还管音色上传等这里不做的事。
+     */
+    function BridgeConfigPanel() {
+      const [config, setConfig] = React.useState(null);
+      const [form, setForm] = React.useState(null);
+      const [busy, setBusy] = React.useState(null);
+      const [error, setError] = React.useState(null);
+      const [test, setTest] = React.useState(null);
+
+      const load = React.useCallback(async () => {
+        try {
+          const next = await remoteStatic('bridgeConfig');
+          setConfig(next);
+          if (next?.available) {
+            setForm((current) => current || {
+              ttsProvider: next.ttsProvider,
+              mimoVoice: next.mimo?.voice || '',
+              mimoStyle: next.mimo?.style || '',
+              defaultVoice: next.defaultVoice || '',
+              chineseNumbers: next.chineseNumbers !== false,
+            });
+          }
+          setError(null);
+        } catch (cause) { setError(cause.message); }
+      }, []);
+
+      React.useEffect(() => { void load(); }, [load]);
+
+      const save = async () => {
+        setBusy('save'); setError(null); setTest(null);
+        try {
+          const next = await remoteStatic('bridgeConfigUpdate', {
+            ttsProvider: form.ttsProvider,
+            mimo: { voice: form.mimoVoice, style: form.mimoStyle },
+            defaultVoice: form.defaultVoice,
+            chineseNumbers: form.chineseNumbers,
+          });
+          if (next?.available === false) setError(next.reason || '保存失败');
+          else { setConfig(next); setForm(null); }
+        } catch (cause) { setError(cause.message); }
+        finally { setBusy(null); }
+      };
+
+      const tryVoice = async () => {
+        setBusy('test'); setError(null); setTest(null);
+        try {
+          const result = await remoteStatic('bridgeVoiceTest', { voice: form.mimoVoice, style: form.mimoStyle });
+          setTest(result);
+        } catch (cause) { setError(cause.message); }
+        finally { setBusy(null); }
+      };
+
+      if (!config) return null;
+      if (config.available === false) return null;
+      if (!form) return h('section', { className: 'sv-engine-panel' }, h('p', { className: 'sv-meta' }, '正在读取桥接配置…'));
+
+      return h('section', { className: 'sv-engine-panel' },
+        h('header', { className: 'sv-engine-head' },
+          h('h3', null, '本地配音配置'),
+          h('span', { className: 'sv-meta' }, '保存在本机桥接的 config.json，不进版本库')),
+
+        h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '配音方式' },
+          [['cloud', '云端合成（小米 MiMo）'], ['local', '本地合成（LongCat）']].map(([id, label]) =>
+            h('button', {
+              key: id, type: 'button', className: 'sv-media-provider-choice',
+              'data-active': form.ttsProvider === id ? 'true' : 'false',
+              onClick: () => setForm({ ...form, ttsProvider: id }),
+            }, label))),
+        form.ttsProvider === 'local'
+          ? h('p', { className: 'sv-note' }, '本地合成需要约 23 GB 空闲内存，且 16G 显卡上无法与封面生图同时驻留。多数情况应选云端。')
+          : null,
+
+        h('div', { className: 'sv-bridge-fields' },
+          h('label', { className: 'sv-media-field' }, h('span', null, '小米音色'),
+            h('input', { className: 'sv-input', value: form.mimoVoice, maxLength: 60, placeholder: '茉莉', onChange: (e) => setForm({ ...form, mimoVoice: e.target.value }) })),
+          h('label', { className: 'sv-media-field' }, h('span', null, '语气 / 节奏（可留空）'),
+            h('input', { className: 'sv-input', value: form.mimoStyle, maxLength: 200, placeholder: '清晰沉稳，适合知识讲解', onChange: (e) => setForm({ ...form, mimoStyle: e.target.value }) })),
+          h('label', { className: 'sv-media-field' }, h('span', null, '默认音色（可留空）'),
+            h('input', { className: 'sv-input', value: form.defaultVoice, maxLength: 60, placeholder: '音色库里的 id', onChange: (e) => setForm({ ...form, defaultVoice: e.target.value }) })),
+          h('label', { className: 'sv-checks' }, h('input', { type: 'checkbox', checked: form.chineseNumbers, onChange: (e) => setForm({ ...form, chineseNumbers: e.target.checked }) }), '数字按中文读法念（避免 TTS 念成「二零二五」）')),
+
+        h('div', { className: 'sv-engine-actions' },
+          h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(busy), onClick: () => { void tryVoice(); } }, busy === 'test' ? '正在合成…' : '试听一句'),
+          h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(busy), onClick: () => { void save(); } }, busy === 'save' ? '保存中…' : '保存配置')),
+
+        test ? (test.ok
+          ? h('div', { className: 'sv-bridge-test' },
+            h('p', { className: 'sv-meta' }, `试听成功${test.seconds ? ` · ${test.seconds} 秒` : ''}`),
+            test.audioUrl ? h('audio', { className: 'sv-voice-audio', controls: true, src: test.audioUrl }) : null)
+          : h('p', { className: 'sv-error' }, `试听失败：${test.reason || '未知原因'}`)) : null,
+        error ? h('p', { className: 'sv-error' }, error) : null);
+    }
+
     function LocalEnginePanel({ packId }) {
       const [state, setState] = React.useState(null);
       const [busy, setBusy] = React.useState(null);
@@ -5248,7 +5429,7 @@ window.__ModuleLoader__.load({
       const sourceDrawerNode = sourceDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭稿件内容', onClick: () => setSourceDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '稿件内容' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, sourceDrawer.source?.title || '稿件内容'), h('p', { className: 'sv-meta' }, sourceDrawer.source?.kind === 'manual-text' ? '手动输入文稿快照' : '任务创建时冻结的稿件快照')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSourceDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll' }, h('article', { className: 'sv-sc-manuscript' }, sourceDrawer.source?.text || ''))));
       const subtitleDrawerNode = subtitleDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭字幕内容', onClick: () => setSubtitleDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '编辑字幕' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, `字幕 · ${subtitleDrawer.task.source?.title || '手动文稿'}`), h('p', { className: 'sv-meta' }, `${subtitleDrawer.cues.length} 条字幕，可直接校对错别字并保存。`)), h('button', { type: 'button', className: 'lwb-plain-button', disabled: subtitleDrawer.saving, onClick: () => setSubtitleDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll sv-audio-subtitle-editor' }, h('div', { className: 'sv-subtitle-cues' }, subtitleDrawer.cues.map((cue, index) => h('article', { key: cue.id, className: 'sv-subtitle-cue' }, h('time', null, cue.time), h('textarea', { className: 'sv-textarea sv-subtitle-text', value: cue.text, maxLength: 30000, 'aria-label': `第 ${index + 1} 条字幕文本`, onChange: (event) => setSubtitleDrawer((current) => ({ ...current, cues: current.cues.map((currentCue, currentIndex) => currentIndex === index ? { ...currentCue, text: event.target.value } : currentCue) })) }))))), h('div', { className: 'sv-media-drawer-foot' }, h('span', { className: 'sv-meta' }, '时间码来自音频对齐结果，保存将更新字幕文本。'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: subtitleDrawer.saving || !subtitleDrawer.cues.length || subtitleDrawer.cues.some((cue) => !cue.text.trim()), onClick: () => ask({ title: '保存字幕', copy: `将保存这 ${subtitleDrawer.cues.length} 条字幕的文本修改，时间码保持不变。`, confirm: '确认保存', onConfirm: () => { void saveSubtitles(); } }) }, subtitleDrawer.saving ? '正在保存…' : '保存字幕'))));
       const accountTabs = h(AccountTabs, { accountLibrary, activeTab, onChange: setActiveTab, label: '按账号查看配音任务' });
-      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, h(LocalEnginePanel, { packId }), accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
+      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, h(LocalEnginePanel, { packId }), h(BridgeConfigPanel), h(VoiceLibraryPanel), accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
     }
     /**
      * 视频制作任务的实时进度：步骤条 + 当前阶段用时 + 总耗时 + 阶段明细。
