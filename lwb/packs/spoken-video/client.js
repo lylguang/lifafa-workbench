@@ -4689,25 +4689,6 @@ window.__ModuleLoader__.load({
       const [connectionOpen, setConnectionOpen] = React.useState(false);
       const [connectionProvider, setConnectionProvider] = React.useState('bailian');
       const [apiKey, setApiKey] = React.useState('');
-      // 自定义云端生图的表单。默认值由后端给（可被环境变量覆盖），这样打开抽屉
-      // 就能改，而不是面对四个空框猜该填什么。
-      const [customBaseUrl, setCustomBaseUrl] = React.useState('');
-      const [customProtocol, setCustomProtocol] = React.useState('openai');
-      const [customPath, setCustomPath] = React.useState('');
-      const [customAuthHeader, setCustomAuthHeader] = React.useState('bearer');
-      // 首次拿到 status 时用后端默认值预填一次，之后以用户输入为准。
-      const [customSeeded, setCustomSeeded] = React.useState(false);
-      React.useEffect(() => {
-        if (customSeeded || !service) return;
-        const preset = service.custom || service.customDefaults;
-        if (preset) {
-          if (preset.baseUrl) setCustomBaseUrl(preset.baseUrl);
-          if (preset.protocol) setCustomProtocol(preset.protocol);
-          if (preset.path) setCustomPath(preset.path);
-          if (preset.authHeader) setCustomAuthHeader(preset.authHeader);
-        }
-        setCustomSeeded(true);
-      }, [service, customSeeded]);
       const [connectionBusy, setConnectionBusy] = React.useState(null);
       const [pickerOpen, setPickerOpen] = React.useState(false);
       const [accountLibrary, setAccountLibrary] = React.useState({ accounts: [], defaultAccountId: null });
@@ -5524,6 +5505,25 @@ window.__ModuleLoader__.load({
       const [connectionProvider, setConnectionProvider] = React.useState('bailian');
       const [connectionModel, setConnectionModel] = React.useState('');
       const [apiKey, setApiKey] = React.useState('');
+      // 自定义云端生图的表单。默认值由后端给（可被环境变量覆盖），这样打开抽屉
+      // 就能改，而不是面对四个空框猜该填什么。
+      const [customBaseUrl, setCustomBaseUrl] = React.useState('');
+      const [customProtocol, setCustomProtocol] = React.useState('openai');
+      const [customPath, setCustomPath] = React.useState('');
+      const [customAuthHeader, setCustomAuthHeader] = React.useState('bearer');
+      // 首次拿到 status 时用后端默认值预填一次，之后以用户输入为准。
+      const [customSeeded, setCustomSeeded] = React.useState(false);
+      React.useEffect(() => {
+        if (customSeeded || !service) return;
+        const preset = service.custom || service.customDefaults;
+        if (preset) {
+          if (preset.baseUrl) setCustomBaseUrl(preset.baseUrl);
+          if (preset.protocol) setCustomProtocol(preset.protocol);
+          if (preset.path) setCustomPath(preset.path);
+          if (preset.authHeader) setCustomAuthHeader(preset.authHeader);
+        }
+        setCustomSeeded(true);
+      }, [service, customSeeded]);
       const [connectionBusy, setConnectionBusy] = React.useState(null);
       // The drawer is the only selection surface; it is keyed by project id.
       const [openProject, setOpenProject] = React.useState(null);
