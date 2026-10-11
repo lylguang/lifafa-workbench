@@ -62,6 +62,27 @@ const SELECTORS = {
     'text=作品描述',
     'text=封面',
   ],
+  /**
+   * 封面入口。抖音的封面区默认是「推荐封面」标签页，本地上传藏在
+   * 「上传封面」/「自定义」这类子标签里，点开后才出现文件选择器——
+   * 只点「选择封面」会停在推荐帧列表上，什么都不上传。
+   */
+  coverTab: [
+    'text=上传封面',
+    'text=自定义封面',
+    '[data-e2e="cover-upload-tab"]',
+    '[class*="cover"] [class*="upload"]',
+  ],
+  /**
+   * 合成内容声明（自制声明）。抖音把它做成必填的下拉/单选，不选就发不出去。
+   */
+  declaration: [
+    '[data-e2e="declare-select"]',
+    '[class*="declare"] [class*="select"]',
+    '[class*="declaration"] [class*="select"]',
+    'text=请选择符合作品内容的声明',
+    'text=作品声明',
+  ],
 }
 
 const MODAL_DISMISS = [
@@ -130,11 +151,86 @@ async function textOf(page, selectors) {
   try { return (await locator.innerText()).trim().slice(0, 120) || null } catch { return null }
 }
 
+/**
+ * 在已展开的下拉/单选面板里按文本挑一项。
+ *
+ * 平台把选项渲染成一堆 div 而不是原生 option/label，所以逐个候选读 innerText 比
+ * 等 role="option" 可靠。两遍扫描：先精确匹配再退包含匹配——面板里常有
+ * 「内容由 AI 生成」之外的说明性文案，包含匹配容易点错行。
+ */
+async function pickOptionByText(page, wanted, { timeout = 6000 } = {}) {
+  const wantedText = String(wanted || '').trim()
+  if (!wantedText) return false
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) {
+    const candidates = page.locator('[role="option"], [class*="option"], [class*="dropdown"] [class*="item"], [class*="popover"] [class*="item"], [class*="select"] [class*="option"], [class*="radio"], li')
+    const total = Math.min(await candidates.count(), 150)
+    for (const exact of [true, false]) {
+      for (let i = 0; i < total; i += 1) {
+        const text = (await candidates.nth(i).innerText().catch(() => '')).trim().replace(/\s+/gu, ' ')
+        if (!text || text.length > 40) continue
+        if (text === wantedText || (!exact && text.includes(wantedText))) {
+          await candidates.nth(i).click().catch(() => {})
+          return true
+        }
+      }
+    }
+    await page.waitForTimeout(400)
+  }
+  return false
+}
+
 function normalizeTags(tags) {
   return (Array.isArray(tags) ? tags : [])
     .map((tag) => String(tag).replace(/^#/u, '').trim())
     .filter(Boolean)
     .slice(0, 10)
+}
+
+/**
+ * 字数上限。
+ *
+ * 抖音对标题与作品描述都有硬上限，超限的表现不是截断而是**整个作品被退回**
+ * （标题留空或描述装不下时提交按钮直接不可用），自动化在这里会撞上一句看不
+ * 出所以然的「发布失败」。所以在进页面之前就自己裁到上限以内。
+ *
+ * 为什么不写死成某次实测的精确值：抖音会调整上限，而这里没有任何联网通道去
+ * 核实当前值（WebSearch 在本机不可用），凭记忆写一个数字有相当概率是错的，
+ * 那比不写更糟——错数字会静默裁掉本不该裁的内容。取略保守的值既能挡住绝大多数
+ * 超限，又不至于误伤；上限可通过 content.titleLimit / content.descriptionLimit
+ * 覆盖，等哪次实测出准确值再往上调即可。
+ */
+const TITLE_LIMIT = 55
+const DESCRIPTION_LIMIT = 1000
+
+/**
+ * 自制声明的默认值。
+ *
+ * 本包产出的每条成片都是脚本 + 合成配音 + AI 封面，不声明属于对平台做不实陈述，
+ * 所以默认就是「内容由AI生成」。任务内容里显式给了 declaration 就用任务的值；
+ * 显式给空字符串表示「这个字段别碰」（留给人手动选，或平台当前没有该控件）。
+ */
+export const DEFAULT_AI_DECLARATION = '内容由AI生成'
+
+export function resolveDeclaration(content) {
+  const raw = content?.declaration
+  if (raw === null || raw === undefined) return DEFAULT_AI_DECLARATION
+  return String(raw).trim()
+}
+
+/**
+ * 按「平台计数方式」截断。
+ *
+ * 平台对中文按字符计、对英文按词计，纯 JS 的 .length 会把 emoji 和代理对算成
+ * 2 个字符，可能裁得比平台更早；而 String.slice 截在代理对中间会留下半个字符，
+ * 粘进编辑器就是乱码。所以用 [...text] 按码点切，再对行尾空白收口。
+ */
+export function truncateForDouyin(text, limit) {
+  const value = String(text ?? '')
+  const points = [...value]
+  if (points.length <= limit) return { text: value, truncated: false }
+  const cut = points.slice(0, limit).join('').replace(/\s+$/u, '')
+  return { text: cut, truncated: true }
 }
 
 export const douyinAdapter = {
@@ -170,9 +266,21 @@ export const douyinAdapter = {
    * caller can record progress and take evidence screenshots.
    */
   async publish(page, { videoPath, content, coverPaths = {}, submitMode, onStep = async () => {} }) {
-    const title = String(content?.title || '').trim()
-    const description = String(content?.description || content?.copy || '').trim()
+    const titleLimit = Number(content?.titleLimit) > 0 ? Number(content.titleLimit) : TITLE_LIMIT
+    const descriptionLimit = Number(content?.descriptionLimit) > 0 ? Number(content.descriptionLimit) : DESCRIPTION_LIMIT
+
+    const rawTitle = String(content?.title || '').trim()
+    const rawDescription = String(content?.description || content?.copy || '').trim()
     const tags = normalizeTags(content?.tags)
+    // 自制声明默认「内容由 AI 生成」：本包的成片全部是脚本+配音+AI 封面合成的，
+    // 不声明属于内容与实际不符。真要发人工制作的内容时，用 content.declaration
+    // 显式覆盖即可（传空字符串则完全不动这个字段）。
+    const declaration = resolveDeclaration(content)
+
+    const titleCut = truncateForDouyin(rawTitle, titleLimit)
+    const descriptionCut = truncateForDouyin(rawDescription, descriptionLimit)
+    const title = titleCut.text
+    const description = descriptionCut.text
 
     await onStep('open', '打开抖音上传页')
     await page.goto(UPLOAD_URL, { waitUntil: 'domcontentloaded' })
@@ -204,6 +312,14 @@ export const douyinAdapter = {
     await page.waitForTimeout(2000)
 
     await onStep('metadata', '填写标题与正文')
+    // 超限是被平台退回、不是被平台截断，所以在这里就把话说清楚，
+    // 让发布记录里留下「裁了多少」，而不是只看到一个没有线索的失败。
+    if (titleCut.truncated) {
+      await onStep('title-truncated', `标题超出抖音上限 ${titleLimit} 字，已自动截到上限（原文 ${[...rawTitle].length} 字）`)
+    }
+    if (descriptionCut.truncated) {
+      await onStep('description-truncated', `作品描述超出抖音上限 ${descriptionLimit} 字，已自动截到上限（原文 ${[...rawDescription].length} 字）`)
+    }
     const caption = await firstMatch(page, SELECTORS.caption, { timeout: 15_000 })
     if (caption) {
       const combined = [title, description].filter(Boolean).join('\n')
@@ -229,24 +345,85 @@ export const douyinAdapter = {
 
     // Cover upload is best-effort: Douyin picks a frame when no cover is given,
     // and a cover failure must not lose an otherwise valid publish.
+    //
+    // 2026-10-11 修：原实现只找 input[type=file] 并在最外层 try 里静默兜底。
+    // 抖音的封面上传是「点入口 → 系统文件选择器」，那个 input 常常在页面里根本
+    // 不存在或不可见，于是每次都走 catch 分支静默跳过——发布记录里只留下一句
+    // 「封面上传未完成」，而作品其实发出去了、只是封面是平台随手选的那帧。
+    // 改成与 B 站同路径：点击前先挂 filechooser 监听，走真人点选同一条路；
+    // 监听不到再退回隐藏 input。抖音封面默认停在「推荐封面」标签，
+    // 必须先切到上传/自定义标签，否则点了也不会弹选择器。
     const coverPath = coverPaths.portrait || coverPaths.landscape || null
     if (coverPath) {
       await onStep('cover', '上传封面')
+      let covered = false
       try {
+        const chooserPromise = page.waitForEvent('filechooser', { timeout: 8000 }).catch(() => null)
+        // 先切到「上传封面 / 自定义」标签页，否则停在推荐帧列表上等于没点。
+        const coverTab = await firstMatch(page, SELECTORS.coverTab)
+        if (coverTab) {
+          await coverTab.click().catch(() => {})
+          await page.waitForTimeout(1200)
+        }
         const coverEntry = await firstMatch(page, ['text=选择封面', 'text=上传封面', '[data-e2e="cover-upload"]'])
         if (coverEntry) {
-          await coverEntry.click()
-          await page.waitForTimeout(1500)
-          const coverInput = await firstMatch(page, ['input[type="file"][accept*="image"]', 'input[type="file"]'], { timeout: 8000 })
+          await coverEntry.click().catch(() => {})
+          await page.waitForTimeout(1200)
+        }
+        const chooser = await chooserPromise
+        if (chooser) {
+          await chooser.setFiles(coverPath)
+          covered = true
+        } else {
+          // 没有弹系统选择器时，页面上多半有个隐藏的 input 可以直接塞。
+          const coverInput = await firstMatch(page, ['input[type="file"][accept*="image"]', 'input[type="file"]'], { timeout: 6000 })
           if (coverInput) {
             await coverInput.setInputFiles(coverPath)
-            await page.waitForTimeout(4000)
-            const confirm = await firstMatch(page, ['button:has-text("确定")', 'button:has-text("完成")', 'button:has-text("保存")'])
-            if (confirm) await confirm.click().catch(() => {})
-            await page.waitForTimeout(2500)
+            covered = true
           }
         }
-      } catch { await onStep('cover-skipped', '封面上传未完成，交由平台自动选帧') }
+        if (covered) {
+          await page.waitForTimeout(4000)
+          // 弹窗的「完成」常常是 div 假按钮，button: 选择器永远数 0，
+          // 所以用带引号的精确文本匹配，并以按钮消失为准最多补点几次。
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            const confirm = await firstMatch(page, ['text="完成"', 'text="确定"', 'text="确认"', 'text="保存"'])
+            if (!confirm) break
+            await confirm.click().catch(() => {})
+            await page.waitForTimeout(2500)
+          }
+          await onStep('cover-applied', '封面已上传')
+        } else {
+          await page.keyboard.press('Escape').catch(() => {})
+        }
+      } catch { covered = false }
+      if (!covered) {
+        await onStep('cover-skipped', '封面未自动设置（平台未弹出文件选择器），请在窗口中人工选择，或采用平台推荐封面')
+      }
+    }
+
+    /**
+     * 自制声明：抖音必填，不选会挡住提交。
+     *
+     * 与 B 站分区/创作声明同一策略——自动模式选不出来就报错，绝不静默发一个
+     * 声明缺失的作品（那等于对平台做了不实陈述）。发布前确认模式只提示，
+     * 让人在窗口里自己点。
+     */
+    await onStep('declaration', '选择自制声明（内容由AI生成）')
+    let declarationSelected = true
+    const declarationTrigger = await firstMatch(page, SELECTORS.declaration)
+    if (declarationTrigger) {
+      await declarationTrigger.click().catch(() => {})
+      await page.waitForTimeout(1000)
+      declarationSelected = await pickOptionByText(page, declaration)
+    }
+    if (!declarationSelected && submitMode === 'auto') {
+      const error = new Error(`抖音「自制声明」未能自动选择「${declaration}」；该字段必填，请在任务内容里配置 declaration，或改用「发布前确认」模式人工选择。`)
+      error.code = 'PUBLISHER_DECLARATION_REQUIRED'
+      throw error
+    }
+    if (!declarationSelected) {
+      await onStep('declaration-manual', `自制声明未自动选择，请在窗口中人工选择「${declaration}」`)
     }
 
     if (submitMode === 'confirm') {

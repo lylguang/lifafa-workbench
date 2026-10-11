@@ -6,6 +6,7 @@ import test from 'node:test'
 import { PublisherStore, defaultProfileDir, platformLabel, ADAPTER_PLATFORMS } from '../publisher-store.mjs'
 import { PublisherHost } from '../publisher-host.mjs'
 import { resolveBrowserExecutable } from '../publisher-browser.mjs'
+import { DEFAULT_AI_DECLARATION, resolveDeclaration, truncateForDouyin } from '../publisher-adapter-douyin.mjs'
 
 async function withStore(run) {
   const dir = await mkdtemp(join(tmpdir(), 'lwb-publisher-'))
@@ -310,4 +311,51 @@ test('an over-long failure reason truncates instead of dropping the whole job re
     assert.match(found.error, /Timeout 45000ms exceeded/u, 'the real cause survives')
     assert.ok(found.error.length <= 1100, 'and it is clipped to the documented cap')
   })
+})
+
+/* --------------------------- 抖音适配器：发布前处理 --------------------------- */
+
+test('douyin truncation cuts to the platform cap and reports it instead of silently clipping', async () => {
+  // 2026-10-11 实测诉求：抖音对标题/描述有硬上限，超限的表现是作品被退回而不是被
+  // 平台截断，自动化只会看到一句没有线索的「发布失败」。所以必须在进页面之前自己裁，
+  // 并把「裁了多少」写进发布记录。
+  const long = 'A'.repeat(500)
+  const cut = truncateForDouyin(long, 55)
+  assert.equal(cut.truncated, true)
+  assert.equal(cut.text.length, 55)
+  assert.equal(cut.text, long.slice(0, 55))
+
+  const short = '短标题'
+  const kept = truncateForDouyin(short, 55)
+  assert.equal(kept.truncated, false, '未超限的内容必须原样保留')
+  assert.equal(kept.text, short)
+})
+
+test('douyin truncation counts code points, not UTF-16 units, so emoji is never cut in half', () => {
+  // 纯 .length + slice 会把 emoji 算成 2 个单位，切在中间会留下半个代理对，
+  // 粘进编辑器就是乱码。
+  const emoji = '🎬'.repeat(40) // 40 个码点，80 个 UTF-16 单位
+  const cut = truncateForDouyin(emoji, 10)
+  assert.equal(cut.truncated, true)
+  assert.equal([...cut.text].length, 10)
+  assert.equal(cut.text, '🎬'.repeat(10))
+  // 截完必须仍是完整码点，不能出现孤立代理项。
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u.test(cut.text), '不得留下半个代理对')
+})
+
+test('douyin declaration defaults to 内容由AI生成, is overridable, and an explicit blank opts out', () => {
+  // 本包成片全部是脚本+配音+AI 封面合成的，不声明属于对平台做不实陈述，
+  // 所以默认就是「内容由AI生成」；真要发人工内容时能覆盖，显式空串则完全不碰该字段。
+  assert.equal(resolveDeclaration({}), DEFAULT_AI_DECLARATION)
+  assert.equal(resolveDeclaration(undefined), DEFAULT_AI_DECLARATION)
+  assert.equal(resolveDeclaration({ declaration: null }), DEFAULT_AI_DECLARATION)
+  assert.equal(resolveDeclaration({ declaration: '内容为原创拍摄' }), '内容为原创拍摄')
+  assert.equal(resolveDeclaration({ declaration: '' }), '', '空串 = 明确要求不自动选声明')
+})
+
+test('douyin title/description limits are overridable per job', () => {
+  // 上限不做成硬编码常量之外无法覆盖：抖音会调整上限，而本机没有联网通道去核实
+  // 当前值，等哪次实测出准确数字，直接在任务内容里覆盖即可，不必再改代码。
+  assert.equal(truncateForDouyin('A'.repeat(30), 20).text.length, 20)
+  assert.equal(truncateForDouyin('A'.repeat(30), 40).truncated, false, '放宽上限后不该再裁')
 })
