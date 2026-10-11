@@ -6,7 +6,13 @@ import test from 'node:test'
 import { PublisherStore, defaultProfileDir, platformLabel, ADAPTER_PLATFORMS } from '../publisher-store.mjs'
 import { PublisherHost } from '../publisher-host.mjs'
 import { resolveBrowserExecutable } from '../publisher-browser.mjs'
-import { DEFAULT_AI_DECLARATION, resolveDeclaration, truncateForDouyin } from '../publisher-adapter-douyin.mjs'
+import {
+  DEFAULT_AI_DECLARATION,
+  DOUYIN_TITLE_LIMIT,
+  resolveDeclaration,
+  truncateForDouyin,
+  waitForUploadComplete,
+} from '../publisher-adapter-douyin.mjs'
 
 async function withStore(run) {
   const dir = await mkdtemp(join(tmpdir(), 'lwb-publisher-'))
@@ -316,17 +322,18 @@ test('an over-long failure reason truncates instead of dropping the whole job re
 /* --------------------------- 抖音适配器：发布前处理 --------------------------- */
 
 test('douyin truncation cuts to the platform cap and reports it instead of silently clipping', async () => {
-  // 2026-10-11 实测诉求：抖音对标题/描述有硬上限，超限的表现是作品被退回而不是被
-  // 平台截断，自动化只会看到一句没有线索的「发布失败」。所以必须在进页面之前自己裁，
-  // 并把「裁了多少」写进发布记录。
+  // 2026-10-11 实机截图校准：抖音上传页标题角标是 `0/30`，超限时红字提示
+  // 「标题内容仅支持30个字符」。上限取 30 —— 上一版的 55 是没核实过的猜测，
+  // 会让 30 字以后的标题被平台自己砍掉，而记录里看不出发生过什么。
+  assert.equal(DOUYIN_TITLE_LIMIT, 30)
   const long = 'A'.repeat(500)
-  const cut = truncateForDouyin(long, 55)
+  const cut = truncateForDouyin(long, DOUYIN_TITLE_LIMIT)
   assert.equal(cut.truncated, true)
-  assert.equal(cut.text.length, 55)
-  assert.equal(cut.text, long.slice(0, 55))
+  assert.equal(cut.text.length, 30)
+  assert.equal(cut.text, long.slice(0, 30))
 
   const short = '短标题'
-  const kept = truncateForDouyin(short, 55)
+  const kept = truncateForDouyin(short, DOUYIN_TITLE_LIMIT)
   assert.equal(kept.truncated, false, '未超限的内容必须原样保留')
   assert.equal(kept.text, short)
 })
@@ -358,4 +365,37 @@ test('douyin title/description limits are overridable per job', () => {
   // 当前值，等哪次实测出准确数字，直接在任务内容里覆盖即可，不必再改代码。
   assert.equal(truncateForDouyin('A'.repeat(30), 20).text.length, 20)
   assert.equal(truncateForDouyin('A'.repeat(30), 40).truncated, false, '放宽上限后不该再裁')
+})
+
+test('douyin waits for the upload to finish before it treats the editor as ready', async () => {
+  // 2026-10-11 实机截图：metadata 那张证据里上传才到 50%，而标题/正文已经写进去了。
+  // 抖音上传期间会反复重渲染整个表单，刚写的内容被冲掉——表现是「标题莫名只剩
+  // 开头 30 字」，看起来像平台在截断，实际是被后续重渲染覆盖了。
+  // 所以必须在预览卡里的进度百分比消失之后才继续。
+  const samples = [
+    '视频上传中 50%\n剩余时间：3秒',
+    '视频上传中 92%\n剩余时间：1秒',
+    'ab71257ebe.mp4\n已上传：29.9MB/29.9MB',
+  ]
+  let call = 0
+  const page = {
+    evaluate: async () => {
+      const text = samples[Math.min(call, samples.length - 1)]
+      call += 1
+      // 把 evaluate 的返回值构造成和真实页面一致：仍在传 → true。
+      return /上传中/u.test(text) || (/\b\d{1,3}\s*%/u.test(text) && /剩余/u.test(text))
+    },
+    waitForTimeout: async () => {},
+  }
+  const finished = await waitForUploadComplete(page, { timeoutMs: 10_000, intervalMs: 1 })
+  assert.equal(finished, true, '进度消失后必须返回已完成，而不是继续等')
+  assert.ok(call >= 3, `至少轮询到第三次才判定完成（实际 ${call} 次）`)
+})
+
+test('douyin upload wait gives up instead of hanging forever when the page never settles', async () => {
+  // 认不出进度标记时返回 false，让调用方记 upload-pending 继续往下走，
+  // 而不是把发布任务永久卡住。
+  const page = { evaluate: async () => true, waitForTimeout: async () => {} }
+  const finished = await waitForUploadComplete(page, { timeoutMs: 30, intervalMs: 1 })
+  assert.equal(finished, false)
 })

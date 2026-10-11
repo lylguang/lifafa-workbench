@@ -63,25 +63,41 @@ const SELECTORS = {
     'text=封面',
   ],
   /**
-   * 封面入口。抖音的封面区默认是「推荐封面」标签页，本地上传藏在
-   * 「上传封面」/「自定义」这类子标签里，点开后才出现文件选择器——
-   * 只点「选择封面」会停在推荐帧列表上，什么都不上传。
+   * 封面。两段式：先点封面区的「选择封面」打开弹窗，**再在弹窗内部**找上传入口。
+   *
+   * 2026-10-11 实测截图纠正了上一版的两个错误假设：
+   *  1. 页面上没有「上传封面」「自定义封面」这类标签页，封面区就是两个
+   *     「选择封面」按钮（横封面 4:3 / 竖封面 3:4）。先去找标签页是白找。
+   *  2. 真正的文件选择入口在**弹窗内部**——弹窗底部有个「+上传封面」按钮，
+   *     不点它就不会弹系统文件选择器，input[type=file] 也不会被激活。
+   * 上一版因为找不到标签页而直接跳过点「选择封面」，于是 filechooser 永远等不到，
+   * 8 秒超时后走兜底也找不到 input，最后静默跳过——发布记录里连 cover-skipped
+   * 都没留下（截图停在 step-cover 就再无下文），看起来像根本没试过。
    */
-  coverTab: [
+  coverOpen: [
+    'text=选择封面',
+    '[data-e2e="cover-upload"]',
+    '[class*="cover"] [class*="select"]',
+  ],
+  /** 只在封面弹窗内匹配，避免误点页面别处的同名元素。 */
+  coverUploadInDialog: [
+    '.dy-creator-video-beautify-modal text=上传封面',
+    '[class*="modal"] text=上传封面',
+    '[class*="modal"] [class*="upload"]',
     'text=上传封面',
-    'text=自定义封面',
-    '[data-e2e="cover-upload-tab"]',
-    '[class*="cover"] [class*="upload"]',
+    '[data-e2e="cover-upload-input"]',
   ],
   /**
-   * 合成内容声明（自制声明）。抖音把它做成必填的下拉/单选，不选就发不出去。
+   * 自制声明（2026-10-11 实测截图校准）。抖音的字段标签是「自主声明」，
+   * 占位符是「请选择自主声明」——上一版按「作品声明」匹配，一个都点不到，
+   * 于是每次都落到「声明没选上」分支。
    */
   declaration: [
-    '[data-e2e="declare-select"]',
+    'text=请选择自主声明',
     '[class*="declare"] [class*="select"]',
     '[class*="declaration"] [class*="select"]',
-    'text=请选择符合作品内容的声明',
-    'text=作品声明',
+    '[class*="semis"] [class*="select"]',
+    '[data-e2e="declare-select"]',
   ],
 }
 
@@ -152,6 +168,42 @@ async function textOf(page, selectors) {
 }
 
 /**
+ * 等视频真正上传完。
+ *
+ * 判据是右侧预览卡里的进度百分比（截图里是「59%」「50%」）和「上传中」字样
+ * 都消失。抖音上传期间会反复重渲染整个表单，此时写进去的标题/正文会被冲掉，
+ * 所以这里必须等到稳定再填。轮询而不是等固定秒数：大文件要传好几分钟，
+ * 固定等待要么白等要么不等够。
+ *
+ * 认不出进度标记（页面改版）时返回 false 而不是无限等住——调用方会记一个
+ * upload-pending 的阶段继续往下走，至少不把发布卡死。
+ */
+export async function waitForUploadComplete(page, { timeoutMs = 15 * 60_000, intervalMs = 2000 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const stillUploading = await page.evaluate(() => {
+      // 只看文件预览卡附近：页面上别处也有百分比（「检测中87%」之类），
+      // 全文匹配会永远等下去。
+      const cards = document.querySelectorAll('[class*="preview"], [class*="video-info"], [class*="upload"], [class*="player"]')
+      for (const card of cards) {
+        const text = card.innerText || ''
+        if (/\b\d{1,3}\s*%/u.test(text) && /上传中|剩余/u.test(text)) return true
+      }
+      // 预览卡没渲染出来时退回全文，但必须同时出现「上传中」，
+      // 否则「检测中 87%」这类文案会被误判成还在传视频。
+      const all = document.body?.innerText || ''
+      if (/上传中/u.test(all)) return true
+      const fileRow = /[\w-]{6,}\.mp4/u.exec(all)
+      if (fileRow && /\b\d{1,3}\s*%/u.test(all)) return true
+      return false
+    }).catch(() => false)
+    if (!stillUploading) return true
+    await page.waitForTimeout(intervalMs)
+  }
+  return false
+}
+
+/**
  * 在已展开的下拉/单选面板里按文本挑一项。
  *
  * 平台把选项渲染成一堆 div 而不是原生 option/label，所以逐个候选读 innerText 比
@@ -188,20 +240,23 @@ function normalizeTags(tags) {
 }
 
 /**
- * 字数上限。
+ * 字数上限。**两个数字都来自 2026-10-11 的实机截图，不是猜的**：
+ * 抖音创作者中心上传页的输入框右下角自带角标，标题是 `0/30`、作品描述是
+ * `0/1000`，超限时角标变红并弹「标题内容仅支持30个字符」。
  *
- * 抖音对标题与作品描述都有硬上限，超限的表现不是截断而是**整个作品被退回**
- * （标题留空或描述装不下时提交按钮直接不可用），自动化在这里会撞上一句看不
- * 出所以然的「发布失败」。所以在进页面之前就自己裁到上限以内。
+ * 超限的表现不是被截断而是平台自己把输入框里的字砍到上限——所以必须自己
+ * 先裁，而且要在发布记录里留下「裁了多少」，否则只剩一个没有线索的短标题。
  *
- * 为什么不写死成某次实测的精确值：抖音会调整上限，而这里没有任何联网通道去
- * 核实当前值（WebSearch 在本机不可用），凭记忆写一个数字有相当概率是错的，
- * 那比不写更糟——错数字会静默裁掉本不该裁的内容。取略保守的值既能挡住绝大多数
- * 超限，又不至于误伤；上限可通过 content.titleLimit / content.descriptionLimit
- * 覆盖，等哪次实测出准确值再往上调即可。
+ * 上限可通过 content.titleLimit / content.descriptionLimit 覆盖：抖音会调整，
+ * 而这里没有联网通道核实，硬编码只是当前的实测快照。
  */
-const TITLE_LIMIT = 55
+const TITLE_LIMIT = 30
 const DESCRIPTION_LIMIT = 1000
+
+// 导出给测试锁住实测值：这两个数字一旦被「顺手改成 55」之类改回去，
+// 回归测试会立刻失败，而不是等到下一次真机发布才发现标题又被砍短。
+export const DOUYIN_TITLE_LIMIT = TITLE_LIMIT
+export const DOUYIN_DESCRIPTION_LIMIT = DESCRIPTION_LIMIT
 
 /**
  * 自制声明的默认值。
@@ -300,8 +355,12 @@ export const douyinAdapter = {
     }
     await fileInput.setInputFiles(videoPath)
 
-    // The editor appears only after the platform accepts the file; a large
-    // video uploads for a while, so allow a generous window.
+    // 2026-10-11 实测修正：这个门原本形同虚设。SELECTORS.uploadDone 匹配的
+    // 「发布设置 / 作品描述 / 封面」这些字在上传**刚开始**（截图里只有 50%）就
+    // 已经渲染在页面上了，所以两秒后代码就去写标题和正文，随后平台把整个表单
+    // 重渲染一遍，刚写进去的内容被冲掉——表现是「标题莫名其妙只剩开头 30 字」。
+    // 真正的完成信号是右侧预览卡里那个进度百分比（59% / 50% / …）消失，
+    // 且「上传中」字样不再出现。
     await onStep('editor', '等待视频上传并进入编辑页')
     const editorReady = await firstMatch(page, SELECTORS.uploadDone, { timeout: 180_000 })
     if (!editorReady) {
@@ -309,7 +368,12 @@ export const douyinAdapter = {
       error.code = 'PUBLISHER_UPLOAD_STALLED'
       throw error
     }
-    await page.waitForTimeout(2000)
+    const uploadFinished = await waitForUploadComplete(page)
+    if (!uploadFinished) {
+      await onStep('upload-pending', '视频仍在上传，先填写可编辑的字段（平台可能会在上传完成后重渲染表单）')
+    } else {
+      await onStep('upload-complete', '视频上传完成')
+    }
 
     await onStep('metadata', '填写标题与正文')
     // 超限是被平台退回、不是被平台截断，所以在这里就把话说清楚，
@@ -346,48 +410,48 @@ export const douyinAdapter = {
     // Cover upload is best-effort: Douyin picks a frame when no cover is given,
     // and a cover failure must not lose an otherwise valid publish.
     //
-    // 2026-10-11 修：原实现只找 input[type=file] 并在最外层 try 里静默兜底。
-    // 抖音的封面上传是「点入口 → 系统文件选择器」，那个 input 常常在页面里根本
-    // 不存在或不可见，于是每次都走 catch 分支静默跳过——发布记录里只留下一句
-    // 「封面上传未完成」，而作品其实发出去了、只是封面是平台随手选的那帧。
-    // 改成与 B 站同路径：点击前先挂 filechooser 监听，走真人点选同一条路；
-    // 监听不到再退回隐藏 input。抖音封面默认停在「推荐封面」标签，
-    // 必须先切到上传/自定义标签，否则点了也不会弹选择器。
+    // 两段式（2026-10-11 实测截图修正）：先点封面区「选择封面」打开弹窗，
+    // 再在弹窗内点「上传封面」。必须先挂 filechooser 监听再点那个按钮，
+    // 否则系统选择器一闪而过就再也接不到了——点击与监听之间只隔一次点击，
+    // 顺序反了必然失败。接不到选择器才退回隐藏 input。
     const coverPath = coverPaths.portrait || coverPaths.landscape || null
     if (coverPath) {
-      await onStep('cover', '上传封面')
+      await onStep('cover', '打开封面设置')
       let covered = false
       try {
-        const chooserPromise = page.waitForEvent('filechooser', { timeout: 8000 }).catch(() => null)
-        // 先切到「上传封面 / 自定义」标签页，否则停在推荐帧列表上等于没点。
-        const coverTab = await firstMatch(page, SELECTORS.coverTab)
-        if (coverTab) {
-          await coverTab.click().catch(() => {})
-          await page.waitForTimeout(1200)
-        }
-        const coverEntry = await firstMatch(page, ['text=选择封面', 'text=上传封面', '[data-e2e="cover-upload"]'])
-        if (coverEntry) {
-          await coverEntry.click().catch(() => {})
-          await page.waitForTimeout(1200)
-        }
-        const chooser = await chooserPromise
-        if (chooser) {
-          await chooser.setFiles(coverPath)
-          covered = true
+        const coverOpen = await firstMatch(page, SELECTORS.coverOpen)
+        if (!coverOpen) {
+          await onStep('cover-missing', '页面里没有「选择封面」入口（抖音页面结构可能已调整）')
         } else {
-          // 没有弹系统选择器时，页面上多半有个隐藏的 input 可以直接塞。
-          const coverInput = await firstMatch(page, ['input[type="file"][accept*="image"]', 'input[type="file"]'], { timeout: 6000 })
-          if (coverInput) {
-            await coverInput.setInputFiles(coverPath)
+          await coverOpen.click().catch(() => {})
+          // 弹窗要等渲染出来：里面的「上传封面」按钮此刻还不存在。
+          await page.waitForTimeout(1500)
+          await onStep('cover-dialog', '封面弹窗已打开')
+
+          // 关键顺序：监听挂在点击之前。
+          const chooserPromise = page.waitForEvent('filechooser', { timeout: 10_000 }).catch(() => null)
+          const uploadBtn = await firstMatch(page, SELECTORS.coverUploadInDialog)
+          if (uploadBtn) {
+            await uploadBtn.click().catch(() => {})
+          }
+          const chooser = await chooserPromise
+          if (chooser) {
+            await chooser.setFiles(coverPath)
             covered = true
+          } else {
+            const coverInput = await firstMatch(page, ['input[type="file"][accept*="image"]', 'input[type="file"]'], { timeout: 5000 })
+            if (coverInput) {
+              await coverInput.setInputFiles(coverPath)
+              covered = true
+            }
           }
         }
         if (covered) {
           await page.waitForTimeout(4000)
-          // 弹窗的「完成」常常是 div 假按钮，button: 选择器永远数 0，
-          // 所以用带引号的精确文本匹配，并以按钮消失为准最多补点几次。
+          // 弹窗底部是「完成 / 设置竖封面」这类按钮，常常是 div 假按钮，
+          // button: 选择器永远数 0，所以用带引号的精确文本匹配。
           for (let attempt = 0; attempt < 3; attempt += 1) {
-            const confirm = await firstMatch(page, ['text="完成"', 'text="确定"', 'text="确认"', 'text="保存"'])
+            const confirm = await firstMatch(page, ['text="完成"', 'text="设置竖封面"', 'text="设置横封面"'])
             if (!confirm) break
             await confirm.click().catch(() => {})
             await page.waitForTimeout(2500)
@@ -398,7 +462,7 @@ export const douyinAdapter = {
         }
       } catch { covered = false }
       if (!covered) {
-        await onStep('cover-skipped', '封面未自动设置（平台未弹出文件选择器），请在窗口中人工选择，或采用平台推荐封面')
+        await onStep('cover-skipped', '封面未自动设置（弹窗内没有可用的上传入口），请在窗口中人工选择，或采用平台推荐封面')
       }
     }
 
