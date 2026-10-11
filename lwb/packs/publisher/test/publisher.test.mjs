@@ -12,6 +12,7 @@ import {
   resolveDeclaration,
   truncateForDouyin,
   coverRatioWarning,
+  pickCoverSlots,
   readCoverVerdict,
   waitForUploadComplete,
 } from '../publisher-adapter-douyin.mjs'
@@ -436,4 +437,43 @@ test('douyin warns when a cover is wildly off the slot ratio, before uploading i
   assert.ok(coverRatioWarning(1920, 200, 'landscape'), '极端长条必须报警')
   assert.equal(coverRatioWarning(0, 0, 'landscape'), null, '量不到尺寸不该误报')
   assert.equal(coverRatioWarning(undefined, undefined, 'portrait'), null)
+})
+
+test('douyin finds both cover slots even though the portrait box is far narrower', () => {
+  // 2026-10-11 实测几何：横封面方块 160x120，**竖封面只有 90 宽**（90x147）。
+  // 上一版按 `width > 100` 过滤，竖封面方块直接被筛掉，于是只找到一个入口，
+  // 横封面正常、竖封面永远打不开——这就是用户看到的「竖槽里装的是横图」。
+  // 任何把宽度下限抬过 100 的改动都会让这个用例失败。
+  const boxes = [
+    { x: 438, y: 509, w: 160, h: 120 },  // 横封面
+    { x: 571, y: 522, w: 90, h: 147 },   // 竖封面，明显更窄
+  ]
+  const slots = pickCoverSlots(boxes)
+  assert.ok(slots.landscape, '横封面入口必须找到')
+  assert.ok(slots.portrait, '竖封面入口必须找到，哪怕它只有 90 宽')
+  assert.equal(slots.all.length, 2)
+  // 按 x 排序：左横右竖。这是抖音的实际排布。
+  assert.ok(slots.landscape.x < slots.portrait.x, '左边是横封面，右边是竖封面')
+})
+
+test('douyin cover slot detection collapses the parent/child duplicates it really gets', () => {
+  // 实测 DOM 里同一位置会有三层元素命中（coverControl- / cover-Jg3T4p / filter-k_CjvJ），
+  // 去重要按坐标，否则一个方块会被当成三个、竖槽直接落到错误位置。
+  const dupes = [
+    { x: 438, y: 509, w: 160, h: 147 },
+    { x: 438, y: 509, w: 160, h: 120 },
+    { x: 438, y: 509, w: 160, h: 120 },
+    { x: 571, y: 522, w: 90, h: 147 },
+  ]
+  const slots = pickCoverSlots(dupes)
+  assert.equal(slots.all.length, 2, '同坐标的三层元素必须折叠成一个')
+  assert.ok(slots.landscape && slots.portrait)
+})
+
+test('douyin reports a missing cover slot instead of silently reusing the other one', () => {
+  // 只有横封面时（素材缺一张），竖槽必须是 null，让调用方明确报「没找到入口」，
+  // 而不是退回去复用横封面入口再把横图传一遍。
+  const slots = pickCoverSlots([{ x: 438, y: 509, w: 160, h: 120 }])
+  assert.ok(slots.landscape)
+  assert.equal(slots.portrait, null, '缺竖封面时必须返回 null，不许拿横封面的坐标顶替')
 })

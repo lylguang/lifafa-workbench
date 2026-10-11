@@ -305,28 +305,87 @@ export function truncateForDouyin(text, limit) {
 }
 
 /**
+ * 找出封面区那两个「选择封面」方块（横 4:3 在左、竖 3:4 在右）。
+ *
+ * 2026-10-11 真机定位到的整场 bug：竖槽里装的是横图。
+ *
+ * 原因有二，都在这里修掉：
+ *  1. 之前用 `.first()` 打开弹窗，于是**两轮都进了同一个横封面弹窗**。弹窗内
+ *     并没有「设置竖封面」标签（那一版只有「设置横封面」），于是竖封面那轮把横版图
+ *     又传了一遍，竖槽里装的其实是横图。
+ *  2. 后来按几何找方块，只找到 1 个：过滤写的是 `width > 100`，而实测两个方块
+ *     尺寸差别很大——横封面 160×120，**竖封面只有 90 宽**（90×147）。竖封面那个
+ *     直接被筛掉了，于是横封面正常、竖封面永远打不开。
+ *
+ * 现在按实测公共 class 找（`coverControl-` 前缀，两个方块各一个），再按 x 排序：
+ * 左边是横封面，右边是竖封面。文字兜底保留，但去重要更严——父子元素常常共享
+ * 同一个 textContent，只留最贴合尺寸的那个。
+ */
+/**
+ * 从一组方块几何里挑出横竖两个入口，返回各自的槽位坐标。
+ *
+ * 抽成纯函数是为了能被直接测——上一版的整场 bug 就是「按几何找方块时只找到
+ * 1 个」，而那种事只有真机能复现。这里把「两个方块尺寸差很多」这个实测事实固
+ * 成断言：横封面 160×120、竖封面只有 90×147。任何把宽度下限抬到 100 以上的
+ * 改动都会立刻在这里失败。
+ */
+export function pickCoverSlots(boxes) {
+  const usable = (boxes || []).filter((b) => b && Number.isFinite(b.x) && Number.isFinite(b.y))
+    .filter((b) => b.w >= 50 && b.w <= 400 && b.h >= 50 && b.h <= 260)
+  // 父子元素会共享 textContent 而命中同一位置，按坐标去重。
+  const unique = []
+  for (const b of usable) {
+    if (!unique.some((q) => Math.abs(q.x - b.x) < 2 && Math.abs(q.y - b.y) < 2)) unique.push(b)
+  }
+  unique.sort((a, b) => a.x - b.x)
+  return { landscape: unique[0] || null, portrait: unique[1] || null, all: unique }
+}
+
+async function locateCoverBoxes(page) {
+  const boxes = await page.evaluate(() => {
+    const out = []
+    // 主路径：实测 class 前缀（带构建哈希，所以只取前缀）——横竖两个方块各一个。
+    const nodes = Array.from(document.querySelectorAll('div[class^="coverControl-"], div[class*="coverControl-"]'))
+    // 兜底：文本精确等于「选择封面」。宽度下限放到 50，否则 90 宽的竖封面会被
+    // 筛掉——这正是上一版只找到一个入口的原因。
+    const byText = Array.from(document.querySelectorAll('div,span,button')).filter((el) => (el.textContent || '').trim() === '选择封面')
+    for (const el of [...nodes, ...byText]) {
+      if (!el || !el.offsetParent) continue
+      const r = el.getBoundingClientRect()
+      if (r.width === 0 || r.height === 0) continue
+      out.push({ x: r.x + r.width / 2, y: r.y + r.height / 2, w: Math.round(r.width), h: Math.round(r.height) })
+    }
+    return out
+  }).catch(() => [])
+  return pickCoverSlots(boxes)
+}
+
+/**
  * 打开封面弹窗并返回是否成功。
  *
  * 必须确认弹窗真的开出来了才能继续：第二版的整场失败就是「以为弹窗开了其实
  * 没开」，于是在主页面里找上传按钮，点空后退到隐藏 input 兜底，文件进了
  * 「截屏封面」通道被平台拒收，而代码还报成功。等待要有真实判据，不靠盲等。
+ *
+ * `point` 是事先量好的方块坐标（见 locateCoverBoxes）——不能在这里现找，因为
+ * 传完第一个封面后第二个也可能已经不是占位方块了。
  */
-async function openCoverDialog(page, { timeout = 12_000 } = {}) {
+async function openCoverDialog(page, point, { timeout = 12_000, expectTitle = null } = {}) {
   const deadline = Date.now() + timeout
+  const titles = expectTitle
+    ? [expectTitle]
+    : ['text=设置横封面', 'text=设置竖封面']
   while (Date.now() < deadline) {
-// 封面区方块：文本精确等于「选择封面」且尺寸是那个灰色方块的大小。
-// 用 first() 只拿第一个（横封面），竖封面靠弹窗内的标签切，不靠第二个方块。
-const box = page.locator(SELECTORS.coverBox).first()
-if (await box.count().catch(() => 0)) {
-  await box.click().catch(() => {})
-} else {
-  const byText = page.locator('text="选择封面"').first()
-  if (await byText.count().catch(() => 0)) await byText.click().catch(() => {})
-}
-// 弹窗标题出现 = 真的开了。
-const title = await firstMatch(page, SELECTORS.coverDialogTitle, { timeout: 4000 })
-if (title) return true
-await page.waitForTimeout(1200)
+    if (point) {
+      await page.mouse.click(point.x, point.y).catch(() => {})
+    } else {
+      const box = page.locator(SELECTORS.coverBox).first()
+      if (await box.count().catch(() => 0)) await box.click().catch(() => {})
+    }
+    // 弹窗标题出现 = 真的开了。
+    const title = await firstMatch(page, titles, { timeout: 4000 })
+    if (title) return true
+    await page.waitForTimeout(1200)
   }
   return false
 }
@@ -338,19 +397,15 @@ await page.waitForTimeout(1200)
  * 绝不再退回隐藏 input 兜底，因为那条路会被平台判成「截屏封面」而拒收，
  * 却让调用方以为成功。第二版的误报就是这么来的。
  */
-async function uploadCoverInDialog(page, coverPath, { orientation = '横封面' } = {}) {
-  // 切到对应的横/竖封面标签。实测弹窗顶部就是「设置横封面 / 设置竖封面」。
-  if (orientation === '竖封面') {
-const tab = await firstMatch(page, ['text="设置竖封面"'])
-if (tab) {
-  await tab.click().catch(() => {})
-  await page.waitForTimeout(1200)
-}
-  }
+async function uploadCoverInDialog(page, coverPath) {
+  // 这里**不再切标签**：竖封面靠主页面上的第二个方块打开另一个弹窗，而那个弹窗
+  // 一打开就已经是竖封面通道了。在弹窗内找「设置竖封面」标签是上一版的错误——
+  // 实测那一版的弹窗只有「设置横封面」一个标签，找不到就等于白找，结果把横版图
+  // 传了两遍、竖槽里装的其实是横图。
   // 监听必须在点击之前：系统选择器一闪而过，顺序反了必然接不到。
   const chooserPromise = page.waitForEvent('filechooser', { timeout: 8000 }).catch(() => null)
-  const button = await clickCoverUploadButton(page)
-  if (!button) return false
+  const point = await clickCoverUploadButton(page)
+  if (!point) return false
   const chooser = await chooserPromise
   if (!chooser) return false
   await chooser.setFiles(coverPath)
@@ -618,10 +673,30 @@ export const douyinAdapter = {
     //  · 上传后回读平台的拒绝横幅，拒了就说拒了，不报成功。
     const coverApplied = []
     const coverRejected = []
-    for (const [kind, orientation, ratioLabel] of [
-      ['landscape', '横封面', '横封面 4:3'],
-      ['portrait', '竖封面', '竖封面 3:4'],
-    ]) {
+    // 2026-10-11 真机定位的最后一个 bug：竖槽里装的是横图。
+    //
+    // 原因：之前两轮都调 openCoverDialog(page)，而它内部用 .first() 打开弹窗，
+    // 于是**两轮进的都是同一个横封面弹窗**。竖封面那轮试图在弹窗内切
+    // 「设置竖封面」标签，可实测那一版弹窗只有「设置横封面」一个标签，找不到，
+    // 于是照常上传——把**横版图又传了一遍**，竖槽里装的就是横图。
+    //
+    // 正确做法：横竖封面是主页面上**两个独立的方块**（左横右竖），各自点开后
+    // 弹窗直接就是对应通道，无需切标签。而传完第一个之后该方块会变成缩略图、
+    // 「选择封面」文字消失，所以两个坐标必须在动手之前一次性量好。
+    const coverBoxes = await locateCoverBoxes(page)
+    if (!coverBoxes.landscape || !coverBoxes.portrait) {
+      await onStep('cover-boxes', `封面区只找到 ${coverBoxes.all.length} 个入口（预期 2 个：横 4:3 / 竖 3:4）`)
+    }
+    // 按 x 排序：左边是横封面，右边是竖封面（实测横 160×120、竖 90×147）。
+    //
+    // 刻意不按弹窗标题区分横竖：实测点开**竖**封面那个方块，弹窗标题仍然是
+    // 「设置横封面」——抖音不区分，点哪个方块决定的是它自己的通道。用标题去要求
+    // 「设置竖封面」会把竖封面那轮直接判失败（这个错我犯过一次）。
+    const plan = [
+      ['landscape', '横封面 4:3', coverBoxes.landscape],
+      ['portrait', '竖封面 3:4', coverBoxes.portrait],
+    ]
+    for (const [kind, ratioLabel, boxPoint] of plan) {
       const coverPath = coverPaths[kind]
       if (!coverPath) continue
       // 上传前先查比例。比例错了平台会直接判「封面不任」，而那种情况在
@@ -634,17 +709,17 @@ export const douyinAdapter = {
       await onStep('cover', `打开封面设置（${ratioLabel}）`)
       let covered = false
       try {
-        const opened = await openCoverDialog(page)
+        const opened = await openCoverDialog(page, boxPoint)
         if (!opened) {
-          await onStep('cover-missing', '封面弹窗未能打开（抖音页面结构可能已调整）')
+          await onStep('cover-missing', `${ratioLabel}弹窗未能打开（抖音页面结构可能已调整）`)
         } else {
           await onStep('cover-dialog', `${ratioLabel}弹窗已打开`)
-          covered = await uploadCoverInDialog(page, coverPath, { orientation })
+          covered = await uploadCoverInDialog(page, coverPath)
         }
         if (covered) {
-          // 弹窗底部「完成 / 设置竖封面」常是 div 假按钮，用精确文本匹配。
+          // 弹窗底部「完成」常是 div 假按钮，用精确文本匹配。
           for (let attempt = 0; attempt < 3; attempt += 1) {
-            const confirm = await firstMatch(page, ['text="完成"', 'text="设置竖封面"', 'text="设置横封面"'])
+            const confirm = await firstMatch(page, ['text="完成"'])
             if (!confirm) break
             await confirm.click().catch(() => {})
             await page.waitForTimeout(2500)
