@@ -62,42 +62,58 @@ const SELECTORS = {
     'text=作品描述',
     'text=封面',
   ],
-  /**
-   * 封面。两段式：先点封面区的「选择封面」打开弹窗，**再在弹窗内部**找上传入口。
+/**
+   * 封面。
    *
-   * 2026-10-11 实测截图纠正了上一版的两个错误假设：
-   *  1. 页面上没有「上传封面」「自定义封面」这类标签页，封面区就是两个
-   *     「选择封面」按钮（横封面 4:3 / 竖封面 3:4）。先去找标签页是白找。
-   *  2. 真正的文件选择入口在**弹窗内部**——弹窗底部有个「+上传封面」按钮，
-   *     不点它就不会弹系统文件选择器，input[type=file] 也不会被激活。
-   * 上一版因为找不到标签页而直接跳过点「选择封面」，于是 filechooser 永远等不到，
-   * 8 秒超时后走兜底也找不到 input，最后静默跳过——发布记录里连 cover-skipped
-   * 都没留下（截图停在 step-cover 就再无下文），看起来像根本没试过。
+   * 三版实测才定位准，这里记下每一版的错在哪，避免再退回老写法：
+   *  1. 第一版：页面根本没有「上传封面」标签页，找不到就整体跳过 —— 静默失败。
+   *  2. 第二版：点开弹窗后用 `text=上传封面` 找上传按钮，但那一刻页面上匹配到
+   *     的是别的东西，点空 → 退到隐藏 input 兜底 → 文件确实进去了，但绑定的是
+   *     「截屏封面」通道，平台判为「请勿使用截屏当封面」直接拒收，而代码还报
+   *     了 cover-applied。**误报比不报更坏。**
+   *  3. 第三版（当前）：先用**精确文本 + 尺寸**确认封面方块、点开弹窗、等弹窗
+   *     真的出现（弹窗标题「设置横封面/设置竖封面」出现才算开），再用实测到的
+   *     class 前缀 `upload-tips-` 找那个黑色上传按钮。
+   *
+   * 抖音的 class 带构建哈希（upload-tips-KomyJM），会随版本变，所以只取稳定
+   * 前缀，并始终保留文本兜底。
    */
-  coverOpen: [
-    'text=选择封面',
-    '[data-e2e="cover-upload"]',
-    '[class*="cover"] [class*="select"]',
+  /** 封面区那两个灰色方块（横 4:3 / 竖 3:4），文本都是「选择封面」。 */
+  coverBox: [
+    'div[class^="cover-"]',
+    'div[class*="filter-"]',
   ],
-  /** 只在封面弹窗内匹配，避免误点页面别处的同名元素。 */
-  coverUploadInDialog: [
-    '.dy-creator-video-beautify-modal text=上传封面',
-    '[class*="modal"] text=上传封面',
-    '[class*="modal"] [class*="upload"]',
-    'text=上传封面',
-    '[data-e2e="cover-upload-input"]',
+  /** 弹窗是否真的开出来了——用它替代盲等。 */
+  coverDialogTitle: [
+    'text=设置横封面',
+    'text=设置竖封面',
+  ],
+  /** 弹窗顶部的横/竖封面切换标签。 */
+  coverOrientationTab: [
+    'text=设置横封面',
+    'text=设置竖封面',
   ],
   /**
-   * 自制声明（2026-10-11 实测截图校准）。抖音的字段标签是「自主声明」，
-   * 占位符是「请选择自主声明」——上一版按「作品声明」匹配，一个都点不到，
-   * 于是每次都落到「声明没选上」分支。
+   * 自制声明。2026-10-11 真机探针校准：抖音把它做成**模态弹窗**
+   * 「对作品内容添加声明」，不是页面内的内联下拉。
+   *
+   * 真机截图确认过选项的确切文案是「内容由AI生成」（选项依次为：内容由AI生成 /
+   * 内容为个人观点或见解 / 内容为转载信息 / 内容含营销推广信息 / 虚构演绎，仅供娱乐 /
+   * 无需添加自主声明）——注意平台用的是「自主声明」这个词，不是「作品声明」。
    */
   declaration: [
     'text=请选择自主声明',
+    'text=对作品内容添加声明',
     '[class*="declare"] [class*="select"]',
     '[class*="declaration"] [class*="select"]',
-    '[class*="semis"] [class*="select"]',
     '[data-e2e="declare-select"]',
+  ],
+  /** 弹窗底部的「确定」：选完选项必须点它，否则模态不关，发布会一直卡在遮罩上。 */
+  declarationConfirm: [
+    '.dy-creator-semis-modal button:has-text("确定")',
+    '[class*="semis"] button:has-text("确定")',
+    '[class*="modal"] button:has-text("确定")',
+    'text="确定"',
   ],
 }
 
@@ -288,6 +304,188 @@ export function truncateForDouyin(text, limit) {
   return { text: cut, truncated: true }
 }
 
+/**
+ * 打开封面弹窗并返回是否成功。
+ *
+ * 必须确认弹窗真的开出来了才能继续：第二版的整场失败就是「以为弹窗开了其实
+ * 没开」，于是在主页面里找上传按钮，点空后退到隐藏 input 兜底，文件进了
+ * 「截屏封面」通道被平台拒收，而代码还报成功。等待要有真实判据，不靠盲等。
+ */
+async function openCoverDialog(page, { timeout = 12_000 } = {}) {
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) {
+// 封面区方块：文本精确等于「选择封面」且尺寸是那个灰色方块的大小。
+// 用 first() 只拿第一个（横封面），竖封面靠弹窗内的标签切，不靠第二个方块。
+const box = page.locator(SELECTORS.coverBox).first()
+if (await box.count().catch(() => 0)) {
+  await box.click().catch(() => {})
+} else {
+  const byText = page.locator('text="选择封面"').first()
+  if (await byText.count().catch(() => 0)) await byText.click().catch(() => {})
+}
+// 弹窗标题出现 = 真的开了。
+const title = await firstMatch(page, SELECTORS.coverDialogTitle, { timeout: 4000 })
+if (title) return true
+await page.waitForTimeout(1200)
+  }
+  return false
+}
+
+/**
+ * 在已打开的封面弹窗里上传一张图。
+ *
+ * 判据只有一个：filechooser 真的弹出来了。没弹出来就明确返回 false——
+ * 绝不再退回隐藏 input 兜底，因为那条路会被平台判成「截屏封面」而拒收，
+ * 却让调用方以为成功。第二版的误报就是这么来的。
+ */
+async function uploadCoverInDialog(page, coverPath, { orientation = '横封面' } = {}) {
+  // 切到对应的横/竖封面标签。实测弹窗顶部就是「设置横封面 / 设置竖封面」。
+  if (orientation === '竖封面') {
+const tab = await firstMatch(page, ['text="设置竖封面"'])
+if (tab) {
+  await tab.click().catch(() => {})
+  await page.waitForTimeout(1200)
+}
+  }
+  // 监听必须在点击之前：系统选择器一闪而过，顺序反了必然接不到。
+  const chooserPromise = page.waitForEvent('filechooser', { timeout: 8000 }).catch(() => null)
+  const button = await clickCoverUploadButton(page)
+  if (!button) return false
+  const chooser = await chooserPromise
+  if (!chooser) return false
+  await chooser.setFiles(coverPath)
+  // 实测：塞入后顶部会弹「上传成功」，画面中央换成新封面。等它落定。
+  await page.waitForTimeout(4000)
+  return true
+}
+
+/**
+ * 点弹窗里那个黑色「上传封面」按钮。
+ *
+ * 不能用选择器 + .first()：实测页面上 `[class*="upload-tips-"]` 与
+ * 「上传封面」这两个条件在弹窗外也有命中（「AI生成封面」那块），
+ * .first() 取到的不是弹窗里那个真正的按钮，于是点了空气、filechooser
+ * 等不到 8 秒，最后报 cover-skipped。
+ *
+ * 独立探针里用「文本精确匹配 + 坐标点击」是能命中的（实测 class
+ * upload-tips-KomyJM，坐标 833,602，filechooser 触发成功），所以这里沿用同一手法：
+ * 逐个找出文本正好是「上传封面」且可见的元素，从后往前点——弹窗是后渲染的，
+ * 排在后面的才是弹窗里的那个。
+ */
+async function clickCoverUploadButton(page) {
+  const deadline = Date.now() + 8000
+  while (Date.now() < deadline) {
+const points = await page.evaluate(() => {
+  const hits = Array.from(document.querySelectorAll('div,span,button,label'))
+    .filter((el) => (el.innerText || el.textContent || '').trim().replace(/\s+/g, '') === '上传封面')
+    .filter((el) => el.offsetParent)
+    .map((el) => {
+      const r = el.getBoundingClientRect()
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2, w: r.width, h: r.height }
+    })
+    // 只要看起来像个按钮的（不是一整行文字），且在视口内。
+    .filter((p) => p.w > 20 && p.w < 200 && p.h > 20 && p.h < 120 && p.y > 0 && p.y < 2000)
+  return hits
+}).catch(() => [])
+// 弹窗后渲染，DOM 里排在后面。
+for (const point of [...points].reverse()) {
+  await page.mouse.click(point.x, point.y).catch(() => {})
+  await page.waitForTimeout(900)
+  return point
+}
+await page.waitForTimeout(800)
+  }
+  return null
+}
+
+/**
+ * 从页面文本里判断平台对封面下了什么结论。抽成纯函数是为了能直接测——
+ * 它必须在浏览器上下文里跑，塞进 evaluate 就没法在不启动 Chrome 的情况下验。
+ *
+ * 两类来源都要读：
+ *  · 「设置封面」区的橙色横幅（实测文案：「封面不任」「封面存在1个问题，会导致
+ *    作品流量减少」「截屏封面」「请勿使用截屏当封面」）；
+ *  · 右侧「封面优化建议」列表（横/竖封面各自的问题，如「文字显示不全」）。
+ *
+ * 第二类不能漏：第一轮真机跑出来只有这一条提示，文件传进去了、平台也不再否决，
+ * 但素材上的大字标题被裁切，发布出去会掉流量。只认否决类提示就会静默通过。
+ */
+export function readCoverVerdict(pageText) {
+  const t = String(pageText || '')
+  const fatal = /封面不任|截屏封面|请勿使用截屏当封面|封面存在\s*\d+\s*个问题/u.exec(t)
+  if (fatal) return fatal[0]
+  const problem = /文字显示不全|主体不完整|文字被裁|画面模糊|分辨率过低/u.exec(t)
+  // 这些词只出现在封面建议里，不会误伤别的提示。
+  return problem ? `封面优化建议：${problem[0]}` : null
+}
+
+/**
+ * 校验封面素材的比例是否符合抖音要求。
+ *
+ * 2026-10-11 实测得到的一个硬约束：**「文字显示不全」这类提示读不到**——
+ * 抖音把它直接画在封面缩略图上（canvas / 图片），不在 DOM 里。探针实测：
+ * body.innerHTML 有 180 万字符、body.innerText 只有 991 字符，
+ * 用 `*` 遍历所有元素查 `文字显示不全` 得到 nodeCount = 0。
+ * 所以任何基于页面文本的判据都抓不到它，只能靠人看截图。
+ *
+ * 而这一条提示的成因是素材本身：封面上的大字标题顶到边缘、超出安全区，
+ * 抖音识别后裁切显示。自动化能替它做的最有用的事，是在上传前就检查比例是否
+ * 对得上槽位——比例错了平台会直接判「封面不任」，而比例对了仍可能被裁，
+ * 这部分交给封面生图那一层去修（缩小标题字号 / 留出安全边距）。
+ */
+export function coverRatioWarning(width, height, kind) {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null
+  const ratio = width / height
+  const want = kind === 'portrait' ? 3 / 4 : 4 / 3
+  // 容差取到 ±0.45 而不是严抠 4:3 —— 2026-10-11 真机实测：项目里的横封面是
+  // 1280x720（16:9 = 1.78），竖封面 1088x1440（0.76），平台都照收并在 4:3 的
+  // 缩略图框里裁切显示。所以「横封面4:3 / 竖封面3:4」是抖音**展示时的框**，
+  // 不是素材的硬要求；严抠反而会对正常素材误报。
+  const tolerance = 0.45
+  if (Math.abs(ratio - want) <= tolerance) return null
+  const dir = ratio > want ? '过宽' : '过高'
+  return `${kind === 'portrait' ? '竖封面 3:4' : '横封面 4:3'}素材比例偏离：${width}×${height}（${ratio.toFixed(2)}）${dir}，抖音可能判「封面不任」`
+}
+
+/**
+ * 量一张图片的像素尺寸。
+ *
+ * 走浏览器的 Image 解码器（而不是自己解析 PNG/JPEG 头），省掉一套格式解析，
+ * 也顺带覆盖 WebP 等格式。失败就抛，由调用方决定要不要当问题处理。
+ */
+async function probeImageSize(page, imagePath) {
+  const dataUrl = await toDataUrl(imagePath)
+  return page.evaluate((url) => new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight })
+    img.onerror = () => reject(new Error('图片无法解码'))
+    img.src = url
+  }), dataUrl)
+}
+
+async function toDataUrl(filePath) {
+  const { readFile } = await import('node:fs/promises')
+  const { extname } = await import('node:path')
+  const mime = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
+  }[extname(filePath).toLowerCase()]
+  if (!mime) throw new Error(`不支持的封面格式：${extname(filePath)}`)
+  const bytes = await readFile(filePath)
+  return `data:${mime};base64,${bytes.toString('base64')}`
+}
+
+async function readCoverRejection(page) {
+  // 必须读 innerHTML 而不是 innerText：抖音把「封面优化建议」渲染成一个弹窗，
+  // 那段文案不在 body.innerText 里（实测用 innerText 读不到，代码照样报了
+  // cover-applied，而页面明明挂着两条「文字显示不全」）。innerHTML 能覆盖到
+  // DOM 里已挂载的全部文案，代价是体积大——但只在传完封面后调一次，可以接受。
+  const html = await page.evaluate(() => document.body?.innerHTML || '').catch(() => '')
+  return readCoverVerdict(html.replace(/<[^>]*>/gu, ' '))
+}
+
 export const douyinAdapter = {
   id: 'douyin',
   label: '抖音',
@@ -407,63 +605,74 @@ export const douyinAdapter = {
       } catch { /* the caption box already carried the title */ }
     }
 
-    // Cover upload is best-effort: Douyin picks a frame when no cover is given,
+
+// Cover upload is best-effort: Douyin picks a frame when no cover is given,
     // and a cover failure must not lose an otherwise valid publish.
     //
-    // 两段式（2026-10-11 实测截图修正）：先点封面区「选择封面」打开弹窗，
-    // 再在弹窗内点「上传封面」。必须先挂 filechooser 监听再点那个按钮，
-    // 否则系统选择器一闪而过就再也接不到了——点击与监听之间只隔一次点击，
-    // 顺序反了必然失败。接不到选择器才退回隐藏 input。
-    const coverPath = coverPaths.portrait || coverPaths.landscape || null
-    if (coverPath) {
-      await onStep('cover', '打开封面设置')
+    // 2026-10-11 三轮真机探针后的最终形态。要点：
+    //  · 弹窗默认进「设置横封面」，竖封面靠弹窗内标签切，不是靠第二个方块
+    //    （上一版循环点同一个 first() 方块，第二轮必然落空）。
+    //  · 横槽用 landscape、竖槽用 portrait，不能混用——比例不符平台会判
+    //    「封面不任：封面存在1个问题，会导致作品流量减少」。
+    //  · 只认 filechooser，拒绝隐藏 input 兜底（那条路会被判成截屏封面）。
+    //  · 上传后回读平台的拒绝横幅，拒了就说拒了，不报成功。
+    const coverApplied = []
+    const coverRejected = []
+    for (const [kind, orientation, ratioLabel] of [
+      ['landscape', '横封面', '横封面 4:3'],
+      ['portrait', '竖封面', '竖封面 3:4'],
+    ]) {
+      const coverPath = coverPaths[kind]
+      if (!coverPath) continue
+      // 上传前先查比例。比例错了平台会直接判「封面不任」，而那种情况在
+      // 发布记录里看不出是素材问题——所以在这里就把话说清楚。
+      try {
+        const size = await probeImageSize(page, coverPath)
+        const warning = coverRatioWarning(size.width, size.height, kind)
+        if (warning) await onStep('cover-ratio-warning', warning)
+      } catch { /* 量不到尺寸不算失败，平台自己会判 */ }
+      await onStep('cover', `打开封面设置（${ratioLabel}）`)
       let covered = false
       try {
-        const coverOpen = await firstMatch(page, SELECTORS.coverOpen)
-        if (!coverOpen) {
-          await onStep('cover-missing', '页面里没有「选择封面」入口（抖音页面结构可能已调整）')
+        const opened = await openCoverDialog(page)
+        if (!opened) {
+          await onStep('cover-missing', '封面弹窗未能打开（抖音页面结构可能已调整）')
         } else {
-          await coverOpen.click().catch(() => {})
-          // 弹窗要等渲染出来：里面的「上传封面」按钮此刻还不存在。
-          await page.waitForTimeout(1500)
-          await onStep('cover-dialog', '封面弹窗已打开')
-
-          // 关键顺序：监听挂在点击之前。
-          const chooserPromise = page.waitForEvent('filechooser', { timeout: 10_000 }).catch(() => null)
-          const uploadBtn = await firstMatch(page, SELECTORS.coverUploadInDialog)
-          if (uploadBtn) {
-            await uploadBtn.click().catch(() => {})
-          }
-          const chooser = await chooserPromise
-          if (chooser) {
-            await chooser.setFiles(coverPath)
-            covered = true
-          } else {
-            const coverInput = await firstMatch(page, ['input[type="file"][accept*="image"]', 'input[type="file"]'], { timeout: 5000 })
-            if (coverInput) {
-              await coverInput.setInputFiles(coverPath)
-              covered = true
-            }
-          }
+          await onStep('cover-dialog', `${ratioLabel}弹窗已打开`)
+          covered = await uploadCoverInDialog(page, coverPath, { orientation })
         }
         if (covered) {
-          await page.waitForTimeout(4000)
-          // 弹窗底部是「完成 / 设置竖封面」这类按钮，常常是 div 假按钮，
-          // button: 选择器永远数 0，所以用带引号的精确文本匹配。
+          // 弹窗底部「完成 / 设置竖封面」常是 div 假按钮，用精确文本匹配。
           for (let attempt = 0; attempt < 3; attempt += 1) {
             const confirm = await firstMatch(page, ['text="完成"', 'text="设置竖封面"', 'text="设置横封面"'])
             if (!confirm) break
             await confirm.click().catch(() => {})
             await page.waitForTimeout(2500)
           }
-          await onStep('cover-applied', '封面已上传')
+          const rejection = await readCoverRejection(page)
+          if (rejection) {
+            coverRejected.push(`${ratioLabel}：${rejection}`)
+            await onStep('cover-rejected', `${ratioLabel}被平台拒绝（${rejection}）——文件传进去了但不合格`)
+          } else {
+            coverApplied.push(ratioLabel)
+            await onStep('cover-applied', `${ratioLabel}已上传`)
+          }
         } else {
           await page.keyboard.press('Escape').catch(() => {})
         }
-      } catch { covered = false }
-      if (!covered) {
-        await onStep('cover-skipped', '封面未自动设置（弹窗内没有可用的上传入口），请在窗口中人工选择，或采用平台推荐封面')
+      } catch (error) {
+        covered = false
+        await onStep('cover-error', `${ratioLabel}上传异常：${error instanceof Error ? error.message : String(error)}`)
       }
+      if (!covered) {
+        await onStep('cover-skipped', `${ratioLabel}未自动设置（未捕获到文件选择器），请在窗口中人工选择，或采用平台推荐封面`)
+      }
+    }
+    if (coverApplied.length) {
+      await onStep('cover-summary', `封面已设置：${coverApplied.join('、')}`)
+    }
+    if (coverRejected.length) {
+      await onStep('cover-reject-summary', `平台拒绝了以下封面：${coverRejected.join('；')}。建议重新生成封面，或在窗口中人工调整。`)
     }
 
     /**
@@ -480,6 +689,17 @@ export const douyinAdapter = {
       await declarationTrigger.click().catch(() => {})
       await page.waitForTimeout(1000)
       declarationSelected = await pickOptionByText(page, declaration)
+      // 选完必须关掉模态：真机截图里选项已经填上了（预览区显示
+      // 「作者声明：内容由AI生成」），但弹窗仍盖在页面上——不点确定，
+      // 后面的封面与提交都会被这层遮罩挡住。
+      if (declarationSelected) {
+        const confirm = await firstMatch(page, SELECTORS.declarationConfirm)
+        if (confirm) {
+          await confirm.click().catch(() => {})
+          await page.waitForTimeout(1500)
+        }
+        await onStep('declaration-confirmed', '自制声明已保存')
+      }
     }
     if (!declarationSelected && submitMode === 'auto') {
       const error = new Error(`抖音「自制声明」未能自动选择「${declaration}」；该字段必填，请在任务内容里配置 declaration，或改用「发布前确认」模式人工选择。`)

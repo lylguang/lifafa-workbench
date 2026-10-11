@@ -11,6 +11,8 @@ import {
   DOUYIN_TITLE_LIMIT,
   resolveDeclaration,
   truncateForDouyin,
+  coverRatioWarning,
+  readCoverVerdict,
   waitForUploadComplete,
 } from '../publisher-adapter-douyin.mjs'
 
@@ -398,4 +400,40 @@ test('douyin upload wait gives up instead of hanging forever when the page never
   const page = { evaluate: async () => true, waitForTimeout: async () => {} }
   const finished = await waitForUploadComplete(page, { timeoutMs: 30, intervalMs: 1 })
   assert.equal(finished, false)
+})
+
+test('douyin surfaces a cover problem the platform flagged, instead of claiming success', () => {
+  // 2026-10-11 真机第四轮：封面文件确实进去了（横竖两个槽位都有缩略图），平台也
+  // 不再说「截屏封面」，但右侧「封面优化建议」挂着两条「文字显示不全」——素材本身
+  // 的标题字被裁切。第一版判据只认「封面不任」这类否决提示，于是照样报
+  // cover-applied，而素材确实不合格，发布出去会掉流量。
+  const clean = '设置封面\n自主声明 内容由AI生成'
+  assert.equal(readCoverVerdict(clean), null, '没有提示时不得误报')
+
+  const fatal = readCoverVerdict('封面不任\n封面存在1个问题，会导致作品流量减少')
+  assert.ok(fatal, '明确的否决横幅必须报出来')
+  assert.match(fatal, /封面/u)
+
+  const advice = readCoverVerdict('封面优化建议\n横封面\n文字显示不全\n竖封面\n文字显示不全')
+  assert.ok(advice, '优化建议里的具体问题也必须报出来，否则素材不合格会被当成成功')
+  assert.match(advice, /文字显示不全/u)
+})
+
+
+
+
+test('douyin warns when a cover is wildly off the slot ratio, before uploading it', () => {
+  // 实测：比例明显不符的平台会直接判「封面不任」，而那种失败在发布记录里看不出
+  // 是素材问题。这里在上传前就量一次，把话说清楚。
+  //
+  // 关键：容差必须放宽。2026-10-11 真机实测，项目里的横封面 1280x720（16:9）
+  // 与竖封面 1088x1440 平台都照收——「横封面4:3 / 竖封面3:4」是抖音展示时的框，
+  // 不是素材硬要求。严抠 4:3 会对正常素材误报，那比不报更糟。
+  assert.equal(coverRatioWarning(1280, 720, 'landscape'), null, '16:9 横封面实测可用')
+  assert.equal(coverRatioWarning(1088, 1440, 'portrait'), null, '1088x1440 竖封面实测可用')
+  assert.ok(coverRatioWarning(1088, 1440, 'landscape'), '把竖版塞进横槽必须报警')
+  assert.match(coverRatioWarning(1088, 1440, 'landscape'), /封面不任/u)
+  assert.ok(coverRatioWarning(1920, 200, 'landscape'), '极端长条必须报警')
+  assert.equal(coverRatioWarning(0, 0, 'landscape'), null, '量不到尺寸不该误报')
+  assert.equal(coverRatioWarning(undefined, undefined, 'portrait'), null)
 })
