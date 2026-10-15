@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
 
 import { inspectAgentProject } from './spoken-video-preflight.mjs'
+import { parseSceneSpans, readCreativeSource, sceneSamplePlan } from './spoken-video-scene-table.mjs'
 
 const execFileAsync = promisify(execFile)
 const PACK_ROOT = dirname(fileURLToPath(import.meta.url))
@@ -273,6 +274,10 @@ async function copyAgentGuidance(projectDir) {
     ['remotion-best-practices/rules/sequencing.md', 'remotion-best-practices/rules/sequencing.md'],
     ['remotion-best-practices/rules/timing.md', 'remotion-best-practices/rules/timing.md'],
     ['remotion-best-practices/rules/transitions.md', 'remotion-best-practices/rules/transitions.md'],
+    ['remotion-best-practices/rules/motion-effects.md', 'remotion-best-practices/rules/motion-effects.md'],
+    ['remotion-best-practices/rules/keyword-relay.tsx', 'remotion-best-practices/rules/keyword-relay.tsx'],
+    ['remotion-best-practices/rules/number-spotlight.tsx', 'remotion-best-practices/rules/number-spotlight.tsx'],
+    ['remotion-best-practices/rules/stage-type-on.tsx', 'remotion-best-practices/rules/stage-type-on.tsx'],
     ['content-video/SKILL.md', 'content-video/SKILL.md'],
   ]
   await Promise.all(targets.map(async ([source, target]) => {
@@ -353,7 +358,7 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
       bgmVolume: props.bgmVolume,
       subtitleRenderer: 'orchestrator-deterministic-srt',
       editableFiles: ['src/CreativeVideo.tsx'],
-      protectedFiles: ['src/index.ts', 'src/Root.tsx', 'src/DeterministicSrtSubtitles.tsx', 'public/task-props.json', 'scripts/preflight.mjs', 'preflight-manifest.json'],
+      protectedFiles: ['src/index.ts', 'src/Root.tsx', 'src/DeterministicSrtSubtitles.tsx', 'public/task-props.json', 'scripts/preflight.mjs', 'scripts/spoken-video-subtitle-align.mjs', 'scripts/spoken-video-scene-table.mjs', 'scripts/spoken-video-content-safety.mjs', 'scripts/spoken-video-scene-cues.mjs', 'preflight-manifest.json'],
     },
     inputs: {
       draft: 'inputs/draft.json',
@@ -391,6 +396,18 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
   // 预检快照相对导入对齐模块，两份必须同源分发。
   await writeFile(join(projectDir, 'scripts/spoken-video-subtitle-align.mjs'), alignSource, { mode: 0o600 })
   protectedFiles['scripts/spoken-video-subtitle-align.mjs'] = sha256(alignSource)
+  // 场景表解析器同理：preflight 与 media-host 共用它做边界判断，缺了快照会 import 失败。
+  const sceneTableSource = await readFile(join(PACK_ROOT, 'spoken-video-scene-table.mjs'), 'utf8')
+  await writeFile(join(projectDir, 'scripts/spoken-video-scene-table.mjs'), sceneTableSource, { mode: 0o600 })
+  protectedFiles['scripts/spoken-video-scene-table.mjs'] = sha256(sceneTableSource)
+  // 内容安全检查同理：preflight 快照 import 它。
+  const contentSafetySource = await readFile(join(PACK_ROOT, 'spoken-video-content-safety.mjs'), 'utf8')
+  await writeFile(join(projectDir, 'scripts/spoken-video-content-safety.mjs'), contentSafetySource, { mode: 0o600 })
+  protectedFiles['scripts/spoken-video-content-safety.mjs'] = sha256(contentSafetySource)
+  // 场景↔字幕映射契约同理。
+  const sceneCuesSource = await readFile(join(PACK_ROOT, 'spoken-video-scene-cues.mjs'), 'utf8')
+  await writeFile(join(projectDir, 'scripts/spoken-video-scene-cues.mjs'), sceneCuesSource, { mode: 0o600 })
+  protectedFiles['scripts/spoken-video-scene-cues.mjs'] = sha256(sceneCuesSource)
   // 字幕阶段对齐守卫的结论随工件进入任务：applied=true 表示安装的 SRT 已按音频重对齐。
   const alignmentGuard = subtitles?.diagnostics?.alignmentGuard
   if (alignmentGuard) await writeFile(join(inputsDir, 'subtitles-align.json'), json(alignmentGuard), { encoding: 'utf8', mode: 0o600 })
@@ -403,6 +420,9 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
     creativeFile: join(srcDir, 'CreativeVideo.tsx'),
     outputPath: join(outputsDir, 'final_video.mp4'),
     durationSeconds: props.durationSeconds,
+    // 渲染比例必须按真实画幅取整：竖屏是 1080x1920，用横屏的比例算出
+    // 1080x0.67 会得到非整数高度而让 --scale 直接失败。
+    orientation: props.orientation,
     protected: protectedFiles,
   }
 }
@@ -576,10 +596,13 @@ export async function evaluateAgentProjectComposition(workspace, { signal } = {}
  * `ReferenceError: a4 is not defined`，整轮 40 分钟报废。
  *
  * 抽帧而非全片：每帧都要开一次浏览器上下文，全片上千帧不现实；按场景中点抽样既能
- * 覆盖每个组件体，又把成本压在一分钟量级。场景边界从源码里的 `F(秒)` 锚点读，
- * 读不到就退化为均匀抽样（宁可多抽几帧，也不要漏掉整段）。
+ * 覆盖每个组件体，又把成本压在一分钟量级。场景边界从共享解析器读（场景表优先，
+ * 退时间锚点，再退均匀抽样）。
+ *
+ * @param onCoverage - 可选回调，收到 { frames, mode, spans }。mode 为 'even' 时说明
+ *   连时间锚点都没读出来，这道门的精度打了折——退化必须让主流程可见，不能静默。
  */
-export async function evaluateAgentProjectFrames(workspace, { signal } = {}) {
+export async function evaluateAgentProjectFrames(workspace, { signal, onCoverage } = {}) {
   signal?.throwIfAborted()
   const projectDir = workspace.projectDir
   const props = readTaskProps(projectDir)
@@ -587,6 +610,11 @@ export async function evaluateAgentProjectFrames(workspace, { signal } = {}) {
   if (!(durationSeconds > 0)) return null
   const fps = 30
   const totalFrames = Math.max(1, Math.ceil((durationSeconds + 0.1) * fps))
+  const coverage = sampleFrameCoverage(projectDir, totalFrames)
+  onCoverage?.(coverage)
+  // coverage.frames 是帧数摘要（给预检报告用），真正要渲染的帧号数组从
+  // sampleFrameNumbers 拿——直接迭代 coverage 会得到 `frames is not iterable`
+  //（2026-10-15 狸花猫项目实测：directing 阶段第 8 分钟整轮失败）。
   const frames = sampleFrameNumbers(projectDir, totalFrames)
   if (!frames.length) return null
   const scratch = join(projectDir, 'outputs', '.preflight-frames')
@@ -625,38 +653,35 @@ function readTaskProps(projectDir) {
 }
 
 /**
- * 从源码里的 `F(秒)` 时间锚点推断场景区间，取每个区间的中点抽一帧。
+ * 从源码里的场景表/时间锚点推断抽帧位置，取每个场景的中点。
+ *
+ * 边界解析统一走 spoken-video-scene-table.mjs（唯一真源）。旧实现只认 `F(秒)` 一种
+ * 写法，遇到 `const SCENES = [{ start: 0.11, end: 4.856 }]` 这种裸数字表会解析不出锚点、
+ * 静默退化成每 5 秒一帧——门报告 pass，实际没按场景抽（2026-10-15 实测 5 个项目命中 3/5）。
  *
  * 不能简单地把相邻锚点两两配对：同一场景里常有 0.2s 级的次级动画锚点
  * （`F(0)` 是入点、`F(0.2)` 是入场结束），那样会把它们切成一个独立「场景」，
  * 既抽到无意义的帧，又在末尾多出一段（2026-10-08 单测实测多抽 2 帧）。
- * 正确做法：先按「场景至少 0.5 秒」的阈值把密集锚点并成场景起点，再取相邻起点
- * 之间的中点。认不出锚点就按每 5 秒一帧均匀抽样——覆盖不完整也比只验加载期强。
+ *
+ * @returns 帧号数组；解析不出任何边界时退回均匀抽样（宁可多抽几帧，也不要漏掉整段）。
  */
 export function sampleFrameNumbers(projectDir, totalFrames) {
   const fps = 30
-  let source = ''
-  try { source = readFileSync(join(projectDir, 'src', 'CreativeVideo.tsx'), 'utf8') } catch {}
-  const seconds = [...source.matchAll(/\bF\((\d+(?:\.\d+)?)\)/gu)].map((m) => Number(m[1]))
-  const anchors = [...new Set(seconds)].filter((s) => Number.isFinite(s) && s >= 0).sort((a, b) => a - b)
-  if (anchors.length >= 2) {
-    // 场景起点：第一个锚点，以及那些离上一个起点足够远的锚点。
-    const starts = [anchors[0]]
-    for (const value of anchors.slice(1)) {
-      if (value - starts[starts.length - 1] >= 0.5) starts.push(value)
-    }
-    if (starts.length >= 2) {
-      const frames = []
-      for (let i = 0; i + 1 < starts.length; i += 1) {
-        const mid = Math.round(((starts[i] + starts[i + 1]) / 2) * fps)
-        frames.push(Math.max(0, Math.min(totalFrames - 1, mid)))
-      }
-      if (frames.length) return [...new Set(frames)]
-    }
-  }
-  const fallback = []
-  for (let second = 2; second * fps < totalFrames; second += 5) fallback.push(Math.round(second * fps))
-  return fallback
+  return sceneSamplePlan(readCreativeSource(projectDir), totalFrames, fps).frames
+}
+
+/**
+ * 抽帧门这次实际用的是什么边界，以及退化了几档。
+ *
+ * 退化必须可见：主流程把它写进预检报告，UI 和排查时能一眼看出「这道门报 pass 但
+ * 其实没按场景抽」。levels 依次是 scene-table（按场景表，最准）→ anchors（按时间
+ * 锚点）→ even（均匀抽样，最弱）。
+ */
+export function sampleFrameCoverage(projectDir, totalFrames) {
+  const fps = 30
+  const source = readCreativeSource(projectDir)
+  const plan = sceneSamplePlan(source, totalFrames, fps)
+  return { frames: plan.frames.length, mode: plan.mode, spans: parseSceneSpans(source).length }
 }
 
 function waitBeforeRetry(ms, signal) {
@@ -667,6 +692,14 @@ function waitBeforeRetry(ms, signal) {
     signal?.addEventListener('abort', onAbort, { once: true })
   })
 }
+
+/**
+ * Remotion 的默认并发是 min(8, 核数/2)：本机 16 核时它把 16 个逻辑核只用掉 8 个，
+ * 而 CPU 采样显示渲染全程只有 43% 占用、GPU 常年 1%，说明 CPU 还有一半是闲的。
+ * 实测把并发提到 16，1000 帧中段画面从 25s 降到 23s（-8%）。收益不大但零风险，
+ * 再往上（24）实测回到 23s，CPU 已被喂饱，所以 16 就是拐点。
+ */
+export const RENDER_CONCURRENCY = 16
 
 /** Render the already-authored Agent project through the locally pinned Remotion CLI. */
 export async function renderSpokenVideoAgentProject(workspace, { signal, onProgress } = {}) {
@@ -689,6 +722,7 @@ export async function renderSpokenVideoAgentProject(workspace, { signal, onProgr
       // 让预编码走显卡（NVENC），把 CPU 留给每帧的 DOM 渲染；无可用硬件编码器时
       // 自动退回 libx264（if-possible 不会让渲染失败）。
       '--hardware-acceleration', 'if-possible',
+      '--concurrency', String(RENDER_CONCURRENCY),
     ], { cwd: workspace.projectDir, timeout: 30 * 60 * 1000, maxBuffer: 1024 * 1024 * 24 })
     let pending = ''; let lastProgressAt = 0; let progressTail = Promise.resolve()
     const flushProgress = () => {

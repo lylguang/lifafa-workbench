@@ -6,6 +6,9 @@ import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { SUSPICION_MAX, SUSPICION_MEAN, decodePcmMono8k, driftStats, estimateStarts, parseSrt, snapStarts, speechIntervalsFromPcm } from './spoken-video-subtitle-align.mjs'
+import { parseSceneSpans, sceneBoundaryMode } from './spoken-video-scene-table.mjs'
+import { inspectContentSafety } from './spoken-video-content-safety.mjs'
+import { inspectSceneCueCoverage, parseSceneCueMap } from './spoken-video-scene-cues.mjs'
 
 const motionProperty = (name) => /^(?:animation|animationname|transition|transitionproperty)$/u.test(String(name).replace(/^(?:-webkit-|-moz-|-o-|Webkit|Moz|O)/u, '').replaceAll('-', '').toLowerCase())
 const literal = (node) => ['TSAsExpression', 'TSSatisfiesExpression', 'TSNonNullExpression', 'ParenthesizedExpression'].includes(node?.type) ? literal(node.expression) : node?.type === 'StringLiteral' ? node.value : node?.type === 'TemplateLiteral' && node.expressions.length === 0 ? node.quasis[0].value.cooked : null
@@ -93,13 +96,10 @@ export function inspectTimelineAlignment(source, srt) {
     cues.push({ from, to })
   }
   if (cues.length < 3) return findings
-  // 只取 SCENES 表里的场景起点（文件里还有大量动画用的 F()，不能全收）
-  const table = /const SCENES[\s\S]*?=\s*\[([\s\S]*?)\]/u.exec(source || '')
-  if (!table) return findings
-  const starts = []
-  const fRe = /start:\s*(?:F|sec|at)\s*\(\s*([\d.]+)\s*\)/gu
-  while ((m = fRe.exec(table[1]))) starts.push(Number(m[1]))
-  starts.sort((a, b) => a - b)
+  // 场景起点统一从共享解析器读。旧实现自己扫 `start:\s*(?:F|sec|at)\s*\(...\)`，
+  // 只认带括号的一种写法，遇到 `start: 0.11` 这样的裸数字表会整条静默忽略——
+  // 门报告 pass，实际根本没检查过（2026-10-15 实测 5 个项目命中 3/5）。
+  const starts = parseSceneSpans(source).map((span) => span.start).sort((a, b) => a - b)
   if (starts.length < 3) return findings
   // 场景边界落在某条 cue 内部（留 0.6s 容差，避免句子极短时误判）
   const midSentence = []
@@ -113,6 +113,27 @@ export function inspectTimelineAlignment(source, srt) {
     report('timeline-drift', `${starts.length} 个场景里有 ${midSentence.length} 个边界切在语音句子中间（如 ${midSentence.slice(0, 4).map((t) => `${t}s`).join('、')}）：画面分节必须落在字幕 cue 的接缝上，不能按稿件段落估算秒数。请回到 inputs/subtitles.srt，用覆盖该场景主题的那条 cue 的起止时间重定边界。`)
   }
   return findings
+}
+
+/**
+ * 场景边界解析结果的降级警告——只产警告，不阻塞渲染。
+ *
+ * 退化不等于代码有错，但它让两道时序门（抽帧门、漂移门）的精度打折，必须可见。
+ * 尤其 `scene-table` 档：导演写的是裸数字 `start: 0.11` 时这两道门此前会静默跳过，
+ * 报告却显示通过——这是「门报 pass 但没按场景检查」这类问题的唯一线索。
+ */
+export function inspectSceneBoundaryCoverage(source) {
+  const warnings = []
+  const report = (code, message) => warnings.push({ code, file: 'src/CreativeVideo.tsx', line: 1, column: 1, message })
+  const mode = sceneBoundaryMode(source)
+  const spans = parseSceneSpans(source)
+  if (mode === 'scene-table') return warnings
+  if (mode === 'anchors') {
+    report('scene-table-unused', '未能读出 SCENES 场景表，抽帧求值门已退化为按源码时间锚点（F()）抽样，场景边界与字幕的对应检查也未生效。建议在 CreativeVideo.tsx 里导出 `const SCENES = [{ id, start, end }]`（秒，或经 `F()` 转帧），让边界可被机器校验。')
+    return warnings
+  }
+  report('scene-table-missing', spans.length ? `只读到 ${spans.length} 个场景边界，不足以检查场景与字幕的对应。` : '未能读出任何场景边界（既没有可解析的 SCENES 表，也没有 F() 时间锚点）：抽帧求值门已退化为每 5 秒一帧，场景与字幕的对应检查未生效。')
+  return warnings
 }
 
 /**
@@ -162,11 +183,21 @@ export async function inspectAgentProject(workspace) {
   if (!creativeSource.trim()) findings.push({ code: 'empty', file: 'src/CreativeVideo.tsx', line: 1, column: 1, message: 'CreativeVideo.tsx 为空。' })
   else {
     findings.push(...inspectCreativeSource(creativeSource))
+    // 产物内容安全：凭据、本机路径、不该有的能力、自动加载指令文件。只警告不阻塞——
+    // 见 spoken-video-content-safety.mjs 头注（现存产物零命中，这道闸防的是以后）。
+    warnings.push(...inspectContentSafety(creativeSource))
     // 场景边界必须落在真实语音的时间点上：字幕时间轴是唯一依据，缺失就无从对齐。
     const srt = await readFile(join(workspace.projectDir, 'inputs', 'subtitles.srt'), 'utf8').catch(() => '')
     if (!srt.trim()) findings.push({ code: 'timeline-missing', file: 'inputs/subtitles.srt', line: 1, column: 1, message: '缺少字幕时间轴：画面场景边界必须有真实语音时间可依，请先生成字幕再制作视频。' })
     else {
       findings.push(...inspectTimelineAlignment(creativeSource, srt))
+      warnings.push(...inspectSceneBoundaryCoverage(creativeSource))
+      // 场景 ↔ 字幕句的映射契约：导演若在 SCENES 旁声明了 cueRange，就逐幕核对
+      // 覆盖完整、无重叠、接缝对齐。没声明则整条跳过（渐进加固，不强制）。
+      const cueMap = parseSceneCueMap(creativeSource, parseSceneSpans(creativeSource))
+      if (cueMap.length >= 2) {
+        warnings.push(...inspectSceneCueCoverage(cueMap, parseSrt(srt)).map((item) => ({ code: item.code, file: 'src/CreativeVideo.tsx', line: 1, column: 1, message: item.message })))
+      }
       warnings.push(...await inspectSubtitleAudioAlignment(workspace.projectDir, srt))
     }
   }
@@ -175,6 +206,7 @@ export async function inspectAgentProject(workspace) {
     repairable: findings.length > 0 && findings.every((item) => item.code !== 'protected-file'),
     findings,
     warnings,
+    sceneBoundaryMode: creativeSource ? sceneBoundaryMode(creativeSource) : 'empty',
     failures: findings.map((item) => `${item.file}:${item.line}:${item.column} ${item.message}`),
     creativeBytes: Buffer.byteLength(creativeSource), creativeSource,
   }
