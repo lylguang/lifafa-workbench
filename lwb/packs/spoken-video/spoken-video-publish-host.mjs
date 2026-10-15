@@ -212,8 +212,16 @@ export class SpokenVideoPublishHost {
       // 自定义渠道的「可用」不看密钥：自建服务可能完全不校验，密钥留空也能用。
       custom: { label: PROVIDER_LABEL.custom, credential: await this.#credentialStatus('custom'), custom: true },
     }
+    // 自定义渠道的地址要**连默认值一起算**：customImageDefaults 里本来就带一份
+    // 可用的预设（baseUrl / protocol / path），从没打开过「自定义生图」表单的用户
+    // 也就没保存过 customImage——此时只看 settings.customImage 会一律判成「缺少
+    // 服务地址」，尽管默认地址一直都在、Key 也存着（2026-10-12 用户报这个错，
+    // 而同一条视频的封面此前用同一个 custom 渠道成功生成过，说明地址当时可用、
+    // 只是判断口径与实际可用性脱节）。
+    const defaults = customImageDefaults(this.environment)
+    const effectiveCustom = settings.customImage?.baseUrl ? settings.customImage : defaults
     const configured = provider === 'custom'
-      ? Boolean(settings.customImage?.baseUrl)
+      ? Boolean(effectiveCustom?.baseUrl)
       : providers[provider].credential.configured === true
     return {
       // `enabled` remains as a compatibility alias for existing consumers. A
@@ -224,10 +232,13 @@ export class SpokenVideoPublishHost {
       model: typeof settings.model === 'string' && settings.model.trim() ? settings.model.trim() : publishImageConfig(this.environment).model,
       providers,
       // 界面用它预填自定义表单；没配过时给一份能直接改的默认值，而不是空表单。
-      customDefaults: customImageDefaults(this.environment),
+      customDefaults: defaults,
       // 把预设的展示信息一并给前端：填 Key 前用户就该知道这是哪家服务、怎么用。
       customPreset: { ...CUSTOM_IMAGE_PRESET },
+      // 回传**生效中**的那份配置（保存值优先、否则默认值），让前端显示的地址与
+      // 实际发请求用的地址一致——否则界面显示「未配置」、实际却能跑。
       custom: settings.customImage || null,
+      customEffective: effectiveCustom,
       imageMaxBytes: MAX_IMAGE_BYTES,
     }
   }
@@ -241,14 +252,19 @@ export class SpokenVideoPublishHost {
     if (!this.connectionSettings?.update) fail('SPOKEN_VIDEO_PUBLISH_CONNECTION_UNAVAILABLE', '当前环境不支持保存生图设置。')
     if (apiKey) await this.#credentials().set(ref, apiKey)
     const patch = { provider, model: text(input.model || publishImageConfig(this.environment).model, '生图模型', 120) }
-    // 自定义渠道必须带一个能用的地址，否则「已配置」是假的。
+    // 自定义渠道必须带一个能用的地址，否则「已配置」是假的。地址取值顺序：
+    // 表单填的 → 已保存的 → 预设默认值。**默认值这一级不能省**：只想换个 Key 的
+    // 用户不会去填地址，缺了它就会在保存时报「自定义生图地址无效」——
+    // 而默认地址本来就是可用的（2026-10-12 用户只填了 Key 就撞上这个）。
     if (provider === 'custom') {
+      const saved = this.connectionSettings.get?.()?.customImage
+      const defaults = customImageDefaults(this.environment)
       patch.customImage = parseCustomImageConfig({
-        baseUrl: input.custom?.baseUrl ?? input.baseUrl ?? this.connectionSettings.get?.()?.customImage?.baseUrl,
-        protocol: input.custom?.protocol ?? this.connectionSettings.get?.()?.customImage?.protocol,
-        path: input.custom?.path,
+        baseUrl: input.custom?.baseUrl ?? input.baseUrl ?? saved?.baseUrl ?? defaults?.baseUrl,
+        protocol: input.custom?.protocol ?? saved?.protocol ?? defaults?.protocol,
+        path: input.custom?.path ?? saved?.path,
         model: patch.model,
-        authHeader: input.custom?.authHeader,
+        authHeader: input.custom?.authHeader ?? saved?.authHeader,
       })
     }
     await this.connectionSettings.update(patch)
@@ -314,8 +330,10 @@ export class SpokenVideoPublishHost {
       status: 'queued', phase: 'agent', error: null, expectedRevision, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null,
       sourceSnapshot: { script: detail.artifacts?.script?.data, topic: detail.artifacts?.topic?.data, video: detail.artifacts?.video?.data },
       // 自定义渠道的地址/协议要随任务一起冻结：用户中途改了配置，不该让已在跑的
-      // 这一轮中途换服务。
-      imageProvider: skipCovers ? null : (settings.configured ? { provider: settings.provider, model: settings.model, ...(settings.provider === 'custom' ? { custom: settings.custom } : {}) } : null),
+      // 这一轮中途换服务。冻结的是**生效中**的那份（保存值优先、否则用预设默认值）
+      // ——status().custom 若只回 settings.customImage，从没保存过配置的用户会
+      // 冻结一个空地址进去，跑到生图那步才报「缺少服务地址」（2026-10-12 实踩）。
+      imageProvider: skipCovers ? null : (settings.configured ? { provider: settings.provider, model: settings.model, ...(settings.provider === 'custom' ? { custom: settings.customEffective || settings.custom } : {}) } : null),
       skipCovers: skipCovers || undefined,
       coverErrors: {},
       dsh: dshTrace(),
@@ -496,7 +514,12 @@ export class SpokenVideoPublishHost {
     let result
     let pollUrl = null
     if (provider === 'custom') {
-      const custom = task.imageProvider.custom
+      // 地址兜底：任务冻结的是「生效中」的那份，但历史任务可能冻的是空值
+      // （修好 status/冻结口径之前提交的）。这时用预设默认地址兜住，而不是
+      // 让整轮生图失败——封面可以后补，跑不完的任务代价更大。
+      const custom = task.imageProvider.custom?.baseUrl
+        ? task.imageProvider.custom
+        : customImageDefaults(this.environment)
       if (!custom?.baseUrl) fail('SPOKEN_VIDEO_PUBLISH_CONFIG_INVALID', '自定义生图缺少服务地址，请在「封面生图」里补全配置。')
       const authHeaders = resolved?.value
         ? { Authorization: custom.authHeader === 'bearer' ? `Bearer ${resolved.value}` : resolved.value }

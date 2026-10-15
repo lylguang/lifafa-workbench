@@ -1264,3 +1264,27 @@ test('the publish result carries the fixed prompt, not whatever the agent wrote'
   assert.equal(result.prompts.negative, '', '固定句式里没有「不要什么」，negative 不再往下传')
   assert.match(result.coverTitle, /^AI 大模型价格战/u)
 })
+
+test('自定义生图：没保存过地址也判为可用，并回传生效中的那份配置', async (t) => {
+  // 2026-10-12 回归：用户只存了 Key、没打开过「自定义生图」表单，于是 settings.customImage
+  // 是空的。而 status() / 任务冻结 / #generateCover 三处都只看 settings.customImage，
+  // 从不回落到 customImageDefaults 的预设地址（https://api.lk888.ai/v1，实际可用），
+  // 于是每次生图都报「自定义生图缺少服务地址」。同一条视频的封面此前用同一个 custom
+  // 渠道成功生成过——地址当时可用，坏的是判断口径。
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const credentials = credentialStore({})
+  const settings = connectionSettings({ provider: 'custom', model: 'tt-image-2.5', customImage: null })
+  const host = publishHost({ store, credentials, settings })
+
+  const status = await host.status()
+  assert.equal(status.provider, 'custom')
+  assert.equal(status.configured, true, '预设默认地址一直可用，不该判成未配置')
+  assert.ok(status.customEffective?.baseUrl, '要回传生效中的那份配置，前端显示的地址才等于实际请求地址')
+  assert.equal(status.customEffective.baseUrl, status.customDefaults.baseUrl)
+
+  // 只填 Key、不填地址也要能保存成功（过去会在 parseCustomImageConfig 抛「地址无效」）。
+  const saved = await host.configureConnection({ provider: 'custom', apiKey: 'sk-custom-only' })
+  assert.equal(saved.configured, true)
+  assert.ok(settings.get().customImage?.baseUrl, '保存时应把默认地址一并落盘，下次冻结才有地址可用')
+})
