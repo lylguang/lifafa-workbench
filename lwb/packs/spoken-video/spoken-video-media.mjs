@@ -1,4 +1,5 @@
 import { validateSrt } from './spoken-video-subtitles.mjs'
+import { measureNarrativeRhythm, measureSceneTimeline } from './spoken-video-rhythm.mjs'
 
 export const MEDIA_OPERATION_TYPES = Object.freeze(['voiceover', 'subtitles', 'video', 'qc'])
 export const MEDIA_OPERATION_STATES = Object.freeze(['queued', 'running', 'succeeded', 'failed'])
@@ -329,8 +330,80 @@ export function normalizeProbe(value) {
   }
 }
 
+/**
+ * 叙事节奏判据。
+ *
+ * 这些数字来自扫描 46 条历史成片的实测分布，不是拍脑袋定的：
+ *   幕长   —— 历史成片从 6s 到 32s 都有，12-15s 是已能达到的水平，所以只卡「过短」和「过长」两端。
+ *   字幕   —— 横屏单行 28 字上限，超出必须换行；两条以上就压字号，实测 37-42px 在预览里已偏小。
+ *   钩子   —— 前 3 秒没有任何发言才是问题；前导静音（首 cue 较晚）不算空白片头。
+ *
+ * 阈值可按内容类型覆盖：{ longestSceneSeconds, minAverageSceneSeconds, maxOverTwoLines }。
+ * 默认值只拦「明显不对」，不拦风格差异。
+ */
+export const DEFAULT_RHYTHM_THRESHOLDS = Object.freeze({
+  /** 单幕超过这个秒数，提示语义是否真的只有一件事 */
+  longestSceneSeconds: 45,
+  /** 平均幕长低于这个值，说明分幕碎到无法形成完整画面 */
+  minAverageSceneSeconds: 4,
+  /** 允许超两行的字幕条数占比上限（0.25 = 最多四分之一） */
+  maxOverTwoLinesRatio: 0.25,
+})
+
+/**
+ * 把节奏指标变成 issue/warning 列表。
+ *
+ * 分级理由：技术问题（分辨率、帧率）会直接毁掉片子，必须 fail；
+ * 节奏问题多数是「值得再看一眼」而不是「片子不能用」，默认走 warnings。
+ * 只��一条进 issues——前 3 秒完全静默，因为那是最贵的三秒。
+ */
+export function evaluateRhythm(rhythm, thresholds = DEFAULT_RHYTHM_THRESHOLDS) {
+  const issues = []
+  const warnings = []
+  if (!rhythm) return { issues, warnings }
+
+  if (rhythm.hook?.silentHook) {
+    issues.push('前 3 秒没有任何发言内容：配音前导静音期间画面全空，等于放弃留存闸门。')
+  }
+
+  if (rhythm.scenes) {
+    if (rhythm.scenes.longestSceneSeconds > thresholds.longestSceneSeconds) {
+      warnings.push(
+        `最长场景 ${rhythm.scenes.longestSceneSeconds}s（${rhythm.scenes.longestSceneId}）超过 ${thresholds.longestSceneSeconds}s：确认它真的只讲一件事，否则拆成相邻短场景。`,
+      )
+    }
+    if (rhythm.scenes.averageSceneSeconds < thresholds.minAverageSceneSeconds) {
+      warnings.push(
+        `平均幕长 ${rhythm.scenes.averageSceneSeconds}s 过短：分幕过碎会让每个场景来不及成画。`,
+      )
+    }
+  }
+
+  const subtitles = rhythm.subtitles
+  if (subtitles?.cueCount) {
+    const ratio = subtitles.overTwoLines / subtitles.cueCount
+    if (ratio > thresholds.maxOverTwoLinesRatio) {
+      warnings.push(
+        `${subtitles.overTwoLines}/${subtitles.cueCount} 条字幕超出两行：过长会被迫缩小字号，移动端可读性下降。`,
+      )
+    }
+  }
+
+  return { issues, warnings }
+}
+
 /** Deterministic release gate for media topology and subtitle availability. */
-export function buildTechnicalReport({ video, audio, subtitles, subtitleEnabled = true, orientation = 'portrait' }) {
+export function buildTechnicalReport({
+  video,
+  audio,
+  subtitles,
+  subtitleEnabled = true,
+  orientation = 'portrait',
+  // 叙事节奏：可选。缺 cues 或 sceneSource 时自动降级为 null，指标缺失不拦截发布。
+  cues = null,
+  sceneSource = null,
+  rhythmThresholds = DEFAULT_RHYTHM_THRESHOLDS,
+}) {
   const issues = []
   const warnings = []
   const landscape = orientation === 'landscape'
@@ -344,6 +417,24 @@ export function buildTechnicalReport({ video, audio, subtitles, subtitleEnabled 
     issues.push('视频与配音时长差超过 2 秒。')
   }
   if (subtitleEnabled && !subtitles?.cueCount) issues.push('视频没有可用字幕。')
+
+  // 叙事节奏指标。全部输入可选：SCENES 表解析不出来、字幕 cue 没带过来时
+  // rhythm 为 null，只是不报节奏问题，绝不因为「测不了」而拦截发布。
+  const sceneTimeline = sceneSource ? measureSceneTimeline(sceneSource) : null
+  const rhythm = cues || sceneSource
+    ? measureNarrativeRhythm({
+        sceneTimeline,
+        cues: Array.isArray(cues) ? cues : [],
+        durationSeconds: video?.durationSeconds || null,
+        orientation,
+      })
+    : null
+  if (rhythm) {
+    const judged = evaluateRhythm(rhythm, rhythmThresholds)
+    issues.push(...judged.issues)
+    warnings.push(...judged.warnings)
+  }
+
   return {
     passed: issues.length === 0,
     issues,
@@ -351,5 +442,6 @@ export function buildTechnicalReport({ video, audio, subtitles, subtitleEnabled 
     video,
     audio,
     subtitles: { enabled: subtitleEnabled, cueCount: subtitles?.cueCount || 0, warnings },
+    rhythm,
   }
 }

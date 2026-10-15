@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { appendFileSync } from 'node:fs'
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { execFile, spawn } from 'node:child_process'
@@ -6,7 +7,7 @@ import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { spokenVideoDataPath } from './spoken-video-paths.mjs'
-import { guardSubtitleTimeline } from './spoken-video-subtitle-align.mjs'
+import { guardSubtitleTimeline, decodePcmMono8k, speechIntervalsFromPcm } from './spoken-video-subtitle-align.mjs'
 import { buildLineArtPlanPrompt, checkImageEngine, generateLineArtImage, LINE_ART_PLAN_SCHEMA, normalizeLineArtPlan, whiteboardBridgeUrl } from './spoken-video-whiteboard-art.mjs'
 import { executionEvent, executionTransition } from './spoken-video-execution.mjs'
 import WebSocket from 'ws'
@@ -38,7 +39,7 @@ import {
   remotionRendererAvailable,
   renderSpokenVideoAgentProject,
 } from './spoken-video-remotion.mjs'
-import { validateSrt } from './spoken-video-subtitles.mjs'
+import { splitLongCues, validateSrt } from './spoken-video-subtitles.mjs'
 import { buildVideoCreatorPrompt, buildVideoCreatorRepairPrompt, buildVideoEditorialRepairPrompt, buildVideoReviewerPrompt, normalizeVideoReview, VIDEO_REVIEW_SCHEMA } from './spoken-video-video-agent.mjs'
 
 const execFilePromise = promisify(execFile)
@@ -97,6 +98,213 @@ function localBridgeBase(environment = process.env) {
   return String(configured || 'http://127.0.0.1:8199').replace(/\/+$/u, '')
 }
 
+/**
+ * 从配音任务的「句级时间轴」（桥接合成时记录，见 bridge.mjs 的
+ * splitTextSegmentsWithMeta 与拼接前的 ffprobe 段时长）生成精确 SRT。
+ *
+ * 这是字幕对齐的治本路径：配音是分段合成的，段边界是合成边界（ffprobe 实测），
+ * 段间固定 0.2s 静音——每句话的起止在合成时就确定了，不需要 ASR 事后猜。
+ * 此前让远程 ASR 给时间戳，实测滞后真实语音 4~6 秒（用户报「声音和字幕对不上」），
+ * 守卫的锚点修正只能在锚点之间插值，句间仍有 1~3s 残差。
+ *
+ * 时间轴的句子文本是 speechText（数字已转中文），cue 文本用**原稿**：两者按
+ * 「同一分句正则切出的句序号」配对——数字转换不增删句末标点，句数应当一致；
+ * 不一致（原稿被手工改动等）返回 null，回退到 ASR+守卫路径。
+ *
+ * @returns {Promise<string|null>} SRT 字符串，拿不到时间轴或配对失败时 null。
+ */
+
+/**
+ * 把若干语音 run 归并成与句子一一对应的组。
+ *
+ * 候选切点是 run 之间的每个间隙；要用 k−1 个把 n 个 run 切成 k 组。目标是让每组
+ * 的**实际语音时长**正比于对应句子的发音字符数——TTS 各句语速接近，字数是最强的
+ * 单一先验，而间隙大小不是（实测分布连续、无双峰）。
+ *
+ * 做法：动态规划。cost(第 j 组覆盖 run[a..b]) = |实际时长 − 该句期望时长|，
+ * 期望时长按总语音时长 × 该句字数占比分配。段数很小（<8 句），O(k·n²) 完全够用。
+ *
+ * 返回 null 表示无法切出恰好 k 组（run 太少或句数异常），由调用方回退字符占比。
+ */
+export function groupRunsByCharWeight(runs, texts) {
+  const n = runs.length
+  const k = texts.length
+  if (!n || !k || n < k) return null
+  const weights = texts.map((t) => (String(t).match(/[^\s]/g) || []).length || 1)
+  const weightSum = weights.reduce((a, b) => a + b, 0)
+  const speechTotal = runs.reduce((sum, [f, t]) => sum + (t - f), 0)
+  // cost[j][b] = 前 j+1 组恰好切到 run b 的最小代价
+  const INF = Infinity
+  const cost = Array.from({ length: k }, () => new Array(n).fill(INF))
+  const from = Array.from({ length: k }, () => new Array(n).fill(-1))
+  for (let b = 0; b < n; b += 1) {
+    // 第 0 组只能从 run 0 开始
+    const expected = (speechTotal * weights[0]) / weightSum
+    const actual = runs[b][1] - runs[0][0]
+    cost[0][b] = Math.abs(actual - expected)
+    from[0][b] = -1
+  }
+  for (let j = 1; j < k; j += 1) {
+    for (let b = j; b < n; b += 1) {
+      for (let a = j - 1; a < b; a += 1) {
+        if (cost[j - 1][a] === INF) continue
+        const expected = (speechTotal * weights[j]) / weightSum
+        const actual = runs[b][1] - runs[a][0]
+        const total = cost[j - 1][a] + Math.abs(actual - expected)
+        if (total < cost[j][b]) { cost[j][b] = total; from[j][b] = a }
+      }
+    }
+  }
+  if (cost[k - 1][n - 1] === INF) return null
+  const cuts = []
+  let b = n - 1
+  for (let j = k - 1; j >= 1; j -= 1) {
+    const a = from[j][b]
+    if (a < 0) return null
+    cuts.unshift(a)
+    b = a
+  }
+  const groups = []
+  for (let i = 0; i < k; i += 1) {
+    const fromRun = i === 0 ? 0 : cuts[i - 1] + 1
+    const toRun = i === k - 1 ? n - 1 : cuts[i]
+    let start = runs[fromRun][0]
+    let end = runs[toRun][1]
+    for (let r = fromRun; r <= toRun; r += 1) { start = Math.min(start, runs[r][0]); end = Math.max(end, runs[r][1]) }
+    groups.push([start, end])
+  }
+  return groups
+}
+
+async function segmentTimelineSrt(task, environment, fetchJson, { audioPath } = {}) {
+  if (task.input?.provider !== 'scitiger') return null
+  const bridgeTaskId = task.result?.taskId
+  if (!bridgeTaskId) return null
+  let timeline = null
+  try {
+    const body = await fetchJson(`${localBridgeBase(environment)}/admin/tasks`, '桥接任务列表')
+    timeline = (Array.isArray(body?.tasks) ? body.tasks : []).find((t) => t.id === bridgeTaskId)?.segmentTimeline || null
+  } catch { return null }
+  if (!timeline?.segments?.length) return null
+
+  // 段边界（ffprobe 实测）是地面真值，但段内句子按字符占比只对「连续语流」成立——
+  // TTS 在句号处也停 0.2~0.3s，段内句间停顿会让后面的句子累积偏移 1~2s
+  // （2026-10-11 首验：40 句里 18 句 onset 偏差 >0.4s，全部集中在段内第二句起）。
+  // 所以段内必须用 VAD 语音段顺序配对句子：把段内的语音 run 按停顿大小归并成
+  // 与句数相同的组，句起点 = 组内第一个语音 run 的起点（真实语音起点，误差 ≤0.1s）。
+  let intervals = null
+  if (audioPath) {
+    try {
+      const pcm = await decodePcmMono8k(audioPath)
+      intervals = speechIntervalsFromPcm(pcm)
+    } catch { intervals = null }
+  }
+
+  // 原稿按同一分句正则切句，与时间轴逐序号配对。
+  const SENTENCE_SPLIT = /(?<=[。！？!?；;\n])/
+  const source = String(task.source?.text || '').replace(/\s+/g, ' ')
+  const sourceSentences = source.split(SENTENCE_SPLIT).map((s) => s.trim()).filter(Boolean)
+  const entries = timeline.segments.flatMap((seg) => seg.sentences || [])
+
+// 逐段：把段内语音 runs 归并成与句数相同的组。
+  //
+  // 怎么选句界（2026-10-11 实测两次踩坑的结论）：
+  //  · 「按 gap 从大到小取 k−1 个」是错的。实测全片 90 个间隙的中位数 0.33s、
+  //    分布连续（0.10~0.88s）**没有双峰**——TTS 句末停顿和句内自然停顿同量级，
+  //    纯按大小排序必然挑到句内停顿上。第一版就是这么错的：首句「宁德时代…藏着一句」
+  //    中间有个 0.42s 自然停顿被当成句界，窗口被撑大到 8.26s，把第二句的前 1.6s
+  //    吞了进去——用户在 7 秒听到的是第二句，画面和字幕却还停在第一句。
+  //  · 正确的信号是**字数比例**：TTS 各句语速接近，某句该占多久 ≈ 它的发音字符占比。
+  //    所以在所有候选切点里做动态规划，取「每组实际语音时长 ∝ 该句字数」偏差最小的切法。
+  //    VAD 提供候选边界与真实起止，字数比例提供约束，两者互补。
+  const sentenceWindows = []
+  for (const seg of timeline.segments) {
+    const segStart = seg.startMs / 1000
+    const segEnd = (seg.startMs + seg.durMs) / 1000
+    const sentences = seg.sentences || []
+    const runs = (intervals || [])
+      .filter(([f, t]) => t > segStart + 0.02 && f < segEnd - 0.02)
+      .map(([f, t]) => [Math.max(f, segStart), Math.min(t, segEnd)])
+    const grouped = intervals && runs.length >= sentences.length
+      ? groupRunsByCharWeight(runs, sentences.map((sn) => sn.text))
+      : null
+    if (grouped) {
+      for (const group of grouped) {
+        sentenceWindows.push({ startMs: Math.round(group[0] * 1000), durMs: Math.round((group[1] - group[0]) * 1000) })
+      }
+      continue
+    }
+    // 回退：段内字符占比（无 VAD，或 runs 数与句数不匹配）
+    for (const sn of sentences) {
+      const segLen = Math.max(1, sn.end - sn.start || seg.end - seg.start)
+      const segBase = Math.max(1, seg.end - seg.start)
+      const relStart = (sn.start - seg.start) / segBase
+      const relEnd = (sn.end - sn.start) / segBase
+      sentenceWindows.push({ startMs: Math.round(segStart * 1000 + relStart * seg.durMs), durMs: Math.round(relEnd * seg.durMs) })
+    }
+  }
+
+  // 每句一条 cue；**超长句在标点处二分**（字幕单行 ≤28 字、两行约 ≤42 字的规范）。
+  //
+  // 2026-10-11 修正的关键约束：二分只影响**排版**，不影响**时间边界**。
+  // 此前每片按字数瓜分整句时长，而最终 end 取「下一 cue 开始 −0.06s」——于是第一句
+  // （45 字、含一处自然停顿）没找到合适切点、保持单片时，它的 end 被下一句的 8.32s
+  // 顶到 8.26s，**多显示了 0.4 秒**；而那 0.4 秒里音频已经在念第二句了
+  // （用户在 7 秒听到「大部分人看到的是车」，画面与字幕却仍停在第一句）。
+  //
+  // 所以每片 end 必须夹在**本句真实语音窗口** [entry.start, entry.start+dur] 内：
+  // 早于下一条 cue，但绝不超过本句语音末尾。
+  const pronounced = (t) => (t.match(/[^\s]/g) || []).length || 1
+  const cues = []
+  for (let i = 0; i < entries.length; i += 1) {
+    const entry = sentenceWindows[i]
+    const text = sourceSentences[i]
+    if (!text) return null
+    const pieces = []
+    if (pronounced(text) > 42) {
+      // 找最接近中点的逗号/顿号切一刀；切不开就按中点硬切。
+      const mid = Math.floor(text.length / 2)
+      let cut = -1
+      for (const p of ['，', '、', ',']) {
+        const idx = text.lastIndexOf(p, mid + 6)
+        if (idx > text.length * 0.3 && (cut < 0 || Math.abs(idx - mid) < Math.abs(cut - mid))) cut = idx + 1
+      }
+      if (cut > 0) { pieces.push(text.slice(0, cut), text.slice(cut)) } else { pieces.push(text) }
+    } else {
+      pieces.push(text)
+    }
+    const total = pieces.reduce((n, p) => n + pronounced(p), 0) || 1
+    let offsetMs = entry.startMs
+    for (const piece of pieces) {
+      const dur = Math.round((pronounced(piece) / total) * entry.durMs)
+      cues.push({ startMs: offsetMs, durMs: dur, sentenceEndMs: entry.startMs + entry.durMs, text: piece })
+      offsetMs += dur
+    }
+  }
+  const final = cues.map((cue, i) => {
+    const next = cues[i + 1]
+    // 结束时间 = 本句语音末尾与「下一句开始」里更早的那个，再抬到至少 0.45s。
+    // · 不能晚于下一句开头 60ms：否则用户在 7 秒已听到第二句、字幕却还显示第一句。
+    // · 不越过本句语音末尾：否则会出现「话还没说完字幕就没了」。
+    //   （+350ms 放宽试过，反而让 34/40 句变成字幕滞后 0.3~0.5s，更糟。）
+    // 下界固定 450ms，太短的字幕闪一下就没了。
+    const latest = next ? next.startMs - 60 : Infinity
+    const hardCap = cue.sentenceEndMs
+    const rawEnd = Math.max(cue.startMs + 450, Math.min(latest, hardCap))
+    return { start: cue.startMs / 1000, end: Math.min(rawEnd, cue.startMs + 30_000) / 1000, text: cue.text }
+  })
+  return buildSrt(final)
+}
+
+function buildSrt(cues) {
+  const pad = (n, w = 2) => String(n).padStart(w, '0')
+  const at = (seconds) => {
+    const ms = Math.max(0, Math.round(seconds * 1000))
+    return `${pad(Math.floor(ms / 3600000))}:${pad(Math.floor((ms % 3600000) / 60000))}:${pad(Math.floor((ms % 60000) / 1000))},${pad(ms % 1000, 3)}`
+  }
+  return cues.map((c, i) => `${i + 1}\n${at(c.start)} --> ${at(c.end)}\n${c.text}`).join('\n\n') + '\n'
+}
+
 // 手动任务的默认标题取文稿第一行非空内容（截 24 字）：通篇都叫「手动输入文稿」
 // 时，多条任务在列表里无法分辨（2026-10-02 用户在同步弹层里认不出自己要的那条）。
 function manualTitleFromText(value) {
@@ -115,7 +323,23 @@ function manualTitleFromText(value) {
 // 这么漏到渲染才炸的。所以再跑一道抽帧门，每场景渲一帧把那段代码逼出来。
 async function mergeRuntimeEvalFailure(report, workspace, signal) {
   const failure = await evaluateAgentProjectComposition(workspace, { signal })
-    ?? await evaluateAgentProjectFrames(workspace, { signal })
+    ?? await evaluateAgentProjectFrames(workspace, {
+      signal,
+      // 抽帧门退化时要如实上报：旧实现只认 F() 写法，遇到裸数字场景表会静默按
+      // 5 秒均匀抽样，而报告仍显示通过——「门报 pass 但没按场景抽」只有这条线索。
+      onCoverage: (coverage) => {
+        report.frameCoverage = coverage
+        if (coverage.mode === 'even') {
+          report.warnings.push({
+            code: 'frame-gate-even-sampling',
+            file: 'src/CreativeVideo.tsx',
+            line: 1,
+            column: 1,
+            message: '抽帧求值门未能读出场景边界，已退化为每 5 秒一帧：只能覆盖部分场景的组件体，「只有落到那段才求值」的坏引用可能被漏过。请让导演导出可解析的 SCENES 场景表。',
+          })
+        }
+      },
+    })
   if (!failure) return
   report.passed = false
   report.repairable = true
@@ -866,16 +1090,186 @@ function portableRelative(root, file) {
   return relative(root, file).split(sep).join('/')
 }
 
-function reviewTimestamps(durationSeconds) {
+/**
+ * 从导演生成的 Remotion 工程里读出场景边界（审片抽帧用）。
+ *
+ * 唯一实现在 spoken-video-scene-table.mjs，抽帧门与漂移门也调它。此前这里有一份
+ * 独立副本，两边覆盖范围不一致导致「门报 pass 但没按场景抽」（2026-10-15 实测 5 个
+ * 项目命中 3/5），详见该文件头注。
+ */
+export { parseSceneSpans } from './spoken-video-scene-table.mjs'
+
+/**
+ * 审片抽帧的保底数量。
+ *
+ * 时长加权铺底至少取这么多帧（场景数足够时）。12 是实测选的：历史成片场景数
+ * 中位 23、p90 约 40。注意这不是硬上限——场景特别多的片子会由最大空档约束
+ * （REVIEW_MAX_GAP_SECONDS）继续补帧，直到盖住空档或到达 REVIEW_FRAME_HARD_LIMIT。
+ */
+export const REVIEW_FRAME_LIMIT = 12
+
+/**
+ * 相邻抽帧点的最大允许间距（秒）。
+ *
+ * 「抽样点都没问题」不等于「没抽样点的地方也没问题」——缺陷藏在空档里。
+ * 2026-10-15 实测一条 39 场景的成片，12 帧铺底后 122.5s→202.8s 有 80 秒空档，
+ * 全白幕恰好落在其中，审片（只看 12 帧）给了 82 分通过。25 秒的取值：
+ * 历史成片时长中位约 6 分钟，12 帧铺底平均间距 30 秒——25 秒略紧于均值，
+ * 所以短中片几乎不触发补帧，只有长片/多场景片子才按需增长。
+ */
+export const REVIEW_MAX_GAP_SECONDS = 25
+
+/**
+ * 抽帧的绝对上限（含空档补帧）。
+ *
+ * 存在的意义是给成本封顶：一条 30 分钟的片子若不加限制会补出 70+ 帧。
+ * 审片耗时实测与帧数弱相关（6→12 帧只多 34 秒/轮），但 70 帧的图片 token
+ * 仍会显著变贵；80 帧足以把最长历史成片（8.5 分钟）的空档压到 25 秒内。
+ * store 侧的抽帧文件数校验跟随本值。
+ */
+export const REVIEW_FRAME_HARD_LIMIT = 24
+
+/** 没有场景表时的盲选系数（按全片比例）。与 REVIEW_FRAME_LIMIT 对齐。 */
+export const REVIEW_FRAME_LIMIT_FALLBACK = [0.03, 0.11, 0.2, 0.29, 0.38, 0.46, 0.55, 0.64, 0.72, 0.81, 0.9, 0.97]
+
+/*
+ * 曾经在这里加过一道「主画面非背景像素占比低于阈值即判空幕」的确定性闸门，
+ * 已删除——实测证明它不成立（2026-10-13）。
+ *
+ * 做法是量每帧里与四角背景色不同的像素占比。样本取自那条 359 秒、23 幕的成片，
+ * 每幕 60% 处各取一帧：整幕只剩页眉的空白幕是 6.3%，而一个内容完全正常、
+ * 只是画面疏朗的「左卡→连线→右卡」示意图是 **3.0%**——空白幕的占比反而更高。
+ * 两组分布整体重叠（3.0%-14.8%，中位 7.7%），任何单一阈值都必然误判。
+ *
+ * 结论：像素占比无法区分「空」与「疏朗」，这类判断只能交给看图的审片。
+ * 所以真正的修复是让审片真的看到那一幕（提高抽帧密度、按时长加权采样），
+ * 而不是加一个看起来更确定、实际上会误杀正常画面的阈值。
+ */
+
+/**
+ * 审片抽帧时刻。
+ *
+ * 2026-10-10 改过。原来这里只按全片比例盲选 6 个点（3%/20%/40%/60%/80%/97%），
+ * 完全不知道场景边界在哪——而场景边界就在同一份工程里写着。实测一条 460 秒、
+ * 18 个场景的片子，6 帧里 4 帧落在场景的前 20%（入场动画期），于是审片看到的是
+ * 「只有骨架」「内容没画出来」「像未完成」，而导演被要求去修这些并不存在的缺陷：
+ *
+ *   276.096s → honesty 场景的  5%  ← 两轮都被点「右半幅完全空白」
+ *   368.128s → dev     场景的 16%  ← 被点「三条事项并未绘制出来」
+ *    13.805s → deal    场景的 15%  ← 被点「卡内仅渲染出第一条要点」
+ *
+ * 6 帧里 4 帧天生有问题，而审片修复最多 2 轮（index.mjs 的 maxRepairs），
+ * 于是每条片子必然在 2 轮后仍判失败——这就是 5 个历史案例全灭的原因。
+ * 放宽超时只会让每次失败多烧 20 分钟渲染，治不了这个。
+ *
+ * 现在：拿到场景表就取「每帧落在某个场景的稳定期中段」，取不到才退回旧的比例盲选。
+ * 取中段而不是场景起点，是因为入场动画一般在场景前 20-30% 结束。
+ *
+ * 2026-10-13 再改：帧数从固定 6 帧改成随场景数增长（上限 REVIEW_FRAME_LIMIT）。
+ * 固定 6 帧在场景多于 6 个时必然漏看大部分场景——实测一条 359 秒、23 场景的
+ * 成片，6 帧只覆盖 6 幕，17 幕共 290 秒没人看过，其中整幕空白（blocker）被放过。
+ * 抽帧是审片唯一的证据来源，漏一幕就等于那一幕不存在。
+ */
+export function reviewTimestamps(durationSeconds, sceneSpans = null) {
   const duration = Math.max(0.2, Number(durationSeconds) || 0.2)
   const end = Math.max(0.05, duration - Math.min(0.12, duration * 0.05))
-  const factors = duration < 2 ? [0.08, 0.32, 0.58, 0.86] : [0.03, 0.2, 0.4, 0.6, 0.8, 0.97]
-  return [...new Set(factors.map((factor) => Math.min(end, Math.max(0, duration * factor)).toFixed(3)))].map(Number)
+  const clamp = (value) => Math.min(end, Math.max(0, value))
+
+  const spans = (Array.isArray(sceneSpans) ? sceneSpans : [])
+    .filter((span) => Number.isFinite(span?.start) && Number.isFinite(span?.end) && span.end > span.start)
+  if (spans.length >= 2) {
+    // 抽帧策略（2026-10-15 定稿）：按时长加权铺底 + 最大空档约束。
+    //
+    // 三代演进：
+    //   固定 6 帧 → 实测 23 场景只看 6 幕、17 幕 290 秒没人看（含整幕空白 blocker）
+    //   时长加权 12 帧 → 覆盖翻倍，但 39 场景的片子上仍有 80 秒空档，空幕恰好漏过
+    //   现在 → 在 12 帧的基础上再按「最大空档」补帧：任何相邻两帧间距超过
+    //          REVIEW_MAX_GAP_SECONDS 就在中间插帧，直到盖住或到达绝对上限。
+    //
+    // 为什么不直接把上限提到 20：39 场景的片子 20 帧也盖不住，空档还在；
+    // 而空档本身才是缺陷藏身的地方——「抽样点都没问题」不等于「没抽样点的地方
+    // 也没问题」。约束空档是把「盖不住」变成「盖得住」，帧数随实际需要增长。
+    //
+    // 取每个场景的 60% 处（不是起点）：入场动画一般在场景前 20-30% 结束。
+    const limit = Math.min(REVIEW_FRAME_LIMIT, spans.length)
+    const first = spans[0].start
+    const total = Math.max(0.01, spans[spans.length - 1].end - first)
+    const pickedIndexes = []
+    // 开头两幕强制入选。时长均分的第一个目标点在 15 秒开外，而实测两条相邻的
+    // 场景（0.1-5.5s 的钩子、6.1-21.2s 的整幕空白）都落在那之前——按时长均分
+    // 会同时漏掉开场钩子和整幕空白这两处最该看的地方。开头是缺陷最密集、
+    // 也最影响留存的区间，所以显式给它留两个名额。
+    for (let index = 0; index < Math.min(2, limit); index += 1) pickedIndexes.push(index)
+    for (let i = pickedIndexes.length; i < limit; i += 1) {
+      const target = first + (total * (i + 0.5)) / limit
+      let index = spans.findIndex((span) => target >= span.start && target < span.end)
+      if (index === -1) index = i * spans.length >= limit ? spans.length - 1 : 0
+      if (pickedIndexes.includes(index)) {
+        // 目标场景已被选过：就近找一个还没选过的，长场景优先（信息量大的更容易出问题）。
+        const ordered = [...Array(spans.length).keys()]
+          .filter((candidate) => !pickedIndexes.includes(candidate))
+          .sort((a, b) => {
+            const spanA = spans[b].end - spans[b].start
+            const spanB = spans[a].end - spans[a].start
+            const distanceA = Math.abs(a - index)
+            const distanceB = Math.abs(b - index)
+            // 先看距离，再看时长：距离决定「大致均匀」，时长决定「多看长幕」。
+            return distanceA !== distanceB ? distanceA - distanceB : spanA - spanB
+          })
+        if (!ordered.length) break
+        index = ordered[0]
+      }
+      pickedIndexes.push(index)
+    }
+    const picked = pickedIndexes.map((index) => {
+      const span = spans[index]
+      // 60% 处：入场动画早已结束，同时离下一场景切换还有余量，短场景也能落在中间。
+      return clamp(span.start + (span.end - span.start) * 0.6)
+    })
+    // 最大空档约束：相邻抽帧点间距超阈值就在空档中点补帧，直到盖住。
+    // 补帧落点也要避开入场动画：优先落在「空档中点」所在的场景 60% 处。
+    const gapFilled = [...picked]
+    for (let guard = 0; guard < REVIEW_FRAME_LIMIT; guard += 1) {
+      const sorted = [...gapFilled].sort((a, b) => a - b)
+      let worstGap = 0
+      let worstAt = -1
+      for (let i = 1; i < sorted.length; i += 1) {
+        const gap = sorted[i] - sorted[i - 1]
+        if (gap > worstGap) { worstGap = gap; worstAt = i - 1 }
+      }
+      if (worstGap <= REVIEW_MAX_GAP_SECONDS || gapFilled.length >= REVIEW_FRAME_HARD_LIMIT) break
+      const mid = (sorted[worstAt] + sorted[worstAt + 1]) / 2
+      // 补帧落点必须落在某个场景的稳定期（≥35% 相位）：抽帧对齐稳定期是既有契约
+      // （审片把 60% 时刻的画面当作场景完成态），而空档里可能根本没有场景
+      // （场景表在场景之间留了无人区，如 63.2s→428.5s）。
+      // 做法：从空档中点向两侧扫，步长 0.5 秒，第一个「属于某场景且相位达标
+      // 且未被抽过」的点入选；整个空档都找不到（两侧场景都已抽过或相位不符）
+      // 就放弃这个空档——它已由两侧的抽帧点代表，强行塞点只会制造动画期误帧。
+      let candidate = null
+      for (let offset = 0; offset <= worstGap / 2; offset += 0.5) {
+        for (const probe of [mid + offset, mid - offset]) {
+          const span = spans.find((s) => probe >= s.start && probe < s.end)
+          if (!span) continue
+          const phase = (probe - span.start) / (span.end - span.start)
+          if (phase >= 0.35 && !gapFilled.some((item) => Math.abs(item - probe) < 0.05)) { candidate = probe; break }
+        }
+        if (candidate != null) break
+      }
+      if (candidate == null) break
+      gapFilled.push(Number(candidate.toFixed(3)))
+    }
+    const unique = [...new Set(gapFilled.map((value) => Number(value.toFixed(3))))].sort((a, b) => a - b)
+    if (unique.length >= 2) return unique
+  }
+
+  // 没有可用场景表：退回旧的比例盲选（短视频另用一套系数）。
+  const factors = duration < 2 ? [0.08, 0.32, 0.58, 0.86] : REVIEW_FRAME_LIMIT_FALLBACK
+  return [...new Set(factors.map((factor) => clamp(duration * factor).toFixed(3)))].map(Number)
 }
 
-async function extractVideoReviewFrames(videoPath, outputDir, durationSeconds, signal) {
+async function extractVideoReviewFrames(videoPath, outputDir, durationSeconds, signal, sceneSpans = null) {
   await mkdir(outputDir, { recursive: true, mode: 0o700 })
-  const timestamps = reviewTimestamps(durationSeconds)
+  const timestamps = reviewTimestamps(durationSeconds, sceneSpans)
   const frameFiles = timestamps.map((_, index) => join(outputDir, `frame-${String(index + 1).padStart(2, '0')}.png`))
   const results = await Promise.allSettled(frameFiles.map(async (file, index) => {
     try {
@@ -1178,6 +1572,17 @@ export class SpokenVideoMediaHost {
     const base = localBridgeBase(this.environment)
     try {
       const body = await this.#externalJson(`${base}/admin/config`, { signal: AbortSignal.timeout(6000) }, '桥接配置')
+      // 音色列表单独取：/admin/config 只回 config.json，里头没有音色名，
+      // 「小米音色」和「默认音色」两个下拉就都空了（2026-10-11 实测 8199 的
+      // /admin/config 确实没有 builtin_voices）。
+      //  · builtinVoices 来自 /api/v1/tts/voiceover-info，与小米云端同源；
+      //  · voices 来自 /admin/voices，是本机参考音频（音色库）。
+      // 两个都是辅助信息，任一失败都不该让整份配置读不出来——取不到就留空数组，
+      // 前端会回落到自己的兜底表。
+      const [info, voices] = await Promise.all([
+        this.#externalJson(`${base}/api/v1/tts/voiceover-info`, { signal: AbortSignal.timeout(4000) }, '桥接配音信息').catch(() => null),
+        this.#externalJson(`${base}/admin/voices`, { signal: AbortSignal.timeout(4000) }, '桥接音色库').catch(() => null),
+      ])
       return {
         available: true,
         ttsProvider: body.ttsProvider === 'local' ? 'local' : 'cloud',
@@ -1188,7 +1593,13 @@ export class SpokenVideoMediaHost {
           apiKeyConfigured: typeof body.mimo?.apiKey === 'string' && Boolean(body.mimo.apiKey.trim()),
           voice: typeof body.mimo?.voice === 'string' ? body.mimo.voice : '',
           style: typeof body.mimo?.style === 'string' ? body.mimo.style : '',
+          builtinVoices: Array.isArray(info?.builtin_voices)
+            ? info.builtin_voices.filter((voice) => typeof voice === 'string' && voice.trim())
+            : [],
         },
+        voices: Array.isArray(voices)
+          ? voices.filter((voice) => voice && typeof voice.id === 'string' && voice.id.trim()).map((voice) => ({ id: voice.id, ext: voice.ext || '', size: voice.size || 0 }))
+          : [],
         defaultVoice: typeof body.defaultVoice === 'string' ? body.defaultVoice : '',
         chineseNumbers: body.chineseNumbers !== false,
       }
@@ -1301,7 +1712,65 @@ export class SpokenVideoMediaHost {
     }
   }
 
-  /** 删除一个参考音色。桥接会连同它的转写文本与参数文件一起清掉。 */
+  /**
+   * 往音色库存一个参考音频。
+   *
+   * 2026-10-11 补。此前「参考音色库」面板只有试听和删除——上传被塞在新建配音
+   * 任务的表单里（走 uploadVoiceReference，那条路传的是**这一次任务**的参考音频，
+   * 不会进音色库）。于是逻辑是断的：想扩充音色库得先建一个配音任务，传进来的
+   * 音色还只在那个任务里可见。音色库自己得能上传。
+   *
+   * 桥接侧接口就是它自带的那个配置网页在用的 POST /admin/voices（multipart），
+   * 这里只是替用户点那个按钮，不新增任何桥接能力。
+   *
+   * @param {{ name: string, mediaType: string, data: string, id?: string }} request
+   *   data 是音频的 base64（不含 data: 前缀），id 为空则用文件名当音色 id。
+   */
+  async bridgeVoiceUpload(agent, request) {
+    const input = object(request, '参考音色上传')
+    const name = String(stringAt(input, ['name']) ?? '').trim()
+    const mediaType = String(stringAt(input, ['mediaType']) ?? '').trim() || 'audio/mpeg'
+    const data = String(stringAt(input, ['data']) ?? '').trim()
+    if (!name) fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音频文件名不能为空。')
+    if (!data) fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音频内容不能为空。')
+    // 音色 id 会拼进 voices/<id>.<ext>，必须挡住穿越字符。
+    const id = String(stringAt(input, ['id']) ?? '').trim()
+    if (id && !/^[A-Za-z0-9\u4e00-\u9fa5_-]{1,64}$/u.test(id)) fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音色标识只能包含中英文、数字、下划线和连字符。')
+    // 扩展名由桥接校验，但这里先挡一道，能立刻给出人话而不是等它返回 400。
+    const ext = name.slice(name.lastIndexOf('.')).toLowerCase()
+    if (!['.wav', '.mp3', '.m4a', '.flac', '.ogg', '.aiff'].includes(ext)) {
+      fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '不支持的音频格式，只接受 WAV / MP3 / M4A / FLAC / OGG / AIFF。')
+    }
+    let bytes
+    try { bytes = Buffer.from(data, 'base64') } catch { fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音频内容不是有效的 base64。') }
+    if (!bytes.length) fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音频内容为空。')
+    // 桥接的 readBody 上限是 100 MiB，留出 multipart 开销后卡在 60 MiB。
+    if (bytes.length > 60 * 1024 * 1024) fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '参考音频不能超过 60 MiB。')
+    const form = new FormData()
+    form.append('file', new Blob([bytes], { type: mediaType }), name)
+    if (id) form.append('id', id)
+    const base = localBridgeBase(this.environment)
+    try {
+      // 直接用注入的 fetch 发 FormData，不能走 #externalJson——那个方法把响应体
+      // 当 JSON 解析，而桥接上传成功返回的是 {code,id}，失败时返回 400 + 文本。
+      // 这里自己判 ok，把桥接给的 message 原样带出去（它比我们的校验更能说明白）。
+      const response = await this.fetch(`${base}/admin/voices`, {
+        method: 'POST',
+        body: form,
+        signal: AbortSignal.timeout(30_000),
+      })
+      let result = null
+      try { result = await response.json() } catch { /* 非 JSON 也算收到了 */ }
+      if (!response.ok) {
+        return { ok: false, reason: stringAt(result, ['message']) || `HTTP ${response.status}` }
+      }
+      const savedId = String(stringAt(result, ['id']) || id || name.replace(/\.[^.]+$/u, '')).trim()
+      return { ok: true, id: savedId }
+    } catch (error) {
+      return { ok: false, reason: mediaErrorMessage(error) }
+    }
+  }
+
   async bridgeVoiceDelete(agent, request) {
     const input = object(request, '音色删除')
     const id = String(stringAt(input, ['id']) ?? '').trim()
@@ -2159,12 +2628,26 @@ export class SpokenVideoMediaHost {
       const audio = await readFile(audioPath)
       const input = task.subtitle.input
       let result
-      if (input.provider === 'bailian') {
+      // 治本快路径：配音任务在桥接侧记录了句级时间轴（合成时段边界 ffprobe 实测，
+      // 句在段内按字符占比），有它就直接产出精确 SRT、跳过 ASR——时间不靠猜。
+      // 拿不到（旧任务 / 非桥接 provider / 原稿与时间轴句数对不上）才走 ASR+守卫。
+      let viaTimeline = false
+      if (input.provider === 'scitiger') {
+        try {
+          const timelineSrt = await segmentTimelineSrt(task, this.environment, (url, label) => this.#externalJson(url, { signal: AbortSignal.timeout(8000) }, label))
+          if (timelineSrt) {
+            result = { taskId: `segments-${task.id}`, subtitle: subtitleResult({ subtitle_srt: timelineSrt }), diagnostics: { provider: 'bridge-segment-timeline' } }
+            viaTimeline = true
+          }
+        } catch { /* 快路径失败不阻塞：落回 ASR 路径 */ }
+      }
+      if (!viaTimeline && input.provider === 'bailian') {
         const generated = await this.#bailianSubtitles({ id: subtitleId }, audioPath, input.language, task.source.text)
         result = { taskId: generated.taskId, subtitle: subtitleResult({ subtitle_srt: generated.srt }), diagnostics: { provider: 'bailian-realtime-asr', alignment: generated.referenceAligned ? 'reference-text' : 'asr' } }
-      } else if (input.provider === 'scitiger') {
+      }
+      if (!viaTimeline && input.provider === 'scitiger') {
         result = await this.#scitigerSubtitles({ id: subtitleId }, audio, audioPath, task.source.text, input)
-      } else {
+      } else if (!viaTimeline) {
         const config = this.#legacyConfig()
         const submitted = serviceData(await this.#json(config, '/api/v1/subtitles/generate', { method: 'POST', body: JSON.stringify({ audio_base64: audio.toString('base64'), audio_format: extname(audioPath).slice(1) || 'wav', language: input.language, reference_text: task.source.text, return_diagnostics: true, subtitle_options: { max_chars: 22, min_duration: 0.6, max_duration: 4, punctuation_policy: 'strip_trailing', ai_optimize: input.aiOptimize } }) }), '字幕对齐提交')
         const externalTaskId = taskIdFromService(submitted, '字幕对齐')
@@ -3033,12 +3516,27 @@ export class SpokenVideoMediaHost {
     const audio = await readFile(audioPath)
     if (!audio.length || audio.length > MAX_MEDIA_BYTES) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '配音文件为空或超出字幕服务上传限制。')
     let result
-    if (run.input.provider === 'bailian') {
+    // 治本快路径（2026-10-11）：配音任务在桥接侧记录了句级时间轴（合成时段边界
+    // ffprobe 实测 + 段内句按字符占比），有它就直接产出精确 SRT、跳过 ASR——
+    // 此前远程 ASR 的时间戳滞后真实语音 4~6s（用户报「声音和字幕对不上」），
+    // 守卫的锚点修正只能在锚点间插值，句间仍有 1~3s 残差。拿不到时间轴
+    // （旧配音 / 非桥接 provider / 原稿句数与时间轴对不上）才走 ASR+守卫。
+    let viaTimeline = false
+    if (run.input.provider === 'scitiger') {
+      try {
+        const timelineSrt = await segmentTimelineSrt({ input: run.input, source: { text: script }, result: { taskId: detail.artifacts?.voiceover?.data?.taskId } }, this.environment, (url, label) => this.#externalJson(url, { signal: AbortSignal.timeout(8000) }, label), { audioPath })
+        if (timelineSrt) {
+          result = { taskId: `segments-${run.id}`, subtitle: subtitleResult({ subtitle_srt: timelineSrt }), diagnostics: { provider: 'bridge-segment-timeline' } }
+          viaTimeline = true
+        }
+      } catch { /* 快路径失败不阻塞：落回 ASR 路径 */ }
+    }
+    if (!viaTimeline && run.input.provider === 'bailian') {
       const generated = await this.#bailianSubtitles(run, audioPath, run.input.language, script)
       result = { taskId: generated.taskId, subtitle: subtitleResult({ subtitle_srt: generated.srt }), diagnostics: { provider: 'bailian-realtime-asr', alignment: generated.referenceAligned ? 'reference-text' : 'asr' } }
-    } else if (run.input.provider === 'scitiger') {
+    } else if (!viaTimeline && run.input.provider === 'scitiger') {
       result = await this.#scitigerSubtitles(run, audio, audioPath, script, run.input)
-    } else {
+    } else if (!viaTimeline) {
       const config = this.#legacyConfig()
       const submitted = serviceData(await this.#json(config, '/api/v1/subtitles/generate', {
         method: 'POST',
@@ -3058,13 +3556,23 @@ export class SpokenVideoMediaHost {
     const { taskId, subtitle } = result
     // 云端 ASR 的时间轴可能与真实音频脱节（实测滞后 4-6 秒且各段不均匀，文本却全对）。
     // 守卫把 cue 与音频语音分布对齐：漂移成立就改用重对齐后的 SRT；守卫自身异常只记录，不阻塞字幕产出。
+    //
+    // 但**快路径产物必须跳过守卫修正**（2026-10-11 实测教训）：段时序 SRT 的句起点
+    // 就是真实语音起点（VAD 吸附，逐句验证 onset 误差 0.00s）。守卫的占比估计假设
+    // 连续语流，与句级精确 SRT 在句间停顿处必然分歧（mean >2s）→ 判「漂移」→ 用
+    // 占比估计把精确字幕**改回错误的时间轴**——守卫把地面真值修掉了。快路径的
+    // VAD 精化本身就是验证，不需要再被一个估计模型"修正"。
     let alignmentGuard
-    try {
-      const guarded = await guardSubtitleTimeline({ audioPath, srt: subtitle.srt, language: run.input.language, signal: this.signal })
-      alignmentGuard = guarded.guard
-      if (guarded.applied) subtitle.srt = guarded.srt
-    } catch (error) {
-      alignmentGuard = { applied: false, method: 'none', reason: `对齐守卫异常：${error?.message || error}` }
+    if (viaTimeline) {
+      alignmentGuard = { applied: false, method: 'none', verdict: 'ground-truth', reason: '句级时间轴来自合成段边界（地面真值），跳过占比修正。' }
+    } else {
+      try {
+        const guarded = await guardSubtitleTimeline({ audioPath, srt: subtitle.srt, language: run.input.language, signal: this.signal })
+        alignmentGuard = guarded.guard
+        if (guarded.applied) subtitle.srt = guarded.srt
+      } catch (error) {
+        alignmentGuard = { applied: false, method: 'none', reason: `对齐守卫异常：${error?.message || error}` }
+      }
     }
     result.diagnostics = { ...(result.diagnostics || {}), alignmentGuard }
     const relativePath = `media/subtitles/${run.id}.srt`
@@ -3611,7 +4119,17 @@ export class SpokenVideoMediaHost {
     const durationSeconds = audioProbe.durationSeconds || voiceover.audio.durationSeconds || 1
     // cues 永远按字幕时间轴构建（不再随 subtitleEnabled 置空）：它是画面分节的依据，
     // 而 subtitleEnabled 只决定「字幕条是否烧进画面」。
-    const cues = validateSrt(subtitles.srt).cues.map((cue, index) => ({ id: `srt-${index + 1}`, startMs: cue.startMs, endMs: cue.endMs, text: cue.text }))
+    //
+    // 进渲染前先按显示上限把超长 cue 拆开（2026-10-13）：ASR 路径产出的字幕不做
+    // 任何拆分，曾出现一条 63 字的 cue 直接把整条流水线卡在「成片未通过技术质检」，
+    // 自动任务白跑 27 分钟。这里是路径无关的兜底，拆完顺带把 SRT 落回磁盘，
+    // 让后续所有阶段（画面分节、烧录、成片）都用同一份。
+    //
+    // 注意：这里**只**改局部的 cues，不改 subtitles 本体 —— 它是 const，
+    // 而渲染/烧录读的是 cues，拆完已经一致了。（2026-10-13 首次写成给 subtitles
+    // 赋值，直接把渲染打成 "Assignment to constant variable"。）
+    const splitResult = splitLongCues(subtitles.srt, { orientation })
+    const cues = splitResult.cues.map((cue, index) => ({ id: `srt-${index + 1}`, startMs: cue.startMs, endMs: cue.endMs, text: cue.text }))
     const workspace = await prepareSpokenVideoAgentProject({
       projectRoot: root, runId: run.id, title: detail.title, script, audioPath, durationSeconds,
       subtitles: cues, subtitleSrt: subtitleEnabled ? subtitles.srt : '', subtitleEnabled, orientation, visualBrief: run.input.visualBrief,
@@ -3675,7 +4193,15 @@ export class SpokenVideoMediaHost {
 
       await this.#setVideoPhase(root, run.id, 'technical-qc')
       const reviewFramesDir = join(workspace.projectDir, 'outputs', 'review-frames', `attempt-${attemptNumber}`)
-      const sampled = await extractVideoReviewFrames(renderedPath, reviewFramesDir, videoProbe.durationSeconds || durationSeconds, this.signal)
+      // 抽帧前先读导演写的场景表：按场景中段取帧，而不是按全片比例盲选。
+      // 盲选会让大部分抽帧落在场景的入场动画期，审片看到的是「只有骨架」
+      // 「内容没画出来」这类并不存在的缺陷，然后要求导演去修——2026-10-10 统计的
+      // 5 个审片失败案例全部由此而来（6 帧里 4 帧撞动画期，修复上限只有 2 轮）。
+      // 读不到就退回盲选，不因此阻断流水线。
+      const sceneSpans = await readFile(join(workspace.projectDir, 'src', 'CreativeVideo.tsx'), 'utf8')
+        .then((source) => parseSceneSpans(source))
+        .catch(() => [])
+      const sampled = await extractVideoReviewFrames(renderedPath, reviewFramesDir, videoProbe.durationSeconds || durationSeconds, this.signal, sceneSpans)
       const contactSheet = await renderVideoContactSheet(renderedPath, reviewFramesDir, videoProbe.durationSeconds || durationSeconds, this.signal)
       const variation = await measureVisualVariation(sampled.frameFiles, orientation, videoProbe.durationSeconds || durationSeconds, this.signal)
       const topology = buildTechnicalReport({ video: videoProbe, audio: audioProbe, subtitles, subtitleEnabled, orientation })

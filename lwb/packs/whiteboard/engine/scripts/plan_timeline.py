@@ -36,6 +36,29 @@ from parse_srt import group_scenes, parse_srt  # noqa: E402
 BREATH_MS = 150
 
 
+def _pick_representative(group: list[dict]) -> str:
+    """从一组 cue 里挑出最该印在画面上的那一句。
+
+    为什么不能全拼：2026-10-11 用户反馈「部分音频和视频的字幕不匹配」。真实产物
+    （scene-13）里一个元素被分到四条 cue，原实现是 `" ".join(...)` 全拼起来，
+    渲染时卡片只显示得下前半截，于是画面上出现「联合开拓欧洲、中东及中亚等海外
+    市场」这种和元素完全无关的话——它既不是那四条里的重点，也没和标题对上。
+    拼接让每一句都残缺，比挑错一句更难察觉。
+
+    选法：先按长度滤掉过长和过短的（太短通常是「换句话说」这类过渡句，太长是没
+    切干净的整句），再取剩余里最长的一条——中文口播里信息量最大的通常就是最长
+    那句。全部不合格时退回组内最长的一条。
+    """
+    texts = [c["text"].strip() for c in group if c.get("text") and c["text"].strip()]
+    if not texts:
+        return ""
+    if len(texts) == 1:
+        return texts[0]
+    usable = [t for t in texts if 8 <= len(t) <= 40]
+    pool = usable or texts
+    return max(pool, key=len)
+
+
 def allocate(cues: list[dict], count: int) -> list[list[dict]]:
     """把 cues 按时间顺序分成 count 组，尽量保持组内时长均衡。"""
     if count <= 0 or not cues:
@@ -134,14 +157,17 @@ def main(argv=None) -> int:
             "label": label,
             "sequence": index + 1,
             "narrativeRole": "待填写：该元素在字幕中的叙事作用",
-            "subtitle": " ".join(c["text"] for c in group).strip(),
+            "subtitle": _pick_representative(group),
             "type": "object",
-            # 占位区域：等分画布，必须在预览台里拖到实际主体上
+            # 占位区域：等分画布，必须在预览台里拖到实际主体上。
+            # 纵向上界由 15%/70% 改成 8%/80%（2026-10-11 用户反馈「内容稍微偏下」）：
+            # 底部要留给字幕条和落款，压得太靠下会让主体和字幕挤在一起；顶部留 8%
+            # 足够放角标。横向下界没动。
             "region": {
                 "x": int(args.width * index / len(groups)),
-                "y": int(args.height * 0.15),
+                "y": int(args.height * 0.08),
                 "width": int(args.width / len(groups)),
-                "height": int(args.height * 0.7),
+                "height": int(args.height * 0.8),
             },
             "reveal": {
                 "direction": "top_to_bottom",

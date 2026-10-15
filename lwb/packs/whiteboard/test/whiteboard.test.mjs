@@ -351,3 +351,71 @@ test('prepare_env 按 LWB_PIP_INDEX_URL 覆盖镜像源，默认走清华源', a
     `默认源应是清华或官方其一，实际 ${fallback}`,
   )
 })
+
+test('字幕条比元素多时，元素上放的是一句完整的话而不是几句拼接', async () => {
+  // 2026-10-11 用户反馈「部分音频和视频的字幕不匹配」。真实产物 scene-13 里一个
+  // 元素被分到四条 cue，原实现是 `" ".join(...)` 全拼，渲染时卡片只显示得下前
+  // 半截，于是画面上出现和元素完全无关的话。拼接让每句都残缺，比挑错更难察觉。
+  const dir = await mkdtemp(join(tmpdir(), 'lwb-whiteboard-pick-'))
+  try {
+    const store = new WhiteboardStore({ workspacePath: dir })
+    const host = new WhiteboardHost({ store, background: null, engineRoot: join(PACK_ROOT, 'engine'), workspacePath: dir })
+    const srt = join(dir, 'b.srt')
+    // 四条 cue 挤在第一幕，两个元素 —— 元素少于 cue，必然触发合并路径。
+    await writeFile(srt, [
+      '1', '00:00:00,000 --> 00:00:03,000', '嗯。', '',
+      '2', '00:00:03,000 --> 00:00:06,000', '宁德时代和赛力斯刚签了这份关于海外市场的协议。', '',
+      '3', '00:00:06,000 --> 00:00:09,000', '换句话说。', '',
+      '4', '00:00:09,000 --> 00:00:12,000', '第一条是宁德时代，第二条是赛力斯。', '',
+      '5', '00:00:12,000 --> 00:00:16,000', '好', '',
+      '6', '00:00:16,000 --> 00:00:20,000', '另外它还联署开拓欧洲、中东及中亚等海外市场。', '',
+    ].join('\n'), 'utf8')
+
+    const { annotation } = await host.planTimeline({
+      srtPath: srt, scene: 1,
+      elements: ['协议正文', '落款日期'],
+      width: 1672, height: 941,
+    })
+    assert.equal(annotation.elements.length, 2)
+
+    for (const element of annotation.elements) {
+      const text = element.subtitle
+      // 关键：不能是好几句拼起来——拼接出来的必然含多个句号/分号混排且长度失控。
+      assert.ok(text.length <= 40, `字幕必须是单句（实际 ${text.length} 字）：${text}`)
+      // 也不能是「嗯。」「换句话说。」「好」这种过渡句。
+      assert.ok(text.length >= 8, `不该选到过渡句：${text}`)
+      // 被合并的 cue 里没有一条该原样出现——出现就说明还在拼接。
+      assert.ok(!text.includes('换句话说'), '不得包含过渡句')
+    }
+    // 至少有一条真的挑出了信息句
+    const all = annotation.elements.map((e) => e.subtitle).join(' | ')
+    assert.match(all, /宁德时代|赛力斯|海外市场/u, '应挑中组内真正的信息句')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('元素占位区上移了：底部留给字幕条，不再压在画面下沿', async () => {
+  // 2026-10-11 用户反馈「视频内容稍微偏下」。原来占位区是 y=15%..85%，改成
+  // 8%..88%：顶部留出放角标的空间，底部不再和字幕条挤在一起。
+  const dir = await mkdtemp(join(tmpdir(), 'lwb-whiteboard-region-'))
+  try {
+    const store = new WhiteboardStore({ workspacePath: dir })
+    const host = new WhiteboardHost({ store, background: null, engineRoot: join(PACK_ROOT, 'engine'), workspacePath: dir })
+    const srt = join(dir, 'c.srt')
+    await writeFile(srt, [
+      '1', '00:00:00,000 --> 00:00:08,000', '第一句话讲的是标题与日期的排版。', '',
+      '2', '00:00:08,000 --> 00:00:16,000', '第二句话讲的是正文卡片的内容。', '',
+    ].join('\n'), 'utf8')
+
+    const { annotation } = await host.planTimeline({
+      srtPath: srt, scene: 1, elements: ['标题', '正文'], width: 1000, height: 1000,
+    })
+    const region = annotation.elements[0].region
+    // 8% 上界，80% 高度 —— 底部正好落在 88%。
+    assert.ok(region.y < 100, `上界应约 80（10%），实际 ${region.y}`)
+    assert.ok(region.y + region.height < 920, `下界应约 880（88%），实际 ${region.y + region.height}`)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

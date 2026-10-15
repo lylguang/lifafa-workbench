@@ -335,6 +335,10 @@ See [rules/parameters.md](rules/parameters.md) for making a composition parametr
 For simple maps with little flyovers, consider using static map images.
 For complex maps with animated routes or flyovers, load the maps rule: [rules/maplibre.md](rules/maplibre.md)
 
+## Motion effects vocabulary
+
+Load [rules/motion-effects.md](rules/motion-effects.md) when choosing scene motion. It covers the Wise Motion catalog (429 entries, Apache-2.0): strength quotas, the beat-to-effect allow-list, and the only three overlay-safe effects that may be composited onto our own stages.
+
 ## Voiceover
 
 See [rules/voiceover.md](rules/voiceover.md) for adding AI-generated voiceover to Remotion compositions using ElevenLabs TTS.

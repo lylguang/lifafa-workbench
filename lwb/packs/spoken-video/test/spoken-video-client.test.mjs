@@ -174,7 +174,8 @@ test('script drawer opens directly in edit mode and paginates completed history'
   const page = source.slice(start, end)
 
   assert.match(page, /setDrawerMode\('edit'\)/u)
-  assert.match(page, /const activeHistoryTasks = history\.filter\(\(item\) => item\.status === 'queued' \|\| item\.status === 'running'\);/u)
+  // 运行中与排队中的任务固定置顶，按账号与时间筛选后依然如此。
+  assert.match(page, /const activeHistoryTasks = sortScriptTasks\(history\.filter\(\(item\) => historyMatchesAccount\(item\) && \(item\.status === 'queued' \|\| item\.status === 'running'\)\), historySort\);/u)
   assert.match(page, /const pagedHistoryTasks = filteredHistoryTasks\.slice\(historyPage \* 6, historyPage \* 6 \+ 6\);/u)
   assert.match(page, /pagedHistoryTasks\.map\(taskCard\)/u)
   assert.doesNotMatch(page, /history\.slice\(0, 12\)/u)
@@ -854,17 +855,25 @@ test('audio workbench names the channel endpoint and never blames the voice for 
   assert.match(page, /task\.input\?\.bridge\?\.channel === 'cloud' \? '云端合成' : task\.input\?\.bridge\?\.channel === 'local' \? '本地合成' : null/u)
 })
 
-test('script drawer opens directly in edit mode and paginates completed history', async () => {
+test('script task panel filters history by account positioning and sorts by time', async () => {
   const source = await readFile(clientPath, 'utf8')
   const start = source.indexOf('function ScriptPage(')
   const end = source.indexOf('\n    function AudioCaptionsPage', start)
   const page = source.slice(start, end)
+  assert.ok(start >= 0 && end > start, 'ScriptPage must remain a standalone component')
 
-  assert.match(page, /setDrawerMode\('edit'\)/u)
-  assert.match(page, /const activeHistoryTasks = history\.filter\(\(item\) => item\.status === 'queued' \|\| item\.status === 'running'\);/u)
-  assert.match(page, /const pagedHistoryTasks = filteredHistoryTasks\.slice\(historyPage \* 6, historyPage \* 6 \+ 6\);/u)
-  assert.match(page, /pagedHistoryTasks\.map\(taskCard\)/u)
-  assert.doesNotMatch(page, /history\.slice\(0, 12\)/u)
+  // 运行中的任务也要跟着账号筛选走，否则选中某账号后正在跑的任务会凭空消失。
+  assert.match(page, /const historyMatchesAccount = \(item\) => historyAccount === 'all' \|\| scriptTaskTab\(item, activeIds\) === historyAccount;/u)
+  assert.match(page, /const activeHistoryTasks = sortScriptTasks\(history\.filter\(\(item\) => historyMatchesAccount\(item\) && \(item\.status === 'queued' \|\| item\.status === 'running'\)\), historySort\);/u)
+  assert.match(page, /const filteredHistoryTasks = sortScriptTasks\(terminalHistoryTasks\.filter\(\(item\) => historyMatchesAccount\(item\) && \(historyFilter === 'all' \|\| item\.status === historyFilter\)\), historySort\);/u)
+  assert.match(page, /按账号定位筛选写稿任务/u)
+  assert.match(page, /按时间排序写稿任务/u)
+  // 换筛选维度后必须回到第一页，否则可能停在越界页码上什么都看不到。
+  assert.match(page, /React\.useEffect\(\(\) => \{ setHistoryPage\(0\); \}, \[historyFilter, historyAccount, historySort\]\);/u)
+  // 账号归档后任务不消失，所以账号下拉里必须保留「已归档账号」这一档。
+  assert.match(source, /function scriptTaskTab\(record, activeIds\) \{/u)
+  assert.match(page, /const hasArchivedTasks = history\.some\(\(item\) => scriptTaskTab\(item, activeIds\) === ARCHIVED_TAB\);/u)
+  assert.match(page, /historyAccountOptions\.push\(\{ id: ARCHIVED_TAB, label: '已归档账号' \}\)/u)
 })
 
 test('video workbench separates source selection from durable, filterable video tasks', async () => {

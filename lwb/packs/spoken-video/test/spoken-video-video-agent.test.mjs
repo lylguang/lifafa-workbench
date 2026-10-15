@@ -151,3 +151,41 @@ test('normalizes review evidence to sampled frames and enforces every release ga
   assert.equal(invalidTimestamp.passed, false)
   assert.equal(invalidTimestamp.reviewEvidence.length, 1)
 })
+
+// 2026-10-10 加：审片要靠机器解析 SCENES 表才能把抽帧对齐到场景稳定期，而解析器只认
+// 一种写法。这两条把「格式要求」和「审片不再有入场动画免责」钉住——提示词里的这两段
+// 是解析率能达到 100% 的前提，改丢了覆盖率就悄悄退回 22%。
+test('creator prompt pins the SCENES table to the one shape the sampler can parse', () => {
+  const prompt = buildVideoCreatorPrompt({ runDir: '/tmp/video-agent/run-1' })
+  // 必须给出可照抄的样例，含 id/start/end 三个字段，且明说单位是秒。
+  assert.match(prompt, /\{\s*id:\s*"s01-hook",\s*start:\s*3\.34,\s*end:\s*38\.86\s*\}/u)
+  assert.match(prompt, /秒的小数/u, '必须说明 start/end 的单位是秒，否则模型会写帧数')
+  // 这四种写法解析器读不出来，必须逐个点名禁止。
+  assert.match(prompt, /不要引入 `dur`|`dur`\/`duration` 代替 `end`/u, '必须禁止用 dur 代替 end')
+  assert.match(prompt, /不要用 `name` 代替 `id`/u, '必须禁止用 name 代替 id')
+  assert.match(prompt, /展开运算符/u, '必须禁止 ...SC.s1 这类展开写法')
+  assert.match(prompt, /start:\s*F\(3\.34\)/u, '必须点名禁止 start: F(x) 这种表达式')
+})
+
+test('creator prompt tells the director that review samples the scene midpoint', () => {
+  const prompt = buildVideoCreatorPrompt({ runDir: '/tmp/video-agent/run-1' })
+  // 抽帧现在取场景 60% 处，入场动画必须在那之前走完——这条是审片能过的前提。
+  assert.match(prompt, /60% 时刻/u)
+  assert.match(prompt, /前 40% 内完成/u)
+  // 旧的「20%、35% 两个时刻自检」与「前 1/3」已经和 60% 对不上，必须换掉而不是并存。
+  assert.doesNotMatch(prompt, /20%、35%/u, '旧的自检时刻与现在的 60% 冲突，留着会让模型困惑')
+  assert.doesNotMatch(prompt, /前 1\/3 内完成/u, '旧的前 1/3 与前 40% 冲突')
+})
+
+test('reviewer prompt no longer excuses empty frames as entrance animation', () => {
+  // 抽帧已对齐场景 60%，「可能是入场动画、请勿当缺陷」这条免责会让审片放过真实缺陷。
+  const prompt = buildVideoReviewerPrompt({
+    runDir: '/tmp/run', technicalReportFile: '/tmp/qc.json',
+    frameFiles: ['/tmp/a.png'], timestamps: [10], contactSheetFile: '/tmp/sheet.png',
+  })
+  assert.doesNotMatch(prompt, /属于入场节奏问题而非内容缺失/u, '旧的入场动画免责必须删除')
+  assert.match(prompt, /不要归因为"入场动画未完成"/u, '要明确告诉审片：60% 时刻还空就是真缺陷')
+  // 接触表仍是均匀采样、仍可能落在动画期，保留这条局限说明。
+  assert.match(prompt, /可能落在场景的入场动画期/u)
+  assert.match(prompt, /不要只凭接触表下结论/u)
+})

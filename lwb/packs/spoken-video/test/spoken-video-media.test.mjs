@@ -8,7 +8,7 @@ import test from 'node:test'
 import { WebSocketServer } from 'ws'
 import { buildTechnicalReport, DEFAULT_VIDEO_VISUAL_BRIEF, DEFAULT_VOICE_PROFILE, mediaServiceConfig, normalizeProbe, normalizeRenderRequest, normalizeVoiceoverRequest, subtitleResult } from '../spoken-video-media.mjs'
 import { SpokenVideoProjectStore, SpokenVideoStoreError } from '../spoken-video-store.mjs'
-import { SpokenVideoMediaHost, parseRemotionRenderProgress } from '../spoken-video-media-host.mjs'
+import { SpokenVideoMediaHost, parseRemotionRenderProgress, parseSceneSpans, reviewTimestamps, REVIEW_FRAME_LIMIT, REVIEW_FRAME_HARD_LIMIT, REVIEW_MAX_GAP_SECONDS } from '../spoken-video-media-host.mjs'
 import { remotionEncodingSettings, remotionRendererAvailable } from '../spoken-video-remotion.mjs'
 import { buildLineArtPlanPrompt, composeLineArtPrompt, LINE_ART_PLAN_SCHEMA, lineArtSeed, normalizeLineArtPlan } from '../spoken-video-whiteboard-art.mjs'
 
@@ -80,9 +80,32 @@ async function waitForAudioTask(host, currentAgent, taskId) {
   throw new Error(`音频任务 ${taskId} 在测试时未完成。`)
 }
 
+/**
+ * 删临时工作区，重试几次再放弃。
+ *
+ * 渲染用例跑完时 chrome-headless-shell 可能刚退出、还在释放它对任务目录里
+ * `node_modules/.remotion`（渲染临时 profile 与 webpack bundle 落点）的句柄，
+ * 此刻 rmdir 会拿到 EBUSY。这是 Windows 的句柄释放时序，不是用例失败——
+ * 一次 rm 就断言失败会把用例结果和真实缺陷混在一起（2026-10-13 实测：加了
+ * 代理预览渲染、多跑一轮 Remotion 之后必现，force:true 也不会重试）。
+ * 清理失败只保留临时目录，不让测试失败。
+ */
+async function removeWorkspaceTree(root) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 120 })
+      return
+    } catch (error) {
+      if (attempt === 5) return
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250 * (attempt + 1)))
+      void error
+    }
+  }
+}
+
 async function workspace(t) {
   const root = await mkdtemp(join(tmpdir(), 'lwb-spoken-video-media-'))
-  t.after(() => rm(root, { recursive: true, force: true }))
+  t.after(() => removeWorkspaceTree(root))
   const cwd = join(root, 'workspace')
   await mkdir(cwd)
   return cwd
@@ -1681,7 +1704,12 @@ test('runs the DSH Remotion creator, deterministic QC, and independent reviewer 
   assert.equal(bgmPreview.bytes, backgroundMusic.bytes)
 })
 
-test('rejects overlong subtitles during deterministic QC before independent review', async (t) => {
+test('splits overlong subtitles before rendering instead of failing the whole run', async (t) => {
+  // 2026-10-13 起这个用例的断言翻转了。原来它断言「超长字幕必须让渲染失败」，
+  // 那正是把自动任务卡死的行为：晚报连挂两次、白跑 27 分钟。真因是拆分阈值
+  // （只在段时序快路径）与质检阈值对不上，ASR 字幕完全没拆分。
+  // 现在进渲染前统一按显示上限拆开，所以渲染**应当继续**，且拆分后不再超限。
+  // 质检仍然是最后一道防线 —— 只是它再也不会被正常的 ASR 输出触发。
   if (!mediaBinariesAvailable() || !await remotionRendererAvailable()) { t.skip('ffmpeg, ffprobe, or Remotion is unavailable in this environment'); return }
   const cwd = await workspace(t)
   const store = new SpokenVideoProjectStore()
@@ -1708,14 +1736,13 @@ test('rejects overlong subtitles during deterministic QC before independent revi
   })
   const started = await host.startVideoRender(currentAgent, { projectId: project.id, expectedRevision: project.revision, orientation: 'portrait', renderer: 'remotion' })
   const finished = await waitForOperation(host, currentAgent, project.id, started.id)
-  assert.equal(finished.status, 'failed')
-  assert.match(finished.error, /字幕超过 44 字/u)
-  assert.equal(finished.pipeline.technical.subtitles.longCueCount, 1)
-  assert.equal(finished.pipeline.technical.subtitles.maxTextChars > 44, true)
-  assert.equal(reviewerCalled, false)
-  const detail = await store.get(currentAgent, { projectId: project.id })
-  assert.equal(detail.artifacts.video, undefined)
-  assert.equal(detail.artifacts.qc, undefined)
+  // 断言只盯**技术质检这一段**：拆分生效与否在这里是自证的，
+  // 不依赖渲染后续阶段（本用例的 fakeVideoCreator 在真实渲染路径上会自己抛错，
+  // 那与字幕无关，所以不该拿 finished.status 来判断）。
+  const technical = finished.pipeline?.technical?.subtitles || {}
+  assert.equal(technical.longCueCount, 0, '拆分后不应再有超 44 字的 cue')
+  assert.equal(technical.maxTextChars <= 44, true, `拆分后最长 cue 应 ≤44，实际 ${technical.maxTextChars}`)
+  assert.deepEqual(technical.warnings || [], [], '拆分后不该再有超长字幕的质检警告')
 })
 
 test('fails a Remotion task without a creator and does not commit a fallback video', async (t) => {
@@ -2512,4 +2539,433 @@ test('the voice library lists metadata and playable URLs without proxying audio'
   assert.deepEqual(library.voices[0], { id: '22', ext: 'm4a', size: 900, hasTxt: true, hasJson: false, audioUrl: 'http://127.0.0.1:8199/voices-files/22.m4a' })
   // 音频本体由浏览器直接向桥接取，不经工作台转发——大文件过一次进程没有意义。
   assert.ok(urls.every((url) => url.endsWith('/admin/voices')))
+})
+
+/* ---------------- 审片抽帧对齐场景（2026-10-10 新增） ----------------
+ *
+ * 起因：5 个成片全部「审片 2 轮修复后仍不通过」。根因不是审片太严，是抽帧按全片
+ * 比例盲选（3%/20%/40%/60%/80%/97%），完全不知道场景边界——而边界就写在同一份
+ * 工程的 src/CreativeVideo.tsx 里（SCENES 数组精确到 0.01 秒）。
+ *
+ * 拿真实数据算：一条 460 秒、18 场景的片子，6 帧里 4 帧落在场景前 20%（入场动画
+ * 期），于是审片看到的是「右半幅完全空白」「三条事项并未绘制出来」这类并不存在的
+ * 缺陷，并要求导演去修。修复上限只有 2 轮，而 6 帧里 4 帧天生有问题，一轮修不完。
+ */
+
+// 真实案例的 SCENES（run 5c62f1c7，460.16 秒 / 18 场景），从源码里摘出来的形状。
+const REAL_SCENES = [
+  { id: 'open', start: 0.08, end: 10.18 }, { id: 'deal', start: 10.24, end: 34.58 },
+  { id: 'interposer', start: 34.64, end: 60.36 }, { id: 'bottleneck', start: 60.42, end: 79.69 },
+  { id: 'chainshift', start: 79.75, end: 96.3 }, { id: 'judgement', start: 96.36, end: 116.63 },
+  { id: 'claim2', start: 116.69, end: 133.73 }, { id: 'threescope', start: 133.79, end: 157.4 },
+  { id: 'apidata', start: 157.46, end: 193.93 }, { id: 'checkup', start: 193.99, end: 223.39 },
+  { id: 'claim4', start: 223.45, end: 274.71 }, { id: 'honesty', start: 274.77, end: 301.99 },
+  { id: 'oneline', start: 302.05, end: 340.19 }, { id: 'audience', start: 340.25, end: 365.03 },
+  { id: 'dev', start: 365.09, end: 384.18 }, { id: 'investor', start: 384.24, end: 410.27 },
+  { id: 'risk', start: 410.33, end: 439.5 }, { id: 'close', start: 439.56, end: 460.0 },
+]
+
+const SCENE_SOURCE = `import React from "react";
+type Scene = { id: string; start: number; end: number };
+const SCENES = [
+${REAL_SCENES.map((s) => `  { id: "${s.id}", start: ${s.start}, end: ${s.end} }, // cue 说明`).join('\n')}
+] as const;
+// 下面这些 start/end 是别的用途，不该被当成场景：
+const OTHER = { start: 0, end: 999, label: "not a scene" };
+export const CreativeVideo = () => null;
+`
+
+test('parses the director-written SCENES table out of the generated component', () => {
+  const spans = parseSceneSpans(SCENE_SOURCE)
+  assert.equal(spans.length, REAL_SCENES.length, '18 个场景都要读到')
+  assert.deepEqual(spans[0], REAL_SCENES[0])
+  assert.deepEqual(spans[spans.length - 1], REAL_SCENES[REAL_SCENES.length - 1])
+  // 同文件里别的 start/end 不能被误认成场景——否则会把 0–999 秒当成一个场景。
+  assert.equal(spans.some((s) => s.end === 999), false, '别的常量的 start/end 不算场景')
+})
+
+test('scene parsing degrades to nothing instead of throwing on odd input', () => {
+  for (const input of [null, undefined, '', 0, 'const SCENES = []', '没有场景表的一段文字', { a: 1 }]) {
+    assert.deepEqual(parseSceneSpans(input), [], `${JSON.stringify(input)} 应解析为空而不是抛错`)
+  }
+  // 畸形行（end <= start、缺字段）要被跳过，保留其余合法场景。
+  const partial = parseSceneSpans('const SCENES = [\n  { id: "a", start: 5, end: 1 },\n  { id: "b", start: 1, end: 9 },\n] as const;')
+  assert.deepEqual(partial, [{ id: 'b', start: 1, end: 9 }])
+})
+
+test('review frames land in the stable middle of a scene, not its entrance animation', () => {
+  // 这条是修复的核心判据。旧逻辑按全片比例盲选，实测 6 帧里 4 帧落在场景前 35%；
+  // 那 4 帧正是被审片判「只有骨架」「内容没画出来」的时刻（276.096s 落在 honesty 的
+  // 5%、368.128s 落在 dev 的 16%）。
+  const DURATION = 460.16
+  const phaseOf = (t) => {
+    const span = REAL_SCENES.find((s) => t >= s.start && t < s.end) || REAL_SCENES[REAL_SCENES.length - 1]
+    return (t - span.start) / (span.end - span.start)
+  }
+
+  const blind = reviewTimestamps(DURATION, null)
+  const aligned = reviewTimestamps(DURATION, REAL_SCENES)
+  assert.ok(aligned.length >= blind.length, '有场景表时证据量不该变少')
+
+  const inAnimation = (list) => list.filter((t) => phaseOf(t) < 0.35).length
+  assert.ok(inAnimation(blind) >= 3, `旧逻辑确实会大量落在动画期（实测 ${inAnimation(blind)}/${blind.length}），否则这个修复没有意义`)
+  assert.equal(inAnimation(aligned), 0, '新逻辑必须全部落在场景 35% 之后')
+  // 而且这些帧要真的落在场景内部，不能被 clamp 到全片边界上。
+  for (const t of aligned) {
+    assert.ok(t > 0 && t < DURATION, `抽帧点 ${t} 必须在片长内`)
+  }
+})
+
+test('review frames cover the opening scenes instead of skipping straight past them', () => {
+  // 2026-10-13 实测的真问题：一条 359 秒、23 幕的成片，固定 6 帧只覆盖 6 幕，
+  // 17 幕共 290 秒没人看过，最大空档 97.6 秒。其中 s02-case（6.1-21.2s）整幕
+  // 只剩页眉、主画面全空，是 blocker 级缺陷，审片却给了 78 分通过——它压根没抽到。
+  //
+  // 这里锁两件事：
+  //   1) 帧数随场景数增长（上限 REVIEW_FRAME_LIMIT），不再是固定 6；
+  //   2) 开头几幕必须被选中。按「场景序号均匀」取会从第 1 幕直接跳到第 4 幕，
+  //      开头永远抽不到——而开头正是决定观众划不划走的位置，所以必须按时长加权。
+  const SCENES = [
+    { id: 's01-hook', start: 0.1, end: 5.5 },
+    { id: 's02-case', start: 6.1, end: 21.2 },
+    { id: 's03-why-buy', start: 21.6, end: 31.0 },
+    { id: 's04-tone', start: 31.4, end: 46.5 },
+    { id: 's05-frame', start: 46.7, end: 66.3 },
+    { id: 's06-prob', start: 66.5, end: 94.2 },
+    { id: 's07-switch', start: 94.5, end: 109.4 },
+    { id: 's08-drift', start: 109.9, end: 128.2 },
+    { id: 's09-ab-setup', start: 128.4, end: 143.8 },
+    { id: 's10-ab-run', start: 144.6, end: 163.7 },
+    { id: 's11-report', start: 164.5, end: 183.1 },
+    { id: 's12-tier-ask', start: 183.4, end: 188.6 },
+    { id: 's13-tier1', start: 189.3, end: 203.1 },
+    { id: 's14-tier2', start: 203.8, end: 222.7 },
+    { id: 's15-tier3', start: 223.3, end: 247.0 },
+    { id: 's16-step1', start: 250.2, end: 266.1 },
+    { id: 's17-step2', start: 266.1, end: 280.6 },
+    { id: 's18-step3', start: 281.1, end: 293.8 },
+    { id: 's19-step4', start: 294.3, end: 308.2 },
+    { id: 's20-child', start: 308.7, end: 327.8 },
+    { id: 's21-intern', start: 328.1, end: 341.6 },
+    { id: 's22-detector', start: 342.4, end: 354.6 },
+    { id: 's23-close', start: 355.2, end: 359.5 },
+  ]
+  const DURATION = 359.5
+  const picked = reviewTimestamps(DURATION, SCENES)
+  const sceneOf = (t) => SCENES.find((s) => t >= s.start && t < s.end)?.id ?? SCENES[SCENES.length - 1].id
+  const covered = new Set(picked.map(sceneOf))
+
+  assert.ok(picked.length > 6, `23 幕的片子不该只抽 6 帧（实际 ${picked.length}）`)
+  assert.ok(picked.length <= REVIEW_FRAME_HARD_LIMIT, `帧数不该超过绝对上限 ${REVIEW_FRAME_HARD_LIMIT}`)
+  assert.ok(covered.has('s02-case'), '整幕空白的那一幕必须被抽到，否则它等于不存在')
+  assert.ok(covered.has('s01-hook'), '开头第一幕必须被抽到——那是最影响留存的时刻')
+
+  // 每个抽帧点都必须落在某个场景的稳定期，不能落在入场动画里。
+  for (const t of picked) {
+    const span = SCENES.find((s) => t >= s.start && t < s.end) || SCENES[SCENES.length - 1]
+    const phase = (t - span.start) / (span.end - span.start)
+    assert.ok(phase >= 0.35, `${t}s 落在场景 ${span.id} 的 ${(phase * 100).toFixed(0)}%，太早`)
+  }
+
+  // 全片覆盖率：帧数覆盖相应幕数（旧逻辑 6 帧只覆盖 6 幕）。
+  assert.ok(covered.size >= picked.length - 0, `每一帧都该落在不同场景（实际覆盖 ${covered.size}/${picked.length}）`)
+  assert.ok(covered.size > 6, `23 幕的片子不该只覆盖 6 幕（实际 ${covered.size}）`)
+  // 最大连续空档必须比旧逻辑的 97.6 秒明显收窄。
+  let maxGap = 0
+  for (let i = 1; i < picked.length; i += 1) maxGap = Math.max(maxGap, picked[i] - picked[i - 1])
+  assert.ok(maxGap < 97.6, `最大空档 ${maxGap.toFixed(1)}s 不该比旧逻辑的 97.6s 更差`)
+})
+
+test('a long multi-scene film gets gap-fill frames so no stretch escapes review', () => {
+  // 2026-10-15 实测的真问题：39 幕的片子在 12 帧铺底下 122.5s→202.8s 有 80 秒
+  // 空档，全白幕恰好落在其中，审片（只看 12 帧）给了 82 分通过。约束空档把
+  // 「盖不住」变成「盖得住」：任何相邻两帧间距超过 REVIEW_MAX_GAP_SECONDS
+  // 就在中间补帧，帧数按需增长到绝对上限为止。
+  const SCENES = []
+  // 40 个 ~8 秒场景 = 320 秒。12 帧铺底平均间距 26.7s > 25s 阈值，必然触发补帧。
+  let cursor = 0
+  for (let i = 0; i < 40; i += 1) {
+    SCENES.push({ id: `s${String(i + 1).padStart(2, '0')}`, start: cursor, end: cursor + 8 })
+    cursor += 8
+  }
+  const picked = reviewTimestamps(cursor, SCENES)
+
+  assert.ok(picked.length > REVIEW_FRAME_LIMIT, `40 幕的片子该补到超过保底 ${REVIEW_FRAME_LIMIT} 帧（实际 ${picked.length}）`)
+  assert.ok(picked.length <= REVIEW_FRAME_HARD_LIMIT, `帧数不该超过绝对上限 ${REVIEW_FRAME_HARD_LIMIT}`)
+  let maxGap = 0
+  for (let i = 1; i < picked.length; i += 1) maxGap = Math.max(maxGap, picked[i] - picked[i - 1])
+  assert.ok(maxGap <= REVIEW_MAX_GAP_SECONDS + 0.2, `最大空档 ${maxGap.toFixed(1)}s 必须被压到 ${REVIEW_MAX_GAP_SECONDS}s 附近（补帧封顶时允许略超）`)
+
+  // 短片不触发补帧：5 个场景共 15 秒，铺底 5 帧间距 3 秒，远小于阈值。
+  const short = [{ id: 'a', start: 0, end: 3 }, { id: 'b', start: 3, end: 6 }, { id: 'c', start: 6, end: 9 }, { id: 'd', start: 9, end: 12 }, { id: 'e', start: 12, end: 15 }]
+  assert.equal(reviewTimestamps(15, short).length, 5, '间距远小于阈值时不补帧')
+})
+
+test('review frames fall back to proportional sampling when there is no usable scene table', () => {
+  // 导演可能没写 SCENES（老工程、白板风格等）。这时必须退回旧行为，不能让抽帧
+  // 返回空数组——空数组会让审片 Agent 拿不到任何证据。
+  const expected = reviewTimestamps(460.16, null)
+  for (const spans of [null, [], [{ id: 'only', start: 0, end: 10 }]]) {
+    assert.deepEqual(reviewTimestamps(460.16, spans), expected, `${JSON.stringify(spans)} 应退回比例盲选`)
+  }
+  assert.equal(expected.length, REVIEW_FRAME_LIMIT, `盲选必须仍有 ${REVIEW_FRAME_LIMIT} 帧`)
+  // 短视频不按固定 4 帧走：帧数跟场景数走，短片场景少就少取、场景多就取满，
+  // 再由 clamp + 去重收敛出实际帧数。
+  const shortFilm = [{ id: 'a', start: 0, end: 0.2 }, { id: 'b', start: 0.2, end: 0.5 }, { id: 'c', start: 0.5, end: 0.8 }, { id: 'd', start: 0.8, end: 1.1 }, { id: 'e', start: 1.1, end: 1.5 }]
+  assert.deepEqual(reviewTimestamps(1.5, shortFilm), [0.12, 0.38, 0.68, 0.98, 1.34], '短视频按场景数取，每幕一帧')
+  // 超短场景不该让抽帧越出该场景。
+  const tiny = reviewTimestamps(10, [{ id: 'a', start: 0, end: 0.2 }, { id: 'b', start: 0.2, end: 5 }, { id: 'c', start: 5, end: 10 }])
+  assert.ok(tiny.every((t) => t >= 0 && t <= 10), '抽帧点不能越界')
+})
+
+// 2026-10-10 补：导演更常写的是「秒转帧函数」形式（实测 46 个留有工程目录的历史成片
+// 里有 17+1 条是这个形态，只有 10 条是字面量秒数）。第一版解析器只认字面量，漏掉了
+// 一半以上——「解析不出」会被误当成「这条片子没有场景表」。这两条用例钉住 F() 形态
+// 与帧→秒的归一（不归一的话抽帧点会算到片长之外，帧 6 落在 452 秒/片长 468 秒看似
+// 正常，但在别的参数下会直接越界）。
+const F_SCENE_SOURCE = `import React from "react";
+import { Sequence, useCurrentFrame } from "remotion";
+const FPS = 30;
+const F = (sec: number) => Math.round(sec * 30);
+const SceneHook = () => null;
+type Scene = { id: string; start: number; end: number };
+const SCENES: Scene[] = [
+  { id: "s01-hook", start: F(3.34), end: F(38.856) },
+  { id: "s02-gpt6", start: F(38.856), end: F(63.24) },
+  { id: "s12-outro", start: F(428.503), end: F(468.5) },
+];
+export const CreativeVideo = () => null;
+`
+
+test('parses the seconds-to-frames helper form and normalises to seconds', () => {
+  const spans = parseSceneSpans(F_SCENE_SOURCE)
+  assert.equal(spans.length, 3, 'F() 形式也要全部读到')
+  // F(x) = x*30，读出来必须已是秒——3.34 而不是 100.2。
+  assert.ok(Math.abs(spans[0].start - 3.34) < 1e-9, `start 应归一成秒，实际 ${spans[0].start}`)
+  assert.ok(Math.abs(spans[0].end - 38.856) < 1e-9, `end 应归一成秒，实际 ${spans[0].end}`)
+  assert.ok(Math.abs(spans[2].end - 468.5) < 1e-9, '片长应与源码里的 F(468.5) 一致')
+  // 边界仍然有效（归一不能把先后顺序弄反）。
+  for (const span of spans) assert.ok(span.end > span.start)
+})
+
+test('review frames derived from F()-sourced scenes stay inside the film', () => {
+  // 回归：若不归一，reviewTimestamps 拿到的是帧（最大 14055），会当成秒去乘 0.03/0.2…
+  // 算出一堆远超片长的抽帧点，ffmpeg -ss 会直接失败。
+  const spans = parseSceneSpans(F_SCENE_SOURCE)
+  const duration = spans[spans.length - 1].end
+  const stamps = reviewTimestamps(duration, spans)
+  // 场景少（3 幕）但空档巨大（63.24s→428.5s 隔了 365 秒）：空档补帧会把它填满，
+  // 所以帧数远多于场景数——这正是补帧该干的活。上限是绝对上限。
+  assert.ok(stamps.length >= spans.length, '至少每个场景一帧')
+  assert.ok(stamps.length <= REVIEW_FRAME_HARD_LIMIT, `帧数不该超过绝对上限 ${REVIEW_FRAME_HARD_LIMIT}`)
+  for (const t of stamps) {
+    assert.ok(t > 0 && t < duration, `抽帧点 ${t} 必须在片长 ${duration} 秒内`)
+  }
+  // 而且要真的落在场景的稳定期中段。
+  for (const t of stamps) {
+    const span = spans.find((s) => t >= s.start && t < s.end) || spans[spans.length - 1]
+    assert.ok((t - span.start) / (span.end - span.start) > 0.35, '抽帧点应落在场景 35% 之后')
+  }
+  // 补帧后：被场景覆盖的时段里空档必须被压住。无人区（场景表在场景之间留的
+  // 空白，63.2s→428.5s 隔了 365 秒）不强行塞点——那里没有画面可看，塞点只会
+  // 制造落不到任何场景上的抽帧；只要求「有场景的每一段都被抽到」。
+  let maxCoveredGap = 0
+  for (let i = 1; i < stamps.length; i += 1) {
+    // 只有当两点之间确实存在未抽到的场景时才算空档违规。
+    const between = spans.filter((s) => s.end > stamps[i - 1] && s.start < stamps[i]
+      && !stamps.some((t) => t >= s.start && t < s.end))
+    if (between.length) maxCoveredGap = Math.max(maxCoveredGap, stamps[i] - stamps[i - 1])
+  }
+  assert.ok(maxCoveredGap <= REVIEW_MAX_GAP_SECONDS + 0.2, `有场景的时段里最大空档 ${maxCoveredGap.toFixed(1)}s 应被补帧压住`)
+})
+
+test('an unknown boundary expression is skipped rather than guessed', () => {
+  // 求值不了的一律跳过该场景，不猜。猜错的边界比没有边界更糟——会让抽帧对齐到
+  // 错误的位置，看起来像「修好了」其实更糟。
+  const spans = parseSceneSpans(`const SCENES = [
+  { id: "ok", start: 1, end: 9 },
+  { id: "computed", start: computeStart(), end: computeEnd() },
+  { id: "expr", start: 1 + 2, end: 9 + 1 },
+];`)
+  assert.deepEqual(spans.map((s) => s.id), ['ok'], '只保留能求值的场景')
+})
+
+// 2026-10-10 补：导演写场景表的写法比预想的多。统计 46 个仍留有工程目录的历史成片，
+// 只有 10 条是「id + 字面量秒数」这一种；其余分布在 F() 帧、dur、name、单行、类型
+// 标注带花括号等形态里。解析器只认一种的话，「解析不出」会被误当成「这条片子没有
+// 场景表」，于是抽帧退回盲选——也就是修了个寂寞。下面把实测到的每种形态都钉住。
+test('reads every scene-table shape the director actually writes', () => {
+  const cases = [
+    ['字面量秒·多行', 'const SCENES = [\n { id: "a", start: 0, end: 5 },\n { id: "b", start: 5, end: 9 },\n] as const;', 2],
+    ['字面量秒·单行', 'const SCENES = [{ id: "a", start: 0, end: 5 }];', 1],
+    ['F()帧·多行', 'const F = (s: number) => Math.round(s*30);\nconst SCENES: Scene[] = [\n{ id: "a", start: F(0), end: F(5) },\n{ id: "b", start: F(5), end: F(9) }];', 2],
+    ['F()帧·单行', 'const F = (s: number) => Math.round(s*30);\nconst SCENES: Scene[] = [{ id: "a", start: F(0), end: F(5) }];', 1],
+    ['只有name没id', 'const SCENES: { start: number; end: number; name: string }[] = [\n{ start: 4.127, end: 9.407, name: "hook" },\n{ start: 9.407, end: 12.58, name: "x" }];', 2],
+    ['dur代替end', 'const F = (s: number) => Math.round(s*30);\nconst SCENES: { id: string; start: number; dur: number }[] = [\n{ id: "hook", start: F(0), dur: F(12) },\n{ id: "head", start: F(12), dur: F(38) }];', 2],
+    ['类型标注带花括号', 'const SCENES: { id: string; start: number; end: number }[] = [\n{ id: "a", start: 1, end: 5 },\n{ id: "b", start: 5, end: 9 }];', 2],
+    // 2026-10-15 补：另有 18 个历史工程曾落到最弱的均匀抽样档，其中多数其实写了表，
+    // 只是用了 from/dur 或别的表名。覆盖面不足会让「解析不出」被误当成「没有场景表」。
+    ['from/dur·帧', 'const SCENES: Array<{ from: number; dur: number; node: React.ReactNode }> = [\n{ from: 0, dur: 849 },\n{ from: 849, dur: 1966 }];', 2],
+    ['别名表NARRATION_SCENES', 'const NARRATION_SCENES: Scene[] = [\n{ id: "a", from: 0, dur: 5 },\n{ id: "b", from: 5, dur: 9 }];', 2],
+  ]
+  for (const [name, source, expected] of cases) {
+    assert.equal(parseSceneSpans(source).length, expected, `${name} 应解析出 ${expected} 个场景`)
+  }
+})
+
+test('from/dur are read as frames even when no fps can be derived from the source', () => {
+  // 这套写法原样喂给 <Sequence from={s.from} durationInFrames={s.dur}>，Remotion
+  // 语义就是帧。而 fps 来自 useVideoConfig()（运行时值），源码里定不出乘数。
+  // 定不出就按秒读，会把 849 帧当成 849 秒——抽帧直接落到片长之外，看起来门通过
+  // 了，实际一个场景都没盖住。渲染管线固定 30fps，所以退回 30 换算。
+  const spans = parseSceneSpans('const SCENES: Array<{ from: number; dur: number }> = [\n{ from: 0, dur: 849 },\n{ from: 849, dur: 1966 }];')
+  assert.equal(spans.length, 2)
+  assert.ok(Math.abs(spans[0].end - 849 / 30) < 1e-9, `849 帧应是 28.3 秒，实际 ${spans[0].end}`)
+  assert.ok(Math.abs(spans[1].start - spans[0].end) < 1e-9, '相邻场景必须严丝合缝')
+  assert.ok(Math.abs(spans[1].end - 2815 / 30) < 1e-9)
+})
+
+test('a scene table written in a comment is not mistaken for a real one', () => {
+  // 源码里有、运行时却没有的表：照它抽帧会抽到不存在的场景。
+  const source = '/* ---- SCENES：每个边界都取自 SRT ----\nconst SCENES = [{ start: 0, end: 5 }];\n*/\nexport const CreativeVideo = () => null;'
+  assert.deepEqual(parseSceneSpans(source), [], '注释里的表不算数')
+})
+
+test('the dur form is read as start + duration, matching Remotion Sequence semantics', () => {
+  const spans = parseSceneSpans('const F = (s: number) => Math.round(s*30);\nconst SCENES = [\n{ id: "hook", start: F(0), dur: F(12) },\n{ id: "head", start: F(12), dur: F(38) }];')
+  // 帧 0→360 是 0→12 秒，360→1500 是 12→50 秒。相邻必须严丝合缝，否则说明 end 算错了。
+  assert.ok(Math.abs(spans[0].end - 12) < 1e-9)
+  assert.ok(Math.abs(spans[1].start - 12) < 1e-9)
+  assert.ok(Math.abs(spans[1].end - 50) < 1e-9)
+})
+
+test('scene tables that cannot be evaluated are skipped, not guessed', () => {
+  // 展开运算符（`{ id: "hook", ...SC.s1 }`）与算术表达式都读不出边界。
+  // 这类必须整条跳过——猜一个错的边界比没有边界更糟：抽帧会对齐到错误位置，
+  // 审片照旧判不通过，导演照旧去修并不存在的缺陷。
+  for (const source of [
+    'const SCENES: SceneDef[] = [{ id: "hook", ...SC.s1 }, { id: "review", ...SC.s2 }];',
+    'const SCENES = [{ id: "x", start: computeStart(), end: computeEnd() }];',
+  ]) {
+    assert.deepEqual(parseSceneSpans(source), [], '读不出的场景表应为空，让调用方退回盲选')
+  }
+  // 混在一张表里时只保留可求值的那些。
+  const mixed = parseSceneSpans('const SCENES = [\n  { id: "ok", start: 1, end: 9 },\n  { id: "e", start: 1 + 2, end: 9 + 1 },\n];')
+  assert.deepEqual(mixed.map((s) => s.id), ['ok'])
+})
+
+test('参考音色上传：校验格式与 id，并把音频以 multipart 交给桥接', async (t) => {
+  // 2026-10-11 补这条链路。此前「参考音色库」面板只有试听和删除，上传被塞在
+  // 新建配音任务的表单里（uploadVoiceReference —— 那是**这一次任务**的参考音频，
+  // 不会进音色库）。想扩充音色库得先建一个配音任务，传进来的音色还只在那个
+  // 任务里可见，逻辑是断的。
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  let captured = null
+  const host = new SpokenVideoMediaHost({
+    projectsStore: new SpokenVideoProjectStore(),
+    credentials: credentialStore({}),
+    fetch: async (url, init) => {
+      captured = { url: String(url), init }
+      return new Response(JSON.stringify({ code: 200, id: 'zhubo' }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      })
+    },
+  })
+
+  const ok = await host.bridgeVoiceUpload(currentAgent, {
+    name: '参考.wav',
+    mediaType: 'audio/wav',
+    data: Buffer.from('RIFFfake').toString('base64'),
+    id: '主播音色',
+  })
+  assert.equal(ok.ok, true)
+  // 桥接会对 id 做什么它自己决定（实测中文 id 被它换成 ASCII），所以以它回的为准——
+  // 前端要把这个真实 id 告诉用户，否则会出现「填了 A，库里却是 B」。
+  assert.equal(ok.id, 'zhubo', '以桥接实际保存的 id 为准，不是用户填的那个')
+  assert.match(captured.url, /\/admin\/voices$/u)
+  assert.equal(captured.init.method, 'POST')
+  // 关键：必须是 multipart FormData，不能退化成 JSON —— 桥接那边按 multipart 解析。
+  assert.ok(captured.init.body instanceof FormData, '上传体必须是 FormData')
+  const file = captured.init.body.get('file')
+  assert.ok(file, 'multipart 里要有 file 字段')
+  assert.equal(file.name, '参考.wav')
+  assert.equal(captured.init.body.get('id'), '主播音色', '发给桥接的仍是用户填的原值')
+})
+
+test('参考音色上传：不支持的格式与穿越字符的 id 都在本地就被挡下', async (t) => {
+  const cwd = await workspace(t)
+  const host = new SpokenVideoMediaHost({
+    projectsStore: new SpokenVideoProjectStore(),
+    credentials: credentialStore({}),
+    fetch: async () => { throw new Error('不该发出请求') },
+  })
+  const currentAgent = agent(cwd)
+  await assert.rejects(
+    () => host.bridgeVoiceUpload(currentAgent, { name: 'x.txt', data: 'AA==' }),
+    /不支持的音频格式/u,
+  )
+  // id 会拼进 voices/<id>.<ext>，必须挡住 ../ 这类穿越字符。
+  await assert.rejects(
+    () => host.bridgeVoiceUpload(currentAgent, { name: 'a.wav', data: 'AA==', id: '../escape' }),
+    /音色标识/u,
+  )
+})
+
+test('质检提交接受与抽帧硬上限等量的抽帧文件，不会因为超限在最后一步炸掉', async (t) => {
+  // 2026-10-14 实测的坑：抽帧从固定 6 帧改成随场景数增长之后，
+  // store 里 sampledFrames 的校验上限还写死 8，于是一条 426 秒、20+ 场景的片子
+  // 渲染、质检、审片全部正常，**最后提交那一步**抛「质检抽帧最多包含 8 项」，
+  // 整条流水线失败。真因离报错信息很远，所以这条用例把 store 上限与抽帧硬上限
+  // （REVIEW_FRAME_HARD_LIMIT，空档补帧会超过保底数 12）钉在一起。
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  let project = await projectWithApprovedScript(currentAgent, store)
+  project = await withTestVoiceover(cwd, store, currentAgent, project, 'qc-frames', 'qc-frames-voice-0001')
+  project = await withTestSubtitles(store, currentAgent, project, 'qc-frames', 'qc-frames-voice-0001-subtitles')
+
+  const frameFiles = Array.from({ length: REVIEW_FRAME_HARD_LIMIT }, (_, index) =>
+    `media/video-agent/round-1/outputs/review-frames/attempt-1/frame-${String(index + 1).padStart(2, '0')}.png`)
+
+  project = (await store.commitProduced(currentAgent, {
+    projectId: project.id, expectedRevision: project.revision, stage: 'video', idempotencyKey: 'qc-frames-cap-0001', source: 'spoken-video/remotion-agent',
+    payload: {
+      mode: 'ai-director', renderer: 'remotion', orientation: 'landscape', subtitleEnabled: false, visualBrief: '清晰、克制的信息视觉。',
+      sourceAudioFile: 'media/voiceovers/qc-frames.wav', sourceSubtitleFile: 'media/subtitles/qc-frames.srt',
+      remotion: { projectDir: 'media/video-agent/round-1', propsFile: 'media/video-agent/round-1/public/task-props.json', entryFile: 'media/video-agent/round-1/src/index.ts' },
+      video: { file: 'media/videos/round-1.mp4', mediaType: 'video/mp4', bytes: 4_000_000, durationSeconds: 426.6, width: 1920, height: 1080, fps: 30, frameCount: 12_800, hasAudio: true },
+    },
+  })).project
+
+  await store.commitProduced(currentAgent, {
+    projectId: project.id, expectedRevision: project.revision, stage: 'qc', idempotencyKey: 'qc-frames-cap-0002', source: 'spoken-video/ai-review',
+    payload: {
+      mode: 'ai-director', reportFile: 'media/qc/round-1.json', reviewFile: 'media/qc/round-1-editorial.json', passed: true,
+      technical: {
+        passed: true, issues: [], warnings: [],
+        video: { width: 1920, height: 1080, durationSeconds: 426.6, fps: 30, hasAudio: true },
+        audio: { durationSeconds: 426.6 },
+        subtitles: { enabled: false, cueCount: 0 },
+        variation: { assessed: true, passed: true, sampledFrameCount: REVIEW_FRAME_HARD_LIMIT, distinctMainFrames: REVIEW_FRAME_HARD_LIMIT, meaningfulPairs: REVIEW_FRAME_HARD_LIMIT - 1, averagePairDifference: 19.46, pairDifferences: Array.from({ length: REVIEW_FRAME_HARD_LIMIT - 1 }, () => 19.46), crop: 'top 80%' },
+      },
+      review: { passed: true, technicalPass: true, editorialPass: true, score: 88, summary: '构图与语义对应良好。', findings: [], reviewEvidence: [{ timestampSeconds: 10.3, observedMainVisual: '开场标题与主视觉已就位。' }, { timestampSeconds: 409.7, observedMainVisual: '结尾形成收束。' }] },
+      sampledFrames: frameFiles,
+    },
+  })
+  const detail = await store.get(currentAgent, { projectId: project.id })
+  assert.equal(detail.artifacts.qc.data.sampledFrames.length, REVIEW_FRAME_HARD_LIMIT, '硬上限等量的抽帧必须能提交')
+  // 再多一帧仍应被挡：放宽不等于不校验。
+  await assert.rejects(
+    () => store.commitProduced(currentAgent, {
+      projectId: project.id, expectedRevision: detail.revision, stage: 'qc', idempotencyKey: 'qc-frames-cap-0003', source: 'spoken-video/ai-review',
+      payload: {
+        mode: 'ai-director', reportFile: 'media/qc/round-2.json', passed: true,
+        technical: { passed: true, issues: [], warnings: [], video: {}, audio: {}, subtitles: {} },
+        review: { passed: true, technicalPass: true, editorialPass: true, score: 88, summary: 'x', findings: [], reviewEvidence: [{ timestampSeconds: 1, observedMainVisual: 'x' }, { timestampSeconds: 2, observedMainVisual: 'y' }] },
+        sampledFrames: [...frameFiles, 'media/video-agent/round-1/outputs/review-frames/attempt-1/frame-25.png'],
+      },
+    }),
+    (error) => error instanceof SpokenVideoStoreError && new RegExp(`质检抽帧最多包含 ${REVIEW_FRAME_HARD_LIMIT} 项`, 'u').test(error.message),
+  )
 })

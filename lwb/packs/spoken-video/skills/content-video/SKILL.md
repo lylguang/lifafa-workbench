@@ -44,11 +44,23 @@ Choose visual forms that explain the manuscript. Diversity should follow changes
 
 For abstract content, show a meaningful relationship or state change rather than adding unrelated decorative motion.
 
+### Motion Vocabulary (MANDATORY)
+
+- Load `../remotion-best-practices/rules/motion-effects.md` before choosing scene motion. It defines the allow-list, strength quotas, and overlay-safe effects.
+- Choose motion by the beat's meaning, then pick from the allow-list. Never pick an effect first and rationalize the beat afterwards.
+- Adjacent beats must not use the same motion category. At most one emphasis event per beat.
+- High-intensity categories (particles, lighting, shape, environment, continuous) total at most 15% of the video duration and never appear in the first 2 seconds.
+- High-intensity motion may not sit underneath narration while narration is speaking. Visual emphasis competes with the voiceover.
+- The motion must land on a narrated idea. An effect that completes between two spoken sentences is decoration; remove it.
+- Data-driven motion requires a real value from the manuscript. The catalog's demo numbers are never findings. This restates, and does not relax, the measurement rule above.
+
 ### Composition, Typography, And Semantic Motion
 
 - Enlarge the main objects and essential labels enough to read at the target viewing size. Use whitespace to clarify hierarchy; do not leave tiny diagrams and labels stranded in a mostly empty frame. Reveal complex information progressively instead of shrinking text.
 - Explicitly set a consistent Chinese sans-serif font family using locally available fonts. At a 1080px short edge, typical starting sizes are 56–80px for titles, 36–48px for key labels and takeaways, and at least about 28px for necessary supporting text. Adapt to aspect ratio, available width, and final displayed scale; these are design guides, not mechanical gates. Preserve orchestrator-owned captions.
 - Time meaningful changes to the supplied narration/SRT: move the relevant object, advance a process, change a state, or shift emphasis when the corresponding idea is spoken. Avoid completing all visual development at the start of a long passage. Reuse objects across the passage rather than adding scenes solely to increase activity.
+- Scene text must come from the scene's own narration window. Every scene maps to a contiguous SRT time range; on-screen quotes, cards, and highlighted sentences may only quote text from cues inside that range. A suspense hook may tease that a key sentence exists ("藏着一句…"), but must not print the sentence itself — the audience reads faster than the narrator, and printing an answer the narration has not reached yet reads as subtitle mismatch. (2026-10-11: the "协议正文" card quoted a line 6 seconds ahead of the voiceover and was flagged by the user.)
+- Reserve a bottom subtitle safe area in every landscape scene. Burned-in subtitles occupy roughly the bottom 140px at 1080p (46px text plus padding). Content centered with `justifyContent: "center"` across the full frame sits visually low once subtitles render; compensate with `paddingBottom` of at least 150px on the content AbsoluteFill (or shift the content block up equivalently) so the composition's visual center matches the frame center above the subtitle band. (2026-10-11: user feedback — "视频内容稍微偏下".)
 - Allow reading pauses and dwell on important numbers and conclusions. Persistent floating, spinning, flashing, and fixed-interval cuts do not substitute for explanation. Prefer visual continuity over repeated full-screen fade-in resets.
 
 ### Autonomous Asset-Free Direction (MANDATORY)

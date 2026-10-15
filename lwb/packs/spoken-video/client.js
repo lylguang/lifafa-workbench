@@ -102,6 +102,10 @@ window.__ModuleLoader__.load({
     const notify = { play: notifyPlay, playOnce: notifyOnce, unlock: notifyUnlock, notifyDesktop, requestDesktop: notifyRequestDesktop, settings: notifySettings };
     let connection; let executionRemote; let executionStreams;
     let audioCaptionsHandoff = null;
+    // 选题页 → 写稿页：把刚加入待写稿的项目带过去，让写稿页直接选中并打开抽屉。
+    // 此前选题抽屉底部只有「生成新一批 / 完成」，用户选完只能自己去切页，
+    // 于是「已加入待写稿」看着像终点、实际没往下走（2026-10-11 反馈）。
+    let scriptsHandoff = null;
     let publishHandoff = null;
     // Pipeline board → work page: carries the target project so the destination
     // page selects it on mount. Keyed by page id, mirroring openPackMenu ids.
@@ -384,6 +388,38 @@ window.__ModuleLoader__.load({
       .sv-toast-stack { position:fixed; z-index:60; right:18px; bottom:18px; display:grid; gap:9px; width:min(380px,calc(100vw - 36px)); }
       /* 本地引擎面板 */
       .sv-engine-panel { display:grid; gap:12px; padding:15px 17px; border:1px solid var(--lwb-line); border-radius:11px; background:var(--lwb-surface); }
+      /*
+       * 配音页顶部三个面板（本地推理引擎 / 本地配音配置 / 参考音色库）的栅格。
+       *
+       * 2026-10-11 重排。此前它们是竖着平铺的三块整宽卡片，标题、说明、控件
+       * 各占一行，读起来像三个互不相干的设置页堆在一起——尤其「参考音色库」
+       * 本来是可扫读的列表，被拉成整宽后一行只有一个音色。
+       *
+       * 现在：宽屏两列（引擎 + 配音配置并排，音色库单独占下方整行放列表），
+       * 窄屏回落成单列。用 grid 而不是 flex，列宽才能真正均分。
+       */
+      .sv-setup-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:start; }
+      .sv-setup-grid > .sv-voice-panel { grid-column:1 / -1; }
+      /*
+       * 刻意**不**做等高（align-items:start）。
+       * 试过 stretch 把两栏拉到一样高，结果引擎面板内容只到 560px、面板却有 675px，
+       * 底下留出 115px 纯空白，比底边不齐更难看。两栏内容天然不等量
+       * （引擎就两个运行项，配置有一堆字段），顶部对齐、各自伸展才是对的。
+       */
+      /* 云端/本地分组的小标题：把「这一组字段属于哪种合成方式」讲清楚，
+         免得切到本地还看见小米音色那几个字段，以为它也在生效。 */
+      .sv-setup-subsection { display:grid; gap:9px; padding:11px 12px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-page); }
+      .sv-subsection-title { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); font-weight:800; }
+      .sv-style-presets { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+      /* 音色库的上传区：和上面的音色卡片之间有一道虚线，视觉上分得开「已有的」
+         与「往里加」，否则一排卡片下面跟着输入框会以为是某个音色的编辑框。 */
+      .sv-voice-upload { display:grid; gap:7px; padding-top:11px; border-top:1px dashed var(--lwb-line); }
+      .sv-voice-upload-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+      .sv-voice-upload-row .sv-input { flex:1 1 240px; min-width:0; }
+      .sv-voice-upload-row button { flex:none; }
+      .sv-style-presets > .sv-meta { margin-right:2px; }
+      body[data-ds-dark-theme] .sv-setup-subsection { background:#1b2530; }
+      @media (max-width:900px) { .sv-setup-grid { grid-template-columns:1fr; } .sv-setup-grid > .sv-voice-panel { grid-column:auto; } }
       .sv-engine-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:9px; }
       .sv-engine-head h3 { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-md,15px); }
       .sv-engine-actions { display:flex; flex-wrap:wrap; gap:7px; }
@@ -396,17 +432,33 @@ window.__ModuleLoader__.load({
       .sv-usage-bar[data-level="mid"] .sv-usage-fill { background:#d69a1c; }
       .sv-usage-bar[data-level="high"] .sv-usage-fill { background:#d1443f; }
       .sv-engine-row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:10px 12px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-page); }
+      /* 字幕引擎与生图引擎并排。列宽只有整宽的一半，所以行内改成竖排：
+         名称/端口一行、状态一行、按钮一行——横排会把按钮挤到换行更难读。 */
+      .sv-engine-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(232px,1fr)); gap:10px; }
+      .sv-engine-grid .sv-engine-row { display:grid; gap:8px; align-content:start; }
+      /* 行改成 grid 后子项默认拉伸，状态标签会被拉成整条色块；
+         标签和按钮组都要收回内容宽度。 */
+      .sv-engine-grid .sv-tag, .sv-engine-grid .sv-stage { justify-self:start; }
+      .sv-engine-grid .sv-engine-buttons { justify-self:start; }
+      /* 可折叠的标题。整块（含 h3）都是按钮的点击区，否则要点中文字才生效。 */
+      .sv-collapsible-head { display:inline-flex; align-items:center; gap:7px; padding:0; border:0; color:inherit; background:transparent; cursor:pointer; font:inherit; }
+      .sv-collapsible-head h3 { margin:0; }
+      .sv-collapse-caret { color:var(--lwb-muted); font-size:12px; }
+      .sv-collapsible-head:hover h3 { color:var(--lwb-blue); }
       .sv-engine-id { display:grid; gap:2px; flex:1 1 190px; min-width:0; }
       .sv-engine-id strong { color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); }
       .sv-engine-buttons { display:flex; flex-wrap:wrap; gap:6px; }
       .sv-engine-log { display:grid; gap:7px; padding:11px 12px; border:1px dashed var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
       /* 参考音色库与本地配音配置 */
       .sv-voice-panel { display:grid; gap:11px; padding:15px 17px; border:1px solid var(--lwb-line); border-radius:11px; background:var(--lwb-surface); }
-      .sv-voice-list { display:grid; gap:7px; margin:0; padding:0; list-style:none; }
-      .sv-voice-row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:9px 11px; border:1px solid var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
+      /* 音色库是可扫读的列表：多列排布，一眼能看完有几个音色、各自叫什么。 */
+      .sv-voice-list { display:grid; grid-template-columns:repeat(auto-fill,minmax(268px,1fr)); gap:9px; margin:0; padding:0; list-style:none; align-items:start; }
+      .sv-voice-row { display:grid; gap:8px; align-content:start; padding:11px 12px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-page); }
       .sv-voice-id { display:grid; gap:2px; flex:1 1 190px; min-width:0; }
       .sv-voice-id strong { color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); }
       .sv-voice-buttons { display:flex; flex-wrap:wrap; gap:6px; }
+      /* 音色卡里那条信息行：名称/时长在左，操作在右，卡变窄也不会挤成一团。 */
+      .sv-voice-head { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; }
       .sv-voice-audio { width:100%; max-width:340px; height:34px; margin-top:4px; }
       .sv-bridge-fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:11px; }
       .sv-bridge-test { display:grid; gap:5px; padding:10px 12px; border:1px dashed var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
@@ -827,6 +879,9 @@ window.__ModuleLoader__.load({
       .sv-tp-task-group-title { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); font-weight:800; }
       .sv-tp-task-group-meta { color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); }
       .sv-tp-history-filters { display:flex; flex-wrap:wrap; gap:6px; }
+      .sv-tp-history-tools { display:flex; flex-wrap:wrap; gap:8px; }
+      .sv-tp-history-field { display:flex; flex:1 1 165px; min-width:0; flex-direction:column; gap:4px; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); }
+      .sv-tp-history-field .sv-select { height:32px; }
       .sv-tp-history-filter { min-height:28px; padding:0 9px; border:1px solid var(--lwb-line); border-radius:6px; color:var(--lwb-muted); background:var(--lwb-surface); cursor:pointer; font:inherit; font-size:var(--lwb-text-sm,13px); font-weight:700; }
       .sv-tp-history-filter:hover:not(:disabled),.sv-tp-history-filter[aria-pressed="true"] { border-color:var(--sv-accent-line); color:var(--sv-accent-ink); background:var(--sv-accent-soft); }
       .sv-tp-history-filter:disabled { cursor:default; opacity:.6; }
@@ -1278,6 +1333,10 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(null);
       const [error, setError] = React.useState(null);
       const [audio, setAudio] = React.useState(null);
+      const [uploading, setUploading] = React.useState(false);
+      const [notice, setNotice] = React.useState(null);
+      const [voiceId, setVoiceId] = React.useState('');
+      const fileRef = React.useRef(null);
 
       const load = React.useCallback(async () => {
         try { const next = await remoteStatic('bridgeVoices'); setState(next); setError(null); }
@@ -1285,6 +1344,38 @@ window.__ModuleLoader__.load({
       }, []);
 
       React.useEffect(() => { void load(); }, [load]);
+
+      /**
+       * 往音色库存一个参考音频。
+       *
+       * 2026-10-11 补。之前这个面板只有试听和删除，上传被塞在「新建配音任务」
+       * 的表单里（走 uploadVoiceReference，传的是**这一次任务**的参考音频，
+       * 不进音色库）。逻辑因此是断的：想扩充音色库得先建一个配音任务，传进来的
+       * 音色还只在那个任务里可见。
+       */
+      const upload = async (event) => {
+        const file = event.target.files?.[0] || null;
+        event.target.value = '';
+        if (!file || uploading) return;
+        setUploading(true); setError(null); setNotice(null);
+        try {
+          const data = await base64FromAudioFile(file);
+          const result = await remoteStatic('bridgeVoiceUpload', {
+            name: file.name,
+            mediaType: file.type,
+            data,
+            id: voiceId.trim() || undefined,
+          });
+          if (!result?.ok) {
+            setError(result?.reason || '上传失败');
+          } else {
+            setVoiceId('');
+            setNotice(`已入库：${result.id}。可在上面「默认音色」选用，也可配音时选它。`);
+            await load();
+          }
+        } catch (cause) { setError(cause.message); }
+        finally { setUploading(false); }
+      };
 
       const remove = async (id) => {
         setBusy(id); setError(null);
@@ -1309,19 +1400,20 @@ window.__ModuleLoader__.load({
       ].filter(Boolean).join(' · ');
 
       const voiceRow = (voice) => h('li', { key: voice.id, className: 'sv-voice-row' },
-        h('div', { className: 'sv-voice-id' },
-          h('strong', null, voice.id),
-          h('span', { className: 'sv-meta' }, voiceMeta(voice))),
-        h('div', { className: 'sv-voice-buttons' },
-          h('button', {
-            type: 'button', className: 'lwb-plain-button',
-            onClick: () => setAudio(audio === voice.id ? null : voice.id),
-          }, audio === voice.id ? '收起' : '试听'),
-          h('button', {
-            type: 'button', className: 'lwb-plain-button', disabled: busy === voice.id,
-            title: '删除该音色及其转写文本与参数文件',
-            onClick: () => { void remove(voice.id); },
-          }, busy === voice.id ? '删除中…' : '删除')),
+        h('div', { className: 'sv-voice-head' },
+          h('div', { className: 'sv-voice-id' },
+            h('strong', null, voice.id),
+            h('span', { className: 'sv-meta' }, voiceMeta(voice))),
+          h('div', { className: 'sv-voice-buttons' },
+            h('button', {
+              type: 'button', className: 'lwb-plain-button',
+              onClick: () => setAudio(audio === voice.id ? null : voice.id),
+            }, audio === voice.id ? '收起' : '试听'),
+            h('button', {
+              type: 'button', className: 'lwb-plain-button', disabled: busy === voice.id,
+              title: '删除该音色及其转写文本与参数文件',
+              onClick: () => { void remove(voice.id); },
+            }, busy === voice.id ? '删除中…' : '删除'))),
         audio === voice.id
           ? h('audio', { className: 'sv-voice-audio', controls: true, src: voice.audioUrl })
           : null);
@@ -1334,6 +1426,27 @@ window.__ModuleLoader__.load({
         state.voices.length === 0
           ? h('p', { className: 'sv-meta' }, '还没有参考音色。传了参考音频时配音会自动走声音复刻。')
           : h('ul', { className: 'sv-voice-list' }, state.voices.map(voiceRow)),
+        // 上传区放在列表下面而不是标题栏里：它是「往库里加东西」的动作，
+        // 和「刷新/试听/删除」这类查看操作不是一类，混在一排会让人以为标题栏
+        // 那三个按钮管着全部操作。
+        h('div', { className: 'sv-voice-upload' },
+          h('input', {
+            type: 'file', ref: fileRef, accept: 'audio/*,.wav,.mp3,.m4a,.flac,.ogg,.aiff',
+            style: { display: 'none' }, onChange: (event) => { void upload(event); },
+          }),
+          h('div', { className: 'sv-voice-upload-row' },
+            h('input', {
+              className: 'sv-input', value: voiceId, maxLength: 64,
+              placeholder: '音色 ID（可留空，默认用文件名）',
+              disabled: uploading,
+              onChange: (event) => setVoiceId(event.target.value),
+            }),
+            h('button', {
+              type: 'button', className: 'lwb-primary-button', disabled: uploading,
+              onClick: () => fileRef.current?.click?.(),
+            }, uploading ? '正在上传…' : '上传参考音频')),
+          h('p', { className: 'sv-meta' }, '支持 WAV / MP3 / M4A / FLAC / OGG / AIFF，单个不超过 60 MiB。音色 ID 留空则用文件名。填中文时桥接可能改成拼音或短 id——上传成功后会显示它实际保存的名字，以那个为准。')),
+        notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null,
         error ? h('p', { className: 'sv-error' }, error) : null);
     }
 
@@ -1350,6 +1463,23 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState(null);
       const [error, setError] = React.useState(null);
       const [test, setTest] = React.useState(null);
+      /**
+       * 折叠状态。
+       *
+       * 2026-10-11 用户要求：这组配置「一般用不到」，不该每次进配音页都铺开占掉
+       * 半屏。默认收起，但**不能**每次进来都要手点两下才看得到内容——所以状态存
+       * localStorage，跨刷新保留；只有显式点开才展开到本次会话。
+       *
+       * localStorage 在隐私模式下会抛（见本文件 NOTIFY_KEY 的处理），包一层。
+       */
+      const [expanded, setExpanded] = React.useState(() => {
+        try { return window.localStorage?.getItem('lwb-sv-bridge-config-open') === '1' } catch { return false }
+      });
+      const toggleExpanded = () => setExpanded((current) => {
+        const next = !current;
+        try { window.localStorage?.setItem('lwb-sv-bridge-config-open', next ? '1' : '0') } catch { /* 隐私模式，忽略 */ }
+        return next;
+      });
 
       const load = React.useCallback(async () => {
         try {
@@ -1398,30 +1528,102 @@ window.__ModuleLoader__.load({
       if (config.available === false) return null;
       if (!form) return h('section', { className: 'sv-engine-panel' }, h('p', { className: 'sv-meta' }, '正在读取桥接配置…'));
 
-      return h('section', { className: 'sv-engine-panel' },
-        h('header', { className: 'sv-engine-head' },
-          h('h3', null, '本地配音配置'),
-          h('span', { className: 'sv-meta' }, '保存在本机桥接的 config.json，不进版本库')),
+      const isCloud = form.ttsProvider === 'cloud';
+      // 下拉选项以桥接实测返回的 builtin_voices 为准，回落到前端兜底表；
+      // 当前值如果不在表里（老配置或桥接新增了音色）也要补进去，否则 select
+      // 会把已保存的值显示成第一项——看着像配好了，其实存的是别的音色。
+      const voiceOptions = Array.from(new Set([
+        ...(Array.isArray(config.mimo?.builtinVoices) && config.mimo.builtinVoices.length ? config.mimo.builtinVoices : SV_MIMO_BUILTIN_VOICES),
+        form.mimoVoice,
+      ].filter((value) => typeof value === 'string' && value.trim()))).filter(Boolean);
+      // 默认音色指向的是本机音色库（参考音频），所以选项来自音色库而不是内置音色。
+      const libraryOptions = Array.from(new Set([
+        ...(Array.isArray(config.voices) ? config.voices.map((voice) => voice.id) : []),
+        form.defaultVoice,
+      ].filter((value) => typeof value === 'string' && value.trim()))).filter(Boolean);
 
+      const setField = (patch) => setForm({ ...form, ...patch });
+
+      return h('section', { className: 'sv-engine-panel' },
+        // 收起时也要看得见当前是什么配置——只留一个标题会让人以为面板空了。
+        // 所以标题栏常驻一行摘要：合成方式 + 音色 + 语气。
+        h('header', { className: 'sv-engine-head' },
+          h('button', {
+            type: 'button', className: 'sv-collapsible-head', 'aria-expanded': expanded ? 'true' : 'false',
+            onClick: toggleExpanded,
+          },
+            h('span', { className: 'sv-collapse-caret', 'aria-hidden': 'true' }, expanded ? '▾' : '▸'),
+            h('h3', null, '本地配音配置')),
+          expanded
+            ? h('span', { className: 'sv-meta' }, '保存在本机桥接的 config.json，不进版本库')
+            : h('span', { className: 'sv-meta' },
+              `${isCloud ? '云端' : '本地'}合成`
+              + `${form.mimoVoice ? ` · ${form.mimoVoice}` : ''}`
+              + `${form.mimoStyle ? ` · ${form.mimoStyle.replace(/[，。]$/u, '')}` : ''}`
+              + `${form.defaultVoice ? ` · 默认音色 ${form.defaultVoice}` : ''}`)),
+        !expanded
+          ? h('p', { className: 'sv-meta' }, '这组配置一般很少改动，收起了。点标题展开。')
+          : null,
+
+        expanded ? h(React.Fragment, null,
         h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '配音方式' },
           [['cloud', '云端合成（小米 MiMo）'], ['local', '本地合成（LongCat）']].map(([id, label]) =>
             h('button', {
               key: id, type: 'button', className: 'sv-media-provider-choice',
               'data-active': form.ttsProvider === id ? 'true' : 'false',
-              onClick: () => setForm({ ...form, ttsProvider: id }),
+              onClick: () => setField({ ttsProvider: id }),
             }, label))),
-        form.ttsProvider === 'local'
-          ? h('p', { className: 'sv-note' }, '本地合成需要约 23 GB 空闲内存，且 16G 显卡上无法与封面生图同时驻留。多数情况应选云端。')
-          : null,
 
-        h('div', { className: 'sv-bridge-fields' },
-          h('label', { className: 'sv-media-field' }, h('span', null, '小米音色'),
-            h('input', { className: 'sv-input', value: form.mimoVoice, maxLength: 60, placeholder: '茉莉', onChange: (e) => setForm({ ...form, mimoVoice: e.target.value }) })),
-          h('label', { className: 'sv-media-field' }, h('span', null, '语气 / 节奏（可留空）'),
-            h('input', { className: 'sv-input', value: form.mimoStyle, maxLength: 200, placeholder: '清晰沉稳，适合知识讲解', onChange: (e) => setForm({ ...form, mimoStyle: e.target.value }) })),
-          h('label', { className: 'sv-media-field' }, h('span', null, '默认音色（可留空）'),
-            h('input', { className: 'sv-input', value: form.defaultVoice, maxLength: 60, placeholder: '音色库里的 id', onChange: (e) => setForm({ ...form, defaultVoice: e.target.value }) })),
-          h('label', { className: 'sv-checks' }, h('input', { type: 'checkbox', checked: form.chineseNumbers, onChange: (e) => setForm({ ...form, chineseNumbers: e.target.checked }) }), '数字按中文读法念（避免 TTS 念成「二零二五」）')),
+        // 云端与本地的可调项完全不同：小米音色/语气只对云端生效，本地合成用音色库。
+        // 分开展示而不是一股脑列出来再各自置灰——置灰的字段会让人以为坏了。
+        isCloud
+          ? h('div', { className: 'sv-setup-subsection' },
+            h('p', { className: 'sv-subsection-title' }, '云端合成 · 小米 MiMo'),
+            h('div', { className: 'sv-bridge-fields' },
+              h('label', { className: 'sv-media-field' }, h('span', null, '小米音色'),
+                h('select', { className: 'sv-select', value: form.mimoVoice, onChange: (e) => setField({ mimoVoice: e.target.value }) },
+                  h('option', { value: '' }, '未指定（跟随平台默认）'),
+                  voiceOptions.map((voice) => h('option', { key: voice, value: voice },
+                    SV_MIMO_VOICE_HINTS[voice] ? `${voice} — ${SV_MIMO_VOICE_HINTS[voice]}` : voice))))),
+            SV_MIMO_VOICE_HINTS[form.mimoVoice]
+              ? h('p', { className: 'sv-note' }, `当前音色「${form.mimoVoice}」：${SV_MIMO_VOICE_HINTS[form.mimoVoice]}`)
+              : null,
+            h('label', { className: 'sv-media-field' }, h('span', null, '语气 / 节奏（可留空）'),
+              h('input', {
+                className: 'sv-input', value: form.mimoStyle, maxLength: 200,
+                placeholder: '留空则用平台默认语气；也可点下方胶囊一键填入',
+                onChange: (e) => setField({ mimoStyle: e.target.value }),
+              })),
+            SV_VOICE_STYLE_PRESETS.length
+              ? h('div', { className: 'sv-style-presets' },
+                h('span', { className: 'sv-meta' }, '常用语气'),
+                SV_VOICE_STYLE_PRESETS.map((style) => h('button', {
+                  key: style, type: 'button', className: 'sv-filter-chip',
+                  'data-on': form.mimoStyle === style ? 'true' : 'false',
+                  onClick: () => setField({ mimoStyle: form.mimoStyle === style ? '' : style }),
+                }, style.replace(/[，。]$/u, ''))))
+              : null)
+          : h('div', { className: 'sv-setup-subsection' },
+            h('p', { className: 'sv-subsection-title' }, '本地合成 · LongCat'),
+            h('p', { className: 'sv-note' }, '本地合成需要约 23 GB 空闲内存，且 16G 显卡上无法与封面生图同时驻留。多数情况应选云端。'),
+            h('p', { className: 'sv-meta' }, '本地合成不使用「小米音色」和「语气」，它读的是下方默认音色指向的本机参考音频。')),
+
+        // 「默认音色」独占一行，checkbox 另起一行。
+        // 之前两者同在 .sv-bridge-fields（auto-fit minmax(215px,1fr)）里，在 535px
+        // 宽的那一栏会分成两列，checkbox 被挤到右边还换行，读起来像两个不相干的
+        // 开关。默认音色是「选哪个声音」、中文读法是「怎么念」，本来就该分开讲。
+        h('div', { className: 'sv-setup-subsection' },
+          h('label', { className: 'sv-media-field' }, h('span', null, '默认音色（参考音频）'),
+            libraryOptions.length
+              ? h('select', { className: 'sv-select', value: form.defaultVoice, onChange: (e) => setField({ defaultVoice: e.target.value }) },
+                h('option', { value: '' }, '未设置（用系统默认音色）'),
+                libraryOptions.map((id) => h('option', { key: id, value: id }, id)))
+              : h('input', {
+                className: 'sv-input', value: form.defaultVoice, maxLength: 60,
+                placeholder: '音色库为空，先到下方「参考音色库」上传参考音频',
+                onChange: (e) => setField({ defaultVoice: e.target.value }),
+              })),
+          h('label', { className: 'sv-checks' }, h('input', { type: 'checkbox', checked: form.chineseNumbers, onChange: (e) => setField({ chineseNumbers: e.target.checked }) }), '数字按中文读法念（避免 TTS 念成「二零二五」）')),
 
         h('div', { className: 'sv-engine-actions' },
           h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(busy), onClick: () => { void tryVoice(); } }, busy === 'test' ? '正在合成…' : '试听一句'),
@@ -1432,7 +1634,8 @@ window.__ModuleLoader__.load({
             h('p', { className: 'sv-meta' }, `试听成功${test.seconds ? ` · ${test.seconds} 秒` : ''}`),
             test.audioUrl ? h('audio', { className: 'sv-voice-audio', controls: true, src: test.audioUrl }) : null)
           : h('p', { className: 'sv-error' }, `试听失败：${test.reason || '未知原因'}`)) : null,
-        error ? h('p', { className: 'sv-error' }, error) : null);
+        error ? h('p', { className: 'sv-error' }, error) : null,
+        ) : null);
     }
 
     function LocalEnginePanel({ packId }) {
@@ -1520,7 +1723,11 @@ window.__ModuleLoader__.load({
             h('span', { className: 'sv-usage-bar', 'data-level': memPercent >= 90 ? 'high' : memPercent >= 70 ? 'mid' : 'low' },
               h('span', { className: 'sv-usage-fill', style: { width: `${memPercent || 0}%` } }))) : null),
 
-        (state.engines || []).map((engine) => h('div', { key: engine.kind, className: 'sv-engine-row' },
+        // 两个引擎（字幕 / 生图）并排：2026-10-11 用户要求。此前是一列两个整宽卡片，
+        // 而它们的信息量完全一样（名称、端口、状态、两个按钮），并排一眼就能对比
+        // 「谁在跑、谁停了、谁占了显存」，比上下排开省一屏。
+        h('div', { className: 'sv-engine-grid' },
+          (state.engines || []).map((engine) => h('div', { key: engine.kind, className: 'sv-engine-row' },
           h('div', { className: 'sv-engine-id' },
             h('strong', null, engine.label || engine.kind),
             h('span', { className: 'sv-meta' }, `端口 ${engine.port}`),
@@ -1544,7 +1751,7 @@ window.__ModuleLoader__.load({
               type: 'button', className: 'lwb-primary-button', disabled: Boolean(busy) || engine.canLaunch === false,
               title: engine.canLaunch === false ? '引擎路径校验未通过，请检查安装目录' : '拉起引擎并等待就绪（本地模型可能需要 30-180 秒）',
               onClick: () => { void act(engine.kind, 'launch'); },
-            }, busy === `${engine.kind}:launch` ? '启动中，请稍候…' : '一键启动') : null))),
+            }, busy === `${engine.kind}:launch` ? '启动中，请稍候…' : '一键启动') : null)))),
 
         error ? h('p', { className: 'sv-error' }, error) : null,
 
@@ -2538,7 +2745,7 @@ window.__ModuleLoader__.load({
       const hash = String(name || '').split('').reduce((sum, char) => (sum * 31 + char.codePointAt(0)) >>> 0, 11);
       return `hsl(${hash % 360}, 62%, 52%)`;
     }
-    function TopicsPage({ packId, openConversation }) {
+    function TopicsPage({ packId, openConversation, openPackMenu }) {
       const { projects, refresh, error, setError } = useProjects(packId);
       const [board, setBoard] = React.useState(null);
       const [sources, setSources] = React.useState([]);
@@ -2800,6 +3007,14 @@ window.__ModuleLoader__.load({
       const summaryDrawer = summaryRecord && h(ExecutionDrawer, { key: summaryRecord.id, request: { kind: 'topic', id: summaryRecord.id }, onClose: () => setOpenSummary(null) });
 
       const candRecord = history.find((item) => item.id === openCand) || null;
+      // 「去写稿」：带走本轮选中的第一个候选的 projectId，切到写稿页后由那边的
+      // scriptsHandoff 消费。取第一个是因为候选按 DSH 推荐度排序、推荐项已自动
+      // 选中，用户点这个按钮的意图几乎总是「先写推荐的那篇」。
+      const goToScript = candRecord && (() => {
+        const target = selectedCandidatesOf(candRecord).find((item) => item.projectId);
+        if (!target || typeof openPackMenu !== 'function') return null;
+        return () => { scriptsHandoff = target.projectId; setOpenCand(null); openPackMenu('scripts'); };
+      })();
       const candidateDrawer = candRecord && h(React.Fragment, null,
         h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭面板', onClick: () => { setOpenCand(null); } }),
         h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '候选选题' },
@@ -2833,6 +3048,18 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'sv-tp-drawer-foot' },
             h('span', { className: 'sv-meta' }, `已加入待写稿 ${selectedCandidatesOf(candRecord).length} 个`),
+            // 「去写稿」：把本轮选中的候选带到写稿页并直接选中。
+            // 之前底部只有「生成新一批 / 完成」，选完就没有下一步了，用户以为
+            // 「已加入待写稿」就是终点，得自己记住去切页（2026-10-11 反馈）。
+            // 用 handoff 携带 projectId：写稿页的数据源是 listWritableTopics，
+            // 按 updatedAt 倒序，刚加入的自然排第一，这里再把抽屉直接打开。
+            h('button', {
+              type: 'button',
+              className: 'lwb-plain-button',
+              disabled: !goToScript || !selectedCandidatesOf(candRecord).some((item) => item.projectId),
+              title: goToScript ? '前往写稿页并打开第一个待写稿' : '当前环境不支持页面跳转，可手动切到「写稿」页',
+              onClick: goToScript,
+            }, '下一步：去写稿'),
             h('button', { type: 'button', className: 'lwb-plain-button', disabled: launching, onClick: () => regenerate(candRecord) }, '生成新一批'),
             h('button', { type: 'button', className: 'lwb-primary-button', onClick: () => { setOpenCand(null); } }, '完成'),
           ),
@@ -2861,6 +3088,16 @@ window.__ModuleLoader__.load({
       );
     }
     const ARCHIVED_TAB = '__archived__';
+    // 任务卡片上的账号分组与选题 Tab 保持同一套判据：有快照归该账号，
+    // 无快照归通用，已归档账号单独一档而不是被静默丢弃。
+    function scriptTaskTab(record, activeIds) {
+      const id = record?.account?.id || null;
+      return !id ? GENERAL_TAB : activeIds.has(id) ? id : ARCHIVED_TAB;
+    }
+    function sortScriptTasks(records, mode) {
+      const direction = mode === 'oldest' ? 1 : -1;
+      return [...records].sort((left, right) => direction * String(left?.startedAt || left?.queuedAt || '').localeCompare(String(right?.startedAt || right?.queuedAt || '')));
+    }
     function emptyScriptForm() { return { tier: 'medium', instructions: '', targetId: null }; }
     // 待写稿 = 已确认选题但还没有稿的项目（listWritableTopics 的 scriptState === 'none'）。
     // 按选题冻结的账号快照分组：无快照的归通用 Tab，与写稿页 tabOf 的分组一致。
@@ -2902,6 +3139,10 @@ window.__ModuleLoader__.load({
       const [activeTab, setActiveTab] = React.useState(GENERAL_TAB);
       const [history, setHistory] = React.useState([]);
       const [historyFilter, setHistoryFilter] = React.useState('all');
+      // 任务面板另外按账号定位收窄，并可翻转时间方向；两者只影响展示，
+      // 不改变任何任务状态，也不参与左侧选题 Tab 的选择。
+      const [historyAccount, setHistoryAccount] = React.useState('all');
+      const [historySort, setHistorySort] = React.useState('newest');
       const [historyPage, setHistoryPage] = React.useState(0);
       const [busy, setBusy] = React.useState(false);
       const [openMore, setOpenMore] = React.useState(false);
@@ -2963,7 +3204,8 @@ window.__ModuleLoader__.load({
       const anyRunning = history.some((item) => item.status === 'running');
       const projectIsRunning = (projectId) => history.some((item) => item.projectId === projectId && (item.status === 'queued' || item.status === 'running'));
       const projectBusy = Boolean(openProject && projectIsRunning(openProject));
-      React.useEffect(() => { setHistoryPage(0); }, [historyFilter]);
+      // 任一筛选维度变化都回到第一页，否则可能停在越界页码上看不到结果。
+      React.useEffect(() => { setHistoryPage(0); }, [historyFilter, historyAccount, historySort]);
       React.useEffect(() => {
         if (!packId || !anyRunning) return undefined;
         let active = true;
@@ -2997,7 +3239,25 @@ window.__ModuleLoader__.load({
         setOpenProject(projectId);
         setOpenMore(false);
       }, [topics, activeAccounts]);
-      const sortTopics = (list) => { const rank = { approved: 0, none: 1 }; return [...list].sort((a, b) => (rank[a.scriptState] - rank[b.scriptState]) || b.updatedAt.localeCompare(a.updatedAt)); };
+      // 选题页「下一步：去写稿」交接：同样落到项目自己的 Tab 并直接打开抽屉。
+      // 与 pipelineHandoff 走同一套逻辑，只是来源不同，所以单开一个变量而不是
+      // 复用 pipelineHandoff（那个按 page 键，语义上是看板过来的）。
+      React.useEffect(() => {
+        if (!scriptsHandoff) return;
+        const target = topics.find((topic) => topic.projectId === scriptsHandoff);
+        if (!target) return;
+        const { projectId } = scriptsHandoff;
+        scriptsHandoff = null;
+        setActiveTab(target.account && activeAccounts.some((item) => item.id === target.account.id) ? target.account.id : GENERAL_TAB);
+        setOpenProject(projectId);
+        setOpenMore(false);
+      }, [topics, activeAccounts]);
+      // 纯按更新时间倒序，**不再按 scriptState 把已确认稿排在前面**。
+      // 2026-10-11 用户反馈：刚在选题页加入待写稿的「字节没发世界模型」在写稿页
+      // 排到第 39 位。原排序 `{approved:0, none:1}` 先比状态，所以 38 条已确认稿
+      // 把 13 条待写稿全压在后面 —— 而待写稿正是用户此刻唯一想动的那批。
+      // 实测改成纯时间倒序后：新选题回到第 1 位，已确认稿之间仍是新的在前。
+      const sortTopics = (list) => [...list].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
       const tabTopics = sortTopics(topics.filter((topic) => tabOf(topic) === activeTab));
       const archivedTopics = sortTopics(topics.filter((topic) => tabOf(topic) === ARCHIVED_TAB));
       const tabName = activeTab === GENERAL_TAB ? '通用（无账号定位）' : (activeAccounts.find((item) => item.id === activeTab)?.name || '—');
@@ -3225,15 +3485,37 @@ window.__ModuleLoader__.load({
         h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-primary-button', disabled: busy || projectIsRunning(form.targetId) || !form.targetId, onClick: generateNew }, projectIsRunning(form.targetId) ? '该项目已有任务…' : '写稿')),
       );
 
-      const activeHistoryTasks = history.filter((item) => item.status === 'queued' || item.status === 'running');
+      const historyMatchesAccount = (item) => historyAccount === 'all' || scriptTaskTab(item, activeIds) === historyAccount;
+      const activeHistoryTasks = sortScriptTasks(history.filter((item) => historyMatchesAccount(item) && (item.status === 'queued' || item.status === 'running')), historySort);
       const terminalHistoryTasks = history.filter((item) => item.status !== 'queued' && item.status !== 'running');
-      const filteredHistoryTasks = terminalHistoryTasks.filter((item) => historyFilter === 'all' || item.status === historyFilter);
+      const filteredHistoryTasks = sortScriptTasks(terminalHistoryTasks.filter((item) => historyMatchesAccount(item) && (historyFilter === 'all' || item.status === historyFilter)), historySort);
       const historyPages = Math.max(1, Math.ceil(filteredHistoryTasks.length / 6));
       const pagedHistoryTasks = filteredHistoryTasks.slice(historyPage * 6, historyPage * 6 + 6);
+      const historyAccountOptions = [...activeAccounts.map((account) => ({ id: account.id, label: account.name })), { id: GENERAL_TAB, label: '通用（无账号定位）' }];
+      // 账号被归档后任务不会消失，所以下拉里必须保留「已归档账号」一档，
+      // 否则这些任务在按账号筛选时无处可去（只有「全部账号」能看到）。
+      const hasArchivedTasks = history.some((item) => scriptTaskTab(item, activeIds) === ARCHIVED_TAB);
+      if (hasArchivedTasks) historyAccountOptions.push({ id: ARCHIVED_TAB, label: '已归档账号' });
       const taskPanel = h('section', { className: 'sv-section' },
         h('div', { className: 'sv-section-head' }, h('h3', null, '写稿任务 · 全部账号'), h('span', null, `${history.filter((item) => item.status === 'running').length} 个运行中 · ${history.filter((item) => item.status === 'queued').length} 个排队中`)),
         activeHistoryTasks.length ? h('div', { className: 'sv-list' }, activeHistoryTasks.map(taskCard)) : null,
         terminalHistoryTasks.length ? h(React.Fragment, null,
+          h('div', { className: 'sv-tp-history-tools' },
+            h('label', { className: 'sv-tp-history-field' },
+              h('span', null, '账号定位'),
+              h('select', { className: 'sv-select', value: historyAccount, 'aria-label': '按账号定位筛选写稿任务', onChange: (event) => setHistoryAccount(event.target.value) },
+                h('option', { value: 'all' }, '全部账号'),
+                historyAccountOptions.map((item) => h('option', { key: item.id, value: item.id }, item.label)),
+              ),
+            ),
+            h('label', { className: 'sv-tp-history-field' },
+              h('span', null, '时间排序'),
+              h('select', { className: 'sv-select', value: historySort, 'aria-label': '按时间排序写稿任务', onChange: (event) => setHistorySort(event.target.value) },
+                h('option', { value: 'newest' }, '最新在前'),
+                h('option', { value: 'oldest' }, '最早在前'),
+              ),
+            ),
+          ),
           h('div', { className: 'sv-filter-chips' }, [{ id: 'all', label: '全部' }, { id: 'completed', label: '已完成' }, { id: 'failed', label: '失败' }].map((item) => h('button', { key: item.id, type: 'button', className: 'sv-filter-chip', 'data-on': historyFilter === item.id ? 'true' : 'false', onClick: () => setHistoryFilter(item.id) }, item.label))),
           h('div', { className: 'sv-list' }, pagedHistoryTasks.map(taskCard)),
           h('div', { className: 'sv-audio-pagebar' }, h('span', { className: 'sv-meta' }, `第 ${historyPage + 1}/${historyPages} 页 · 共 ${filteredHistoryTasks.length} 条`), h('span', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', 'aria-label': '上一页', disabled: historyPage === 0, onClick: () => setHistoryPage((current) => Math.max(0, current - 1)) }, '上一页'), h('button', { type: 'button', className: 'lwb-plain-button', 'aria-label': '下一页', disabled: historyPage + 1 >= historyPages, onClick: () => setHistoryPage((current) => current + 1) }, '下一页'))),
@@ -3499,6 +3781,24 @@ window.__ModuleLoader__.load({
     const AS_TIERS = [{ id: 'short', label: '短（300-999 字）' }, { id: 'medium', label: '中（1000-2499 字）' }, { id: 'long', label: '长（2500 字以上）' }];
     // 桥接（小米 MiMo 云端）的内置音色表；与桥接 /api/v1/tts/voiceover-info 的 builtin_voices 同源。
     const SV_MIMO_BUILTIN_VOICES = ['冰糖', '茉莉', '苏打', '白桦', 'mimo_default'];
+    /**
+     * 内置音色的性格说明。
+     *
+     * 「小米音色」以前是一个自由输入框，光填「茉莉」两个字没法判断该怎么搭
+     * 语气，写稿时只能一个个试。这一栏把它变成下拉并附一句说明，选之前就知道
+     * 这个声音大致是什么调子。
+     *
+     * 只覆盖实测存在的五个（桥接 builtin_voices）；不在表里的音色（比如桥接
+     * 以后加了新的）照样进下拉，只是没有说明——不能因为说明表没更新就把新音色
+     * 挡在门外。
+     */
+    const SV_MIMO_VOICE_HINTS = {
+      '冰糖': '偏甜的年轻女声，适合生活方式、好物与轻松话题',
+      '茉莉': '中性偏稳的女声，知识讲解与资讯播报都比较稳',
+      '苏打': '清亮活泼，适合快节奏口播与开场引入',
+      '白桦': '沉稳男声，适合观点表达、深度解读与结论段',
+      'mimo_default': '平台默认音色；不确定选哪个时用它',
+    };
     // 常用且专业的语气提示词。桥接把它作为 user 角色指令传给小米 TTS 控制语气/节奏，
     // 不进合成文本，所以可以放心写风格描述；也允许在输入框里自己改。
     const SV_VOICE_STYLE_PRESETS = [
@@ -3511,10 +3811,27 @@ window.__ModuleLoader__.load({
       '娓娓道来，适合故事讲述。',
       '热情推荐，适合好物种草。',
     ];
-    // interrupted/blocked 是断点续跑与开工前体检引入的终态，界面上必须能认出来：
-    // interrupted 的下一步是「等它自动续跑」，blocked 的下一步是「去改配置」。
+    // interrupted/blocked 是断点续跑、开工前体检与依赖自愈引入的终态，界面上必须能认出来。
+    // interrupted 的下一步是「等它自动续跑」，blocked 有两种含义：
+    //   · blockedBy 有值 → 外部依赖不可用，正在等它恢复并自动续跑（不是失败）
+    //   · blockedBy 为空 → 开工前体检没通过，没开跑（下一步是改配置）
+    // 这两种混成同一个词会让「等得起」看起来像「完了」，所以按 blockedBy 分开显示。
     const IMAGE_PROVIDER_SHORT = { bailian: '百炼', scitiger: 'SciTiger', custom: '自定义' };
     const AS_RUN_STATUS = { running: '执行中', completed: '已完成', partial: '部分完成', failed: '失败', missed: '已错过', cancelled: '已停止', interrupted: '已中断·待续跑', blocked: '体检未过·未启动' };
+    const AS_RUN_STATUS_WAITING = '等待服务恢复·将自动续跑';
+    /** blocked 有两种语义，靠 blockedBy 区分：等待依赖 vs 体检拦截。 */
+    function runStatusLabel(run) {
+      if (run?.status === 'blocked' && run?.blockedBy) return AS_RUN_STATUS_WAITING;
+      return AS_RUN_STATUS[run?.status] || run?.status || '';
+    }
+    /** 等待依赖的挂起不是红色失败——它会自己好，标红只会让人误以为要手工处理。 */
+    function runStatusTone(run) {
+      if (run?.status === 'blocked' && run?.blockedBy) return 'orange';
+      if (['failed', 'cancelled', 'blocked'].includes(run?.status)) return 'red';
+      if (['partial', 'interrupted'].includes(run?.status)) return 'orange';
+      if (run?.status === 'missed') return undefined;
+      return run?.status === 'running' ? undefined : 'green';
+    }
     const AS_ITEM_STATUS = { running: '进行中', completed: '已完成', failed: '失败', cancelled: '已停止' };
     const AS_STAGE_TONE = { done: 'sv-stage', failed: 'sv-status-error', running: '', skipped: 'sv-status-disabled' };
     function emptyScheduleForm() {
@@ -3600,7 +3917,7 @@ window.__ModuleLoader__.load({
             catch (cause) { setError(cause.message); } finally { setBusy(false); }
           } }) }, busy ? '正在停止…' : '停止本轮') : null,
           // 运行中的轮次不给删——先停止再删。执行的产物项目不受影响，只清这条审计记录。
-          detail.active ? null : h('button', { type: 'button', className: 'lwb-danger-button', disabled: busy, onClick: () => ask({ title: '删除这条执行记录？', copy: `将从运行记录里移除这次执行（${run ? `${relativeTime(run.triggeredAt)}触发，状态「${AS_RUN_STATUS[run.status] || run.status}」` : ''}）。只删这一条记录，不影响内容安排本身，也不删除它产出的项目。删除后无法恢复。`, confirm: '确认删除', danger: true, onConfirm: async () => {
+          detail.active ? null : h('button', { type: 'button', className: 'lwb-danger-button', disabled: busy, onClick: () => ask({ title: '删除这条执行记录？', copy: `将从运行记录里移除这次执行（${run ? `${relativeTime(run.triggeredAt)}触发，状态「${runStatusLabel(run)}」` : ''}）。只删这一条记录，不影响内容安排本身，也不删除它产出的项目。删除后无法恢复。`, confirm: '确认删除', danger: true, onConfirm: async () => {
             setBusy(true);
             try { await remote(packId, 'deleteScheduleRun', { runId }); setRefresh((value) => value + 1); onChanged(); }
             catch (cause) { setError(cause.message); } finally { setBusy(false); }
@@ -3651,7 +3968,7 @@ window.__ModuleLoader__.load({
               h('span', null, `${run.trigger === 'manual' ? '手动执行' : '定时触发'} · ${run.depthLabel || '—'} · 完成 ${run.completedCount}/${run.itemCount} 条${run.elapsedMs != null ? ` · 耗时 ${Math.max(1, Math.round(run.elapsedMs / 60000))} 分钟` : ''}`),
               h('small', null, expanded === run.id ? '收起本轮详情 ↑' : '展开本轮详情 ↓'),
             ),
-            h('span', { className: 'sv-ex-state', 'data-status': run.status }, AS_RUN_STATUS[run.status] || run.status),
+            h('span', { className: 'sv-ex-state', 'data-status': run.status }, runStatusLabel(run)),
           ),
           run.message ? h('p', { className: 'sv-as-round-message' }, run.message) : null,
           run.items.length ? h('div', { className: 'sv-as-round-items' }, run.items.map((item, index) => h('div', { key: item.projectId || index, className: 'sv-as-result' },
@@ -4386,7 +4703,7 @@ window.__ModuleLoader__.load({
           schedule.disabledReason ? h('p', { className: 'sv-as-disabled' }, schedule.disabledReason) : null,
           blocked.length ? h('p', { className: 'sv-as-disabled' }, blocked[0].message) : null,
           running ? h('p', { className: 'sv-as-task-note' }, `正在执行「${AS_STEPS[running.step] || running.step || '—'}」· ${relativeTime(running.triggeredAt)}触发`)
-            : latest ? h('p', { className: 'sv-as-task-note' }, `最近 ${relativeTime(latest.triggeredAt)} · ${AS_RUN_STATUS[latest.status] || latest.status}${latest.itemCount ? ` · ${latest.itemCount} 条` : ''}${latest.message ? ` · ${latest.message}` : ''}`)
+            : latest ? h('p', { className: 'sv-as-task-note' }, `最近 ${relativeTime(latest.triggeredAt)} · ${runStatusLabel(latest)}${latest.itemCount ? ` · ${latest.itemCount} 条` : ''}${latest.message ? ` · ${latest.message}` : ''}`)
               : h('p', { className: 'sv-as-task-note' }, schedule.enabled ? `下次执行：${schedule.nextRunAt ? formatTime(schedule.nextRunAt) : '—'}` : '任务已停用，不会自动执行。'),
           h('div', { className: 'sv-tp-task-acts' },
             h('button', { type: 'button', className: 'lwb-plain-button', title: '查看该任务的全部执行记录', onClick: () => setHistorySchedule(schedule) }, '运行记录'),
@@ -4411,7 +4728,7 @@ window.__ModuleLoader__.load({
         { label: '启用中任务', value: String(enabledSchedules.length), tone: 'brand' },
         { label: '下次执行', value: nextRun ? formatTime(nextRun) : '—', tone: nextRun ? 'green' : undefined },
         { label: '最近产出', value: lastRun ? `${lastRun.itemCount || 0} 条` : '—', tone: lastRun?.itemCount ? 'brand' : undefined },
-        { label: '最近结果', value: lastRun ? AS_RUN_STATUS[lastRun.status] || lastRun.status : '—', tone: lastRun ? (['failed', 'cancelled', 'blocked'].includes(lastRun.status) ? 'red' : ['partial', 'interrupted'].includes(lastRun.status) ? 'orange' : lastRun.status === 'missed' ? undefined : 'green') : undefined },
+        { label: '最近结果', value: lastRun ? runStatusLabel(lastRun) : '—', tone: lastRun ? runStatusTone(lastRun) : undefined },
       ] });
 
       const signalsDrawerNode = signalDrawer && h(React.Fragment, null,
@@ -4785,6 +5102,11 @@ window.__ModuleLoader__.load({
     }
     function LegacyAudioCaptionsPageV2({ packId, openConversation }) {
       const { projects, refresh, error, setError } = useProjects(packId);
+      // 写稿页只列「已确认稿件」的项目。刚在选题页生成的选题还没走完写稿那一步
+      // （stage=topic、scriptApproval 为空），不进这个列表是设计如此：写稿页的
+      // 职责就是处理已确认的稿子，待写稿在选题页就地写。详见「字节没发世界模型」
+      // 那次的排查结论 —— 试过改成列出所有 stage>=topic 的项目，结果 80 条里
+      // 42 条是早就跑完全流程的老项目，新选题反而排到第 39 位，比原样更糟。
       const candidates = projects.filter((project) => project.completedStages.includes('script') && project.scriptApproval?.current);
       const [selectedId, setSelectedId] = useSelectedProject(projects, (project) => project.completedStages.includes('script') && project.scriptApproval?.current);
       const { detail, error: detailError, reload } = useDetail(packId, selectedId);
@@ -5429,7 +5751,7 @@ window.__ModuleLoader__.load({
       const sourceDrawerNode = sourceDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭稿件内容', onClick: () => setSourceDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '稿件内容' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, sourceDrawer.source?.title || '稿件内容'), h('p', { className: 'sv-meta' }, sourceDrawer.source?.kind === 'manual-text' ? '手动输入文稿快照' : '任务创建时冻结的稿件快照')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSourceDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll' }, h('article', { className: 'sv-sc-manuscript' }, sourceDrawer.source?.text || ''))));
       const subtitleDrawerNode = subtitleDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭字幕内容', onClick: () => setSubtitleDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '编辑字幕' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, `字幕 · ${subtitleDrawer.task.source?.title || '手动文稿'}`), h('p', { className: 'sv-meta' }, `${subtitleDrawer.cues.length} 条字幕，可直接校对错别字并保存。`)), h('button', { type: 'button', className: 'lwb-plain-button', disabled: subtitleDrawer.saving, onClick: () => setSubtitleDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll sv-audio-subtitle-editor' }, h('div', { className: 'sv-subtitle-cues' }, subtitleDrawer.cues.map((cue, index) => h('article', { key: cue.id, className: 'sv-subtitle-cue' }, h('time', null, cue.time), h('textarea', { className: 'sv-textarea sv-subtitle-text', value: cue.text, maxLength: 30000, 'aria-label': `第 ${index + 1} 条字幕文本`, onChange: (event) => setSubtitleDrawer((current) => ({ ...current, cues: current.cues.map((currentCue, currentIndex) => currentIndex === index ? { ...currentCue, text: event.target.value } : currentCue) })) }))))), h('div', { className: 'sv-media-drawer-foot' }, h('span', { className: 'sv-meta' }, '时间码来自音频对齐结果，保存将更新字幕文本。'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: subtitleDrawer.saving || !subtitleDrawer.cues.length || subtitleDrawer.cues.some((cue) => !cue.text.trim()), onClick: () => ask({ title: '保存字幕', copy: `将保存这 ${subtitleDrawer.cues.length} 条字幕的文本修改，时间码保持不变。`, confirm: '确认保存', onConfirm: () => { void saveSubtitles(); } }) }, subtitleDrawer.saving ? '正在保存…' : '保存字幕'))));
       const accountTabs = h(AccountTabs, { accountLibrary, activeTab, onChange: setActiveTab, label: '按账号查看配音任务' });
-      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, h(LocalEnginePanel, { packId }), h(BridgeConfigPanel), h(VoiceLibraryPanel), accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
+      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, h('div', { className: 'sv-setup-grid' }, h(LocalEnginePanel, { packId }), h(BridgeConfigPanel), h(VoiceLibraryPanel)), accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
     }
     /**
      * 视频制作任务的实时进度：步骤条 + 当前阶段用时 + 总耗时 + 阶段明细。
