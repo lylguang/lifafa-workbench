@@ -32,6 +32,20 @@ export const ANCHOR_DEVIATION_MAX = 4.5
 // 没有锚点可用时，只有怀疑程度更重才采用纯 VAD 修正（占比模型本身有 ~3s 误差）。
 export const ADOPT_WITHOUT_ANCHORS_MEAN = 2.0
 export const MIN_ANCHORS = 4
+/**
+ * 便宜检查判 healthy、但 suspicion 落进这个带时，仍要升级到锚点做地面真值校验。
+ *
+ * 为什么需要它：占比模型的局部语速误差约 ±3s，SUSPICION_MEAN=1.2 在误差带以内，
+ * 真实漂移 2~3s 的片子会被它盖住判成 healthy（2026-10-11 实测漏判，0.92 放行）。
+ * 锚点是 ASR 实测，不受该误差影响——只要拿得到，就值得花一次抽窗 ASR 去验。
+ * 阈值取 0.75（误差带下沿的 1/4）：实测漏判案例的 0.92 在带内；绝大多数真健康
+ * 的片子 suspicion 在 0.3 以下，不会为此多烧 ASR。max 阈值兜单点大漂移被 mean
+ * 稀释的情况。
+ */
+export const ANCHOR_ESCALATION_MEAN = 0.75
+export const ANCHOR_ESCALATION_MAX = 2.0
+/** 锚定扫描的回看条数：字幕超前语音的实测错位约 4~6s（≈2~3 条 cue/句长 2.8s 取大），留 4 倍余量。 */
+export const ANCHOR_LOOKBACK_CUES = 24
 const ASR_WINDOW_SECONDS = 12
 const ASR_TIMEOUT_MS = 240_000
 
@@ -352,15 +366,19 @@ export function assessAndCorrect({ cues, intervals, audioDuration, anchors = new
   const estimateSnapped = snapStarts(estimate, intervals, { audioDuration })
   const original = cues.map((c) => c.start)
   const suspicion = driftStats(original, estimateSnapped)
-  if (!isSuspicious(suspicion)) {
-    return { srt: serializeSrt(cues), applied: false, guard: { verdict: 'healthy', applied: false, method: 'none', suspicion, anchorSource: 'skipped', reason: '字幕时间轴与语音分布一致，未启用修正。', cueCount: cues.length } }
-  }
   const aligned = (corrected, extra) => {
     // 末条 cue 的结束同样必须不早于开始：语音封顶值可能小于吸附后的开始。
     const lastSpeechEnd = intervals.length ? intervals.at(-1)[1] : audioDuration
     const aligned = cues.map((c, i) => ({ ...c, start: corrected[i], end: i < cues.length - 1 ? Math.max(corrected[i] + 0.45, corrected[i + 1] - 0.06) : Math.max(corrected[i] + 0.45, Math.min(audioDuration, lastSpeechEnd + 0.5)) }))
     return { srt: serializeSrt(aligned), applied: true, guard: extra }
   }
+  // 锚点分支必须在便宜检查**之前**。
+  //
+  // 原顺序是先查 suspicion、不疑就提前返回 healthy——锚点数据被整个无视。2026-10-11
+  // 真机实测抓到这个顺序 bug：某条 3 分钟视频 suspicion.mean=0.92（< 阈值 1.2），
+  // 升级带触发、本地 ASR 真跑出了十几个锚点，但走到这里又被便宜检查拦下提前返回，
+  // anchorCount 恒为 0，修正永远不发生。锚点是 ASR 实测（地面真值），占比估计只是
+  // 怀疑度；两者冲突时必须听锚点的。
   if (anchors.size >= MIN_ANCHORS) {
     const deviation = anchorDeviationStats(original, anchors)
     if (deviation.mean > ANCHOR_DEVIATION_MEAN || deviation.max > ANCHOR_DEVIATION_MAX) {
@@ -369,6 +387,9 @@ export function assessAndCorrect({ cues, intervals, audioDuration, anchors = new
       return aligned(corrected, { verdict: 'corrected', applied: true, method: 'vad+asr-anchors', suspicion, anchorDeviation: deviation, adoptedDrift, anchorCount: anchors.size, cueCount: cues.length, reason: `字幕时间轴与锚点实测平均偏差 ${deviation.mean.toFixed(2)}s（最大 ${deviation.max.toFixed(2)}s），已按音频重对齐。` })
     }
     return { srt: serializeSrt(cues), applied: false, guard: { verdict: 'healthy', applied: false, method: 'vad+asr-anchors', suspicion, anchorDeviation: deviation, anchorCount: anchors.size, cueCount: cues.length, reason: `锚点实测确认时间轴与语音一致（平均偏差 ${deviation.mean.toFixed(2)}s），保持原样。` } }
+  }
+  if (!isSuspicious(suspicion)) {
+    return { srt: serializeSrt(cues), applied: false, guard: { verdict: 'healthy', applied: false, method: 'none', suspicion, anchorSource: 'skipped', reason: '字幕时间轴与语音分布一致，未启用修正。', cueCount: cues.length } }
   }
   if (suspicion.mean > ADOPT_WITHOUT_ANCHORS_MEAN) {
     const adoptedDrift = driftStats(original, estimateSnapped)
@@ -387,7 +408,27 @@ export async function guardSubtitleTimeline({ audioPath, srt, language = 'zh', f
     if (!intervals.length) return { srt, applied: false, guard: { verdict: 'not-assessed', applied: false, method: 'none', reason: '音频里没有检测到语音活动，跳过对齐校验。', cueCount: cues.length } }
     // 有疑点才升级到本地 ASR 抽窗锚定；healthy/无锚点的决策都在 assessAndCorrect 里。
     const quick = assessAndCorrect({ cues, intervals, audioDuration })
-    if (quick.guard.verdict === 'healthy' || quick.guard.verdict === 'not-assessed') return { srt, applied: false, guard: quick.guard }
+    //
+    // 但「便宜检查说健康」不等于「时间轴真的健康」——占比模型自带 ±3s 的局部语速
+    // 误差，而 SUSPICION_MEAN 只有 1.2，真实漂移 2~3s 时误差恰好把它盖住。
+    // 2026-10-11 实测漏判：一条 3 分钟视频 suspicion.mean=0.92 判 healthy 放行，
+    // 用户报「声音和字幕不同步」；事后 VAD 实测每条字幕比语音早约 2.4s 翻页。
+    //
+    // 所以便宜检查 healthy 但 suspicion 落进误差带时，若本地 ASR 可用，仍要用锚点
+    // 做一次地面真值校验：锚点是实测，误判风险在 ASR 转写而不在估计模型。最坏代价
+    // 是健康视频多跑一次抽窗 ASR；比把错的时间轴烧进成片便宜得多。
+    // 锚点不可用则维持原判（不做没把握的修正），并把未验证的事实写进 guard 记录。
+    const suspicionMean = quick.guard.suspicion?.mean ?? 0
+    const suspicionMax = quick.guard.suspicion?.max ?? 0
+    const worthGroundTruth = quick.guard.verdict === 'healthy' && (
+      suspicionMean >= ANCHOR_ESCALATION_MEAN || suspicionMax >= ANCHOR_ESCALATION_MAX
+    )
+    if (quick.guard.verdict === 'healthy' && !worthGroundTruth) return { srt, applied: false, guard: quick.guard }
+    if (quick.guard.verdict === 'not-assessed') return { srt, applied: false, guard: quick.guard }
+    if (quick.guard.verdict === 'healthy') {
+      // 升级带内的健康：后面锚点流程跑完后，verdict 由锚点实测决定。
+      // 这里不打断，落到下方共用路径。
+    }
     const anchors = new Map()
     let anchorSource = 'unavailable'
     if (asrBaseUrl && await probeAvailable(asrBaseUrl, fetchImpl)) {
@@ -410,7 +451,13 @@ export async function guardSubtitleTimeline({ audioPath, srt, language = 'zh', f
             // minCueIndex 只用于「同一窗内避免把一条 cue 锚到更早的重复句」，不能跨窗单调递增：
             // 每个窗本来就对准它自己那一段 cue（planAnchorWindows 按 cueIndex 均匀取样），
             // 全局单调会让靠后的窗找不到任何可锚定的 cue，尾部于是永远不被验证。
-            const windowStart = Math.max(1, window.cueIndex - 8)
+            //
+            // 回看窗口 8 → 24（2026-10-11）：字幕时间轴本身可能系统性超前语音 4~6s
+            // （实测案例：ASR 全文与 SRT 文本一致但顺序位置差 6s），按 SRT 位置选出的
+            // cueIndex 会让窗内真实语音落在**计划位置之前好几条**——回看 8 条时，
+            // 窗内能命中的 cue 全部被 minCueIndex 挡住，锚点数恒为 0，升级带了也白升。
+            // 24 条 ≈ 60s 口播，覆盖实测错位并留余量；防重复句的本意不变。
+            const windowStart = Math.max(1, window.cueIndex - ANCHOR_LOOKBACK_CUES)
             const found = anchorFromTranscript({ transcript, cues, window, intervals, minCueIndex: windowStart })
             if (found) for (const [idx, time] of found) if (!anchors.has(idx)) anchors.set(idx, time)
           } catch (error) {
@@ -422,7 +469,15 @@ export async function guardSubtitleTimeline({ audioPath, srt, language = 'zh', f
       }
     }
     const result = assessAndCorrect({ cues, intervals, audioDuration, anchors })
-    if (anchors.size) result.guard.anchorSource = anchorSource
+    if (anchors.size) {
+      result.guard.anchorSource = anchorSource
+    } else if (quick.guard.verdict === 'healthy') {
+      // 升级带内的健康、但锚点没拿到（本地 ASR 不可用）：时间轴其实**未经地面真值
+      // 验证**。不改 verdict（没把握的事不做），但必须把这一事实写出来——否则记录
+      // 里看起来和「便宜检查确认为健康」一模一样，事后排查分不清哪条真的验过。
+      result.guard.anchorSource = 'unavailable'
+      result.guard.reason = `${result.guard.reason}（注意：suspicion.mean=${suspicionMean.toFixed(2)} 落在估计模型的误差带内，本地 ASR 不可用，本次未经锚点验证。）`
+    }
     return result
   }
   try {

@@ -4,6 +4,7 @@ import {
   anchorFromTranscript,
   applyAnchorCorrections,
   assessAndCorrect,
+
   cjkSignature,
   driftStats,
   estimateStarts,
@@ -14,7 +15,7 @@ import {
   snapStarts,
   speechIntervalsFromPcm,
 } from '../spoken-video-subtitle-align.mjs'
-import { validateSrt } from '../spoken-video-subtitles.mjs'
+import { splitLongCues, validateSrt } from '../spoken-video-subtitles.mjs'
 
 // ---------- SRT 解析/序列化 ----------
 
@@ -176,11 +177,16 @@ const TRUTH = (() => {
 const cuesFrom = (starts) => starts.map((s, i) => ({ start: s, end: s + 3, text: TEXTS[i] }))
 const ANCHORS_TRUE = new Map(TRUTH.map((t, i) => [i + 1, t + (i % 2 ? 0.2 : -0.2)])) // 锚点带 ±0.2s 噪声
 
-test('决策：健康时间轴 → 便宜检查直接放行（不消耗锚点）', () => {
+test('决策：锚点在手时以锚点为准——健康时间轴被锚点实测确认（不再被便宜检查抢跑）', () => {
+  // 2026-10-11 顺序修正：原实现先查 suspicion（占比估计），不疑就提前返回 healthy
+  // 且 anchorSource='skipped'——真跑出来的锚点被整个无视。实测某条 3 分钟视频
+  // suspicion.mean=0.92、锚点真跑出十几个，却照样提前返回，修正永远不发生。
+  // 现在锚点分支优先：锚点确认健康时 verdict 仍是 healthy，但带实测背书。
   const r = assessAndCorrect({ cues: cuesFrom(TRUTH), intervals: INTERVALS, audioDuration: 60, anchors: ANCHORS_TRUE })
   assert.equal(r.applied, false)
   assert.equal(r.guard.verdict, 'healthy')
-  assert.equal(r.guard.anchorSource, 'skipped')
+  assert.equal(r.guard.method, 'vad+asr-anchors', '健康裁决要注明是锚点实测确认的')
+  assert.equal(r.guard.anchorCount, ANCHORS_TRUE.size)
 })
 
 test('决策：轻度漂移 + 锚点核实一致 → 锚点路径放行', () => {
@@ -271,4 +277,155 @@ test('守卫修正后的 SRT 不允许任何一条结束早于开始（末条锚
   assert.equal(checked.errors.length, 0, checked.errors.join(' '))
   const cues = parseSrt(r.srt)
   for (const cue of cues) assert.ok(cue.end > cue.start, `第 ${cue.index} 条结束 ${cue.end} 未晚于开始 ${cue.start}`)
+})
+
+
+// ---------- 升级带：便宜检查 healthy 但 suspicion 落在估计模型误差带内（2026-10-11 漏判回归） ----------
+
+/**
+ * 构造「便宜检查 healthy 但 suspicion 落升级带」的音频。
+ *
+ * 真实漏判案例：3 分钟视频 suspicion.mean=0.92（< SUSPICION_MEAN 1.2）判 healthy
+ * 放行，用户报「声音和字幕不同步」。这里用同形状的合成音频：cue 起点带轻微扰动，
+ * 让 suspicion.mean 落进 [ANCHOR_ESCALATION_MEAN, SUSPICION_MEAN)。
+ */
+const NEAR_MISS_AUDIO = () => {
+  // 10 句，每句语音 3.2s、间隔 0.3s；cue 起点在真实语音内带 0.5~0.9s 的扰动。
+  const pcmParts = []
+  const truth = []
+  const starts = []
+  let t = 0
+  for (let i = 0; i < 10; i += 1) {
+    truth.push(t)
+    pcmParts.push(tone(3.2), silence(0.3))
+    t += 3.5
+  }
+  // 扰动方向与幅度：整体让 cue 比语音略提前，均值落在升级带（0.75~1.2）。
+  for (let i = 0; i < 10; i += 1) starts.push(truth[i] - 1.2)
+  return { pcm: concat(pcmParts), starts, truth }
+}
+
+
+// ---------- 升级带：便宜检查 healthy 但 suspicion 落在估计模型误差带内（2026-10-11 漏判回归） ----------
+
+/**
+ * 复刻真实漏判的形状：cue 相对真实语音整体提前约 1.2s。
+ * 真实案例是 3 分钟视频、suspicion.mean=0.92（< SUSPICION_MEAN 1.2）判 healthy
+ * 放行，用户报「声音和字幕不同步」。这里用 10 句合成音频让 suspicion 落进
+ * [ANCHOR_ESCALATION_MEAN, SUSPICION_MEAN)，验证升级到锚点校验的行为。
+ *
+ * transcribe mock 的返回按「窗覆盖的 cue 文本顺序拼接」，锚点位置计算因此落在
+ * 真值语音上 —— 相当于本地 ASR 给出了地面真值。
+ */
+const NEAR_MISS = () => {
+  const parts = []
+  const truth = []
+  let t = 0
+  for (let i = 0; i < 10; i += 1) { truth.push(t); parts.push(tone(3.2), silence(0.3)); t += 3.5 }
+  const starts = truth.map((x) => x - 1.2)
+  const cues = starts.map((s, i) => ({ start: s, end: s + 3, text: TEXTS[i] }))
+  return { pcm: concat(parts), cues, truth }
+}
+
+test('升级带：healthy 但 suspicion 落误差带时必须做锚点校验，而不是直接放行', async () => {
+  const { pcm, cues } = NEAR_MISS()
+  let probed = 0
+  const result = await guardSubtitleTimeline({
+    audioPath: 'fixture.wav',
+    srt: serializeSrt(cues),
+    asrBaseUrl: 'stub://',
+    decodePcm: async () => pcm,
+    probeAvailable: async () => { probed += 1; return true },
+    cutWindow: async (_path, from) => Buffer.from(`window@${from}`),
+    transcribe: async ({ wav }) => {
+      const from = Number(/window@([\d.]+)/.exec(String(wav))?.[1] || 0)
+      // 返回窗覆盖的 cue 文本（起点落在 [from-1, from+窗长] 的句子），供锚点匹配。
+      // 真实 transcribeWavViaComfyUI 返回字符串（取 ComfyUI 输出里最长的一条），不是对象。
+      return cues.filter((c) => c.start >= from - 1.5 && c.start < from + 13).map((c) => c.text).join('')
+    },
+  })
+  assert.equal(probed, 1, '升级带内的健康必须验一次锚点，不能直接放行')
+  assert.equal(result.guard.verdict, 'healthy', '1.2s 漂移在锚点噪声（±1s）边缘，锚点确认后不定罪')
+  assert.equal(result.guard.anchorSource, 'comfyui', '健康裁决必须带锚点背书，不再是无验证的 skipped')
+})
+
+test('升级带：本地 ASR 不可用时维持原判，但记录必须注明未经锚点验证', async () => {
+  const { pcm, cues } = NEAR_MISS()
+  let probed = 0
+  const result = await guardSubtitleTimeline({
+    audioPath: 'fixture.wav',
+    srt: serializeSrt(cues),
+    asrBaseUrl: 'stub://',
+    decodePcm: async () => pcm,
+    probeAvailable: async () => { probed += 1; return false },
+  })
+  assert.equal(probed, 1, '升级带内要尝试探测 ASR 可用性')
+  assert.equal(result.guard.verdict, 'healthy', '锚点拿不到时不做没把握的修正')
+  assert.equal(result.guard.anchorSource, 'unavailable', '必须标注这次健康是没有验证过的')
+  assert.match(result.guard.reason, /未经锚点验证/u, 'reason 里要写明 suspicion 落在误差带且未验证')
+})
+
+test('真正的健康（suspicion 远低于误差带）仍然跳过 ASR，不为它多烧一次抽窗', async () => {
+  // TRUTH 与占比估计零偏差，suspicion≈0，不应升级。
+  let probed = 0
+  const result = await guardSubtitleTimeline({
+    audioPath: 'fixture.wav',
+    srt: serializeSrt(cuesFrom(TRUTH)),
+    asrBaseUrl: 'stub://',
+    decodePcm: async () => concat([tone(12), silence(2), tone(16), silence(2), tone(26)]),
+    probeAvailable: async () => { probed += 1; return true },
+  })
+  assert.equal(result.guard.verdict, 'healthy')
+  assert.equal(probed, 0, 'suspicion 在误差带之下的健康不消耗 ASR')
+})
+
+test('an over-long cue is split at punctuation so the technical QC cannot block the run', () => {
+  // 2026-10-13 真机事故：晚报自动任务连挂两次，报「成片未通过技术质检：1 条字幕
+  // 超过 56 字的双行可读上限」，白跑 27 分钟。真因是拆分阈值（42，只在段时序
+  // 快路径里）与质检阈值（56）**对不上**：这次字幕来自 ASR，压根不做拆分。
+  //
+  // 这条用例用事故里的原句，确保 63 字被拆到 56 以内，且切在标点上。
+  const long = '最高 192GB 的 LPDDR5X-8533 内存，其中 160GB 可以分配成共享显存，AMD 说这让本地跑超 300B 的大模型成为可能。'
+  const srt = ['1', '00:00:10,000 --> 00:00:18,000', long].join('\n')
+  const result = splitLongCues(srt, { orientation: 'landscape' })
+  assert.equal(result.split, 1, '超长 cue 必须被拆开')
+  assert.ok(result.cues.length >= 2)
+  for (const cue of result.cues) {
+    assert.ok((cue.text.match(/[^\s]/gu) || []).length <= 56, `拆分后仍有超限：${cue.text}`)
+  }
+  // 拆分后必须仍是合法 SRT，否则下游烧录/分节会二次失败。
+  assert.deepEqual(validateSrt(result.srt).errors, [], '拆分结果要能过 validateSrt')
+  // 时间轴必须首尾相接、不越界：不能为了拆而拉长或重叠。
+  assert.equal(result.cues[0].startMs, 10000, '起点不变')
+  assert.equal(result.cues.at(-1).endMs, 18000, '终点不变')
+  for (let i = 1; i < result.cues.length; i += 1) {
+    assert.ok(result.cues[i].startMs >= result.cues[i - 1].endMs, '相邻 cue 不能重叠')
+  }
+})
+
+test('splitting leaves a normal cue untouched and respects the portrait limit', () => {
+  // 注意：SRT 的块之间**必须空行分隔**，否则 parseSrt 会把整份当成一条 cue ——
+  // 这条用例第一版就是漏了空行，导致「正常 cue」被算成 50 字而误报（测试自己错了，
+  // 代码是对的）。用 makeSrt 拼装，避免再犯。
+  const makeSrt = (rows) => rows
+    .map((row, index) => `${index + 1}\n${row.time}\n${row.text}`)
+    .join('\n\n')
+    .concat('\n')
+  const normal = '这是一条正常长度的字幕。'
+  const mid = '竖屏的上限只有 44 字，比横屏严格不少，所以这条在竖屏下必须被拆开，横屏下则原样保留不用动。'
+  const srt = makeSrt([
+    { time: '00:00:00,000 --> 00:00:02,000', text: normal },
+    { time: '00:00:02,000 --> 00:00:10,000', text: mid },
+  ])
+  assert.ok((mid.match(/[^\s]/gu) || []).length > 44, '用例本身要超竖屏上限才有意义')
+  assert.ok((mid.match(/[^\s]/gu) || []).length <= 56, '但不该超横屏上限')
+
+  assert.equal(splitLongCues(srt, { orientation: 'landscape' }).split, 0, '横屏 56 字以内不该拆')
+  const portrait = splitLongCues(srt, { orientation: 'portrait' })
+  assert.ok(portrait.split >= 1, '竖屏 44 字上限下必须拆')
+  for (const cue of portrait.cues) {
+    assert.ok((cue.text.match(/[^\s]/gu) || []).length <= 44, `竖屏拆分后仍超限：${cue.text}`)
+  }
+  // 正常那条在两种朝向下都必须原封不动。
+  assert.equal(portrait.cues[0].text, normal)
 })

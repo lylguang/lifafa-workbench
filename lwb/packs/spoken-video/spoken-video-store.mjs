@@ -4,6 +4,11 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { spokenVideoDataPath } from './spoken-video-paths.mjs'
 import { validateSrt } from './spoken-video-subtitles.mjs'
 import { parseAccountSnapshot } from './spoken-video-topic.mjs'
+// 抽帧数上限由媒体主机定义（抽帧逻辑在那里）。store 必须跟着同一个值放宽校验：
+// 抽帧从固定 6 帧改成随场景数增长后，计数会超过这里原来的硬上限 8，而
+// optionalInteger 越界是直接抛错——那会让每条多场景的成片在落库那一步整个失败。
+// 用绝对上限（HARD_LIMIT）：空档补帧会让帧数超过保底数 12。
+import { REVIEW_FRAME_HARD_LIMIT as REVIEW_FRAME_LIMIT } from './spoken-video-media-host.mjs'
 
 const PROJECT_SCHEMA_VERSION = 1
 const PROJECT_ID = /^[a-f0-9-]{36}$/iu
@@ -340,7 +345,12 @@ function agentWorkspacePath(value, label) {
 
 function sampledFrameFiles(value) {
   if (value === undefined || value === null) return []
-  if (!Array.isArray(value) || value.length > 8) throw failure('SPOKEN_VIDEO_INVALID_INPUT', '质检抽帧最多包含 8 项。')
+  // 上限必须跟着 REVIEW_FRAME_LIMIT（抽帧数在媒体主机里定）：抽帧从固定 6 帧
+  // 改成随场景数增长之后，这里原来的硬编码 8 会让每条多场景成片在落库那一步
+  // 直接抛错——视频做完了、审片也过了，最后一步炸掉，且报错信息（"质检抽帧最多
+  // 包含 8 项"）完全指不到真正的原因。2026-10-14 实测踩到：一条 426 秒、
+  // 20+ 场景的片子渲染+审片全部正常，提交时失败。
+  if (!Array.isArray(value) || value.length > REVIEW_FRAME_LIMIT) throw failure('SPOKEN_VIDEO_INVALID_INPUT', `质检抽帧最多包含 ${REVIEW_FRAME_LIMIT} 项。`)
   return value.map((file, index) => agentWorkspacePath(file, `质检抽帧[${index}]`))
 }
 
@@ -563,6 +573,7 @@ function producedStageData(stage, payload) {
     if (mode === 'ai-director' && !review) throw failure('SPOKEN_VIDEO_QC_FAILED', 'AI 视频质检缺少独立审片报告。')
     if (passed && review && !review.passed) throw failure('SPOKEN_VIDEO_QC_FAILED', '独立审片未通过时不能标记质检通过。')
     const variationInput = technical.variation === undefined || technical.variation === null ? null : object(technical.variation, '主画面变化报告')
+    const maxSampledFrames = REVIEW_FRAME_LIMIT
     return {
       mode, reportFile: mediaFile(input.reportFile, '技术质检报告文件', 'qc'),
       ...(input.reviewFile ? { reviewFile: mediaFile(input.reviewFile, '独立审片报告文件', 'qc') } : {}),
@@ -574,11 +585,11 @@ function producedStageData(stage, payload) {
         ...(variationInput ? { variation: {
           assessed: variationInput.assessed === true,
           passed: variationInput.passed === true,
-          sampledFrameCount: optionalInteger(variationInput.sampledFrameCount, '主画面抽帧数', 1, 8),
-          distinctMainFrames: optionalInteger(variationInput.distinctMainFrames, '主画面不同帧数', 1, 8),
-          meaningfulPairs: optionalInteger(variationInput.meaningfulPairs, '主画面有效变化对数', 0, 7),
+          sampledFrameCount: optionalInteger(variationInput.sampledFrameCount, '主画面抽帧数', 1, maxSampledFrames),
+          distinctMainFrames: optionalInteger(variationInput.distinctMainFrames, '主画面不同帧数', 1, maxSampledFrames),
+          meaningfulPairs: optionalInteger(variationInput.meaningfulPairs, '主画面有效变化对数', 0, maxSampledFrames - 1),
           averagePairDifference: optionalNumber(variationInput.averagePairDifference, '主画面平均变化值', 0, 255),
-          pairDifferences: Array.isArray(variationInput.pairDifferences) ? variationInput.pairDifferences.slice(0, 7).map((item, index) => optionalNumber(item, `主画面变化值[${index}]`, 0, 255) ?? 0) : [],
+          pairDifferences: Array.isArray(variationInput.pairDifferences) ? variationInput.pairDifferences.slice(0, maxSampledFrames - 1).map((item, index) => optionalNumber(item, `主画面变化值[${index}]`, 0, 255) ?? 0) : [],
           crop: text(variationInput.crop, '主画面检测区域', 80),
           ...(variationInput.note ? { note: text(variationInput.note, '主画面变化说明', 300) } : {}),
         } } : {}),

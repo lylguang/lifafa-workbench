@@ -576,6 +576,46 @@ function splitTextSegments(text, maxChars = 100) {
   flush()
   return chunks.filter(Boolean)
 }
+
+/**
+ * 分段并记录段内每个句子的边界（字符区间，speechText 坐标系）。
+ *
+ * 2026-10-11 加：字幕对齐的治本改造。此前配音合成完，每句话的时间只能靠
+ * ASR 事后猜——远程 ASR 的时间戳与真实音频脱节（实测滞后 4~6s），占比模型
+ * 又有 ±3s 误差，用户实测「声音和底部字幕差 6 秒」。而配音本来就是分段
+ * 合成的：每段音频单独落盘、段间固定 0.2s 静音拼接，段边界天然精确；
+ * 段内句子边界用字符占比（段内无长停顿，误差 <0.4s）。
+ *
+ * 这里记下「每段含哪些句子、句子在段内的字符位置」，拼接时量出每段音频
+ * 时长，两者相乘就是句级时间轴——零 ASR、零对齐算法。句子文本是
+ * speechText（数字已转中文），字幕侧按句序号对应回原稿的句子。
+ */
+function splitTextSegmentsWithMeta(text, maxChars = 100) {
+  const normalized = String(text || '').replace(/\s+/g, ' ')
+  const rawSentences = normalized.split(/(?<=[。！？!?；;\n])/).map(s => s.trim()).filter(Boolean)
+  // 每句在 normalized 里的 [start, end)
+  const sentences = []
+  let cursor = 0
+  for (const sentence of rawSentences) {
+    const start = normalized.indexOf(sentence, cursor)
+    if (start < 0) continue
+    sentences.push({ text: sentence, start, end: start + sentence.length })
+    cursor = start + sentence.length
+  }
+  // 聚合成 ≤maxChars 的段，句子归属随聚合走
+  const chunks = []
+  let buf = null
+  const flush = () => { if (buf) chunks.push(buf); buf = null }
+  for (const sentence of sentences) {
+    if (!buf) { buf = { text: sentence.text, start: sentence.start, end: sentence.end, sentences: [sentence] }; continue }
+    if (sentence.end - buf.start > maxChars) { flush(); buf = { text: sentence.text, start: sentence.start, end: sentence.end, sentences: [sentence] }; continue }
+    buf.text += sentence.text
+    buf.end = sentence.end
+    buf.sentences.push(sentence)
+  }
+  flush()
+  return chunks.filter((c) => c.text)
+}
 const ffmpegRun = (args, label) => new Promise((resolve, reject) => execFile('ffmpeg', args, { windowsHide: true }, e => e ? reject(new Error(`${label}：${e.message}`)) : resolve()))
 
 // ---------- 小米 MiMo TTS ----------
@@ -705,7 +745,7 @@ async function runTts(task, { text, outputFormat, voiceSettings, assetId, voiceI
     // 只留计数用于排查；改写全文会随任务记录（保留最近 500 条）一起膨胀
     task.digitsConverted = converted
   }
-  const segments = splitTextSegments(speechText)
+  const segments = splitTextSegmentsWithMeta(speechText)
   const multi = segments.length > 1
   const ext = outputFormat === 'mp3' ? 'mp3' : 'wav'
   const provider = ['cloud', 'local'].includes(ttsProvider) ? ttsProvider : loadConfig().ttsProvider
@@ -734,7 +774,7 @@ async function runTts(task, { text, outputFormat, voiceSettings, assetId, voiceI
       for (let attempt = 1; attempt <= 6 && !rawBuffer; attempt++) {
         try {
           rawBuffer = await mimoSynthesize({
-            text: segments[i],
+            text: segments[i].text,
             apiKey: mimo.apiKey,
             model: mimoModel,
             voice: mimoVoice,
@@ -776,7 +816,7 @@ async function runTts(task, { text, outputFormat, voiceSettings, assetId, voiceI
       const saveNode = outputFormat === 'mp3'
         ? { class_type: 'SaveAudioMP3', inputs: { audio: ['2', 0], filename_prefix: `lwb_tts/${task.id}_s${i}`, quality: '320k' } }
         : { class_type: 'SaveAudio', inputs: { audio: ['2', 0], filename_prefix: `lwb_tts/${task.id}_s${i}` } }
-      const ttsInputs = { model_path: cfg.model, text: segments[i], steps: cfg.steps, guidance_strength: cfg.guidance_strength, guidance_method: cfg.guidance_method, device: cfg.device, dtype: cfg.dtype, attention: cfg.attention, seed: randomInt(1, 2 ** 31 - 1), keep_model_loaded: true }
+      const ttsInputs = { model_path: cfg.model, text: segments[i].text, steps: cfg.steps, guidance_strength: cfg.guidance_strength, guidance_method: cfg.guidance_method, device: cfg.device, dtype: cfg.dtype, attention: cfg.attention, seed: randomInt(1, 2 ** 31 - 1), keep_model_loaded: true }
       const workflow = ref
         ? { '1': { class_type: 'LoadAudio', inputs: { audio: ref.name } }, '2': { class_type: 'LongCatVoiceCloneTTS', inputs: { ...ttsInputs, prompt_audio: ['1', 0], prompt_text: reference.promptText } }, '3': saveNode }
         : { '2': { class_type: 'LongCatTTS', inputs: ttsInputs }, '3': saveNode }
@@ -802,6 +842,17 @@ async function runTts(task, { text, outputFormat, voiceSettings, assetId, voiceI
 
   setStatus(task, 'processing', { stage: '音频拼接', progress: 93 })
   let file = segFiles[0]
+  // 段时长必须在拼接前量——段文件拼接完即删。这是句级字幕时间轴的地面真值：
+  // 段边界 = 合成边界（精确），段间静音固定 0.2s。
+  // 注意 execFile 是回调式的，必须包 Promise：直接 await 会拿到 ChildProcess，
+  // 解构出 undefined 再被 `|| 0` 吞成全 0（2026-10-11 首跑实踩）。
+  const segDurs = []
+  for (let i = 0; i < segFiles.length; i++) {
+    try {
+      const stdout = await new Promise((resolve, reject) => execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', segFiles[i]], { windowsHide: true }, (error, out) => error ? reject(error) : resolve(out)))
+      segDurs.push(Math.round(Number(String(stdout).trim()) * 1000) || 0)
+    } catch { segDurs.push(0) }
+  }
   if (multi) {
     const silence = join(TTS_DIR, `${task.id}_sil.wav`)
     await ffmpegRun(['-y', '-v', 'error', '-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono', '-t', '0.2', silence], '静音生成失败')
@@ -849,6 +900,30 @@ async function runTts(task, { text, outputFormat, voiceSettings, assetId, voiceI
   task.contentType = ext === 'mp3' ? 'audio/mpeg' : 'audio/wav'
   task.duration = await audioDuration(realFile)
   task.segments = segments.length
+
+  // 句级时间轴：段边界（ffprobe 实测，精确）+ 段内句子按字符占比。
+  // 语速调整会让整体时长缩放（ffmpeg atempo），时间轴同步缩放；音量不影响。
+  // 字幕任务拿到这份记录就能直接产出精确 SRT，不再依赖 ASR 猜时间戳。
+  {
+    const rate = Number(voiceSettings?.rate) || 1
+    const scale = Math.abs(rate - 1) > 0.02 ? 1 / rate : 1
+    const GAP_MS = 200 // 与上方拼接的段间静音一致
+    const timeline = []
+    let cursorMs = 0
+    for (let i = 0; i < segments.length; i += 1) {
+      const seg = segments[i]
+      const durMs = Math.round((segDurs[i] || 0) * scale)
+      const segLen = Math.max(1, seg.end - seg.start)
+      const sentences = (seg.sentences || []).map((sn) => ({
+        text: sn.text,
+        startMs: Math.round(cursorMs + ((sn.start - seg.start) / segLen) * durMs),
+        durMs: Math.round(((sn.end - sn.start) / segLen) * durMs),
+      }))
+      timeline.push({ index: i, text: seg.text, startMs: cursorMs, durMs, sentences })
+      cursorMs += durMs + (i < segments.length - 1 ? GAP_MS : 0)
+    }
+    task.segmentTimeline = { gapMs: GAP_MS, scale, segments: timeline }
+  }
 }
 async function runSubtitles(task, { audioBuffer, audioFormat, language, referenceText, subtitleOptions }) {
   if (!audioBuffer?.length) throw new Error('字幕请求没有音频数据')
@@ -2418,6 +2493,9 @@ const server = createServer(async (req, res) => {
           audioName: t.audioName || null, imageFile: t.imageFile || null,
           hasSrt: typeof t.subtitleSrt === 'string' && t.subtitleSrt.length > 0,
           digitsConverted: t.digitsConverted ?? null,
+          // 句级时间轴（配音合成时记录）：字幕任务拿它直接产出精确 SRT，
+          // 不用 ASR 猜时间戳。只在配音任务上有；undefined 时下游走旧路径。
+          segmentTimeline: t.segmentTimeline || null,
         }))
       return json(res, 200, { tasks: recent, ttsQueue: await queueInfo(TTS_COMFY), imageQueue: await queueInfo(IMAGE_COMFY) })
     }
