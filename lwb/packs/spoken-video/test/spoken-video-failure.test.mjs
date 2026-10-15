@@ -5,6 +5,7 @@ import {
   classifyFailure,
   failureSignature,
   repairBackoffMs,
+  REPAIR_BACKOFF_CEILING_MS,
   STAGE_MAX_ATTEMPTS,
 } from '../spoken-video-failure.mjs'
 
@@ -41,11 +42,15 @@ const HISTORICAL = [
     mustMention: /自动拉起/u,
   },
   {
+    // 2026-10-10 改过 mustMention：原来钉的是「配置中心」四个字。桥接整个进程
+    // 没起来时，让人去打开 127.0.0.1:8199 点按钮是执行不了的——那个端口就是
+    // 死的（18:13 那次的真实故障）。现在改为钉「能真正执行的下一步」：
+    // 保活计划任务与脚本路径。
     name: '引擎路径指向已删除的目录',
     message: 'SciTiger 字幕任务failed：字幕引擎的python 可执行文件不存在：E:\\ComfyUI-CZX\\ComfyUI-CZX\\python\\python.exe',
     category: 'engine.down',
     retryable: true,
-    mustMention: /配置中心/u,
+    mustMention: /LWBKeepAlive|lwb-keepalive\.ps1/u,
   },
   {
     name: '引擎未连接',
@@ -158,17 +163,35 @@ test('only the stages that genuinely benefit get a second attempt', () => {
   assert.equal(STAGE_MAX_ATTEMPTS.topic, 1)
   assert.equal(STAGE_MAX_ATTEMPTS.script, 1)
   // 配音/字幕/渲染：环境类故障（引擎挂了、限流）是重试的主战场。
-  assert.equal(STAGE_MAX_ATTEMPTS.voiceover, 2)
-  assert.equal(STAGE_MAX_ATTEMPTS.video, 2)
+  // 2026-10-10 从 2 提到 4：这三种故障的恢复按分钟计，不按秒计。2026-10-09 21:00
+  // 那轮配音实测 12 分 24 秒、10-10 18:13 那轮桥接整个没了，两次都被 2 次的上限判死，
+  // 而产物全在盘上只差最后一次机会。
+  assert.equal(STAGE_MAX_ATTEMPTS.voiceover, 4)
+  assert.equal(STAGE_MAX_ATTEMPTS.video, 4)
   // 投递平台：重复提交可能真的发出去两条，所以绝不自动重试。
   assert.equal(STAGE_MAX_ATTEMPTS.publish, 1)
 })
 
-test('a rate limit backs off far harder than an ordinary glitch', () => {
-  const quota = repairBackoffMs(1, 'credential.quota')
-  const ordinary = repairBackoffMs(1, 'engine.down')
-  assert.ok(quota > ordinary, '429 是服务端明确要求等待，不该和普通抖动一个量级')
-  assert.ok(repairBackoffMs(2, 'credential.quota') > quota, '退避随尝试次数递增')
+test('a dead dependency waits far longer than an ordinary glitch', () => {
+  // 「服务掉了」的恢复以分钟计：保活每 5 分钟一轮，第一档就该给它 60 秒。
+  // 2026-10-10 18:13 的教训——2 秒的间隔对桥接恢复毫无意义，三次全废在 38 秒里。
+  const dead = repairBackoffMs(1, 'engine.down')
+  const ordinary = repairBackoffMs(1, 'timeout')
+  assert.ok(dead > ordinary * 2, '桥接/引擎不可达不该和普通抖动一个量级')
+  assert.ok(repairBackoffMs(2, 'engine.down') > dead, '退避随尝试次数递增')
+})
+
+test('backoff never runs away', () => {
+  // 原来 base*attempt 没有上限，credential.quota 叠到大 attempt 上会算出十几分钟，
+  // 那已经不是退避而是卡死：轮次挂在那里既不失败也不前进。
+  for (const category of [null, 'engine.down', 'credential.quota', 'timeout']) {
+    for (const attempt of [1, 5, 50, 500]) {
+      assert.ok(
+        repairBackoffMs(attempt, category) <= REPAIR_BACKOFF_CEILING_MS,
+        `${category} 第 ${attempt} 次的退避不该超过封顶值`,
+      )
+    }
+  }
 })
 
 test('classification never throws on odd input', () => {

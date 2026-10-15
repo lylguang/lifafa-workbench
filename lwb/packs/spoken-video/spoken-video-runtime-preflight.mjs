@@ -16,6 +16,11 @@
  * 捕获并给出明确修法。
  */
 
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 const DEFAULT_BRIDGE = 'http://127.0.0.1:8199'
 /** 本地模型合成（Local LongCat）实测要 23 GB 空闲，12 GB 是保守下限。 */
 const LOCAL_MODEL_MEMORY_FLOOR_MIB = 12_000
@@ -40,6 +45,89 @@ function providerUsesLocalModel(mediaStatus) {
 function bridgeBase(environment = process.env) {
   const configured = environment.LWB_MEDIA_BRIDGE_URL
   return (configured || DEFAULT_BRIDGE).replace(/\/+$/u, '')
+}
+
+/**
+ * 桥接自愈：本地媒体桥接（8199）本身不可达时，把它拉回来。
+ *
+ * 为什么必须单独有这一个函数：ensureLocalEngine 在桥接不通时会直接返回
+ * `{ ok:false, reason:'bridge-unreachable' }`（见下），因为它自己也没有能力救桥接——
+ * 桥接是那个「负责拉起引擎的上一层」。2026-10-10 18:13 那次真实故障就是死在这里：
+ * 8199 整个进程没了，#autoRepair 拿着 ensureEngine 反复去拉 8188 引擎，三次全废，
+ * 而故障建议还写着「请打开 127.0.0.1:8199 点一键启动」——那个端口当时根本是死的，
+ * 这条建议在当场无法执行。
+ *
+ * 现在把预检里已有的 /admin/launch 逻辑下沉到这里，让「运行中撞上桥接掉线」也有
+ * 修复动作。返回 ok 后调用方再照常走 ensureLocalEngine 拉引擎。
+ *
+ * 2026-10-10 实测补的一环：`/admin/launch` 只能叫醒「已经活着但没引擎」的桥接。
+ * 桥接整个进程不在时，那个 HTTP 接口根本无人应答——实测 kill 掉 8199 之后
+ * 这里空等满 60 秒仍然 fetch failed。真正能把进程拉回来的是自己 spawn 一个
+ * `node bridge.mjs`（保活脚本 lwb-keepalive.ps1 做的也是同一件事），所以两条路
+ * 都试：先问接口（便宜），不通再自己起进程（贵但兜底）。
+ */
+export async function ensureLocalBridge({ timeoutMs = 90_000, environment = process.env, signal = null, spawnBridge = spawnBridgeProcess } = {}) {
+  const base = bridgeBase(environment)
+  const before = await probeJson(`${base}/health`)
+  if (before.ok) return { ok: true, reason: 'already-up' }
+  // 第一条路：请还活着的桥接自己去拉引擎。桥接已死时这步必然失败，无害。
+  const launched = await postJson(`${base}/admin/launch`, 8000)
+  if (await waitForBridge(base, Math.min(8000, timeoutMs), signal)) {
+    return { ok: true, reason: launched.ok ? 'launched' : 'recovered' }
+  }
+  // 第二条路：桥接进程本身没了，自己起一个。目录解析与保活脚本一致
+  // （LWB_BRIDGE_DIR → <repo>/media-bridge），找不到就如实报出来，不假装成功。
+  const spawned = await spawnBridge({ environment, signal }).catch((error) => ({ ok: false, detail: String(error?.message || error) }))
+  if (!spawned?.ok) {
+    return {
+      ok: false,
+      reason: 'bridge-launch-failed',
+      detail: `桥接不可达且无法拉起：${spawned?.detail || '未知原因'}（目录：${spawned?.dir || bridgeDir(environment)}）`,
+    }
+  }
+  const recovered = await waitForBridge(base, timeoutMs, signal)
+  return recovered
+    ? { ok: true, reason: 'spawned' }
+    : { ok: false, reason: 'bridge-launch-failed', detail: `已启动桥接进程，但它在 ${Math.round(timeoutMs / 1000)} 秒内没有响应 /health` }
+}
+
+/** 轮询 /health 直到桥接应答。返回 false 表示这段时间内一直没起来。 */
+async function waitForBridge(base, timeoutMs, signal) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (signal?.aborted) return false
+    if ((await probeJson(`${base}/health`)).ok) return true
+    await sleep(2000)
+  }
+  return (await probeJson(`${base}/health`)).ok
+}
+
+/** 桥接脚本所在目录。解析顺序与保活脚本 lwb-keepalive.ps1 一致。 */
+function bridgeDir(environment = process.env) {
+  const configured = environment.LWB_BRIDGE_DIR
+  if (configured) return configured
+  // 包在 <repo>/lwb/packs/spoken-video/，桥接在 <repo>/media-bridge/，上溯两层。
+  const here = fileURLToPath(new URL('.', import.meta.url))
+  return resolve(here, '..', '..', '..', 'media-bridge')
+}
+
+/**
+ * 直接起一个桥接进程。detached + unref 让它独立于工作台活着——否则工作台重启
+ * 会连带杀掉刚拉起来的桥接，等于白救。
+ */
+async function spawnBridgeProcess({ environment = process.env, signal = null } = {}) {
+  const dir = bridgeDir(environment)
+  const script = resolve(dir, 'bridge.mjs')
+  if (!existsSync(script)) return { ok: false, dir, detail: '目录下没有 bridge.mjs' }
+  const child = spawn(process.execPath, [script], {
+    cwd: dir,
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    env: { ...environment },
+  })
+  child.unref()
+  return { ok: true, dir, pid: child.pid }
 }
 
 async function probeJson(url, timeoutMs = 3000) {
@@ -156,11 +244,16 @@ export async function runPreflight({ steps = [], mediaStatus = null, publishStat
       checks[checks.length - 1] = ok('bridge.reachable', '本地媒体桥接', '桥接已自动拉起')
     } else {
       // 桥接拉不起来不算硬阻断：云端配音（百炼/小米）不需要本地桥接。
+      //
+      // 2026-10-10 18:13：桥接整个进程没起来时，这里让人「打开 8199 点一键启动」，
+      // 而那个端口当时就是死的——建议在当场根本执行不了。桥接自己不可达时，
+      // 唯一能做的动作是在别处把它拉起来，所以指向保活计划任务与桥接目录。
       const provider = mediaStatus?.connection?.provider || ''
       const cloudOnly = ['bailian', 'mimo'].includes(provider)
+      const manual = '桥接自动拉起失败。请确认计划任务 LWBKeepAlive 处于「就绪」状态（它每 5 分钟会把桥接拉回来），或手工运行 E:\\lifa-scratch\\lwb-keepalive.ps1；确认无误后本任务可重试。'
       checks.push(cloudOnly
-        ? degraded('bridge.reachable', '本地媒体桥接', `桥接不可达（${health.error}），但当前走云端配音，不阻断`, '如需本地配音请打开 http://127.0.0.1:8199/ 点「一键启动」')
-        : blocked('bridge.reachable', '本地媒体桥接', `桥接不可达（${health.error}）`, '请打开桥接配置中心 http://127.0.0.1:8199/ 点「一键启动」，或把配音服务切到云端'))
+        ? degraded('bridge.reachable', '本地媒体桥接', `桥接不可达（${health.error}），但当前走云端配音，不阻断`, `${manual}如需本地配音还需先恢复桥接。`)
+        : blocked('bridge.reachable', '本地媒体桥接', `桥接不可达（${health.error}），自动拉起也未成功`, `${manual}临时可把配音服务切到云端继续出片。`))
     }
   } else {
     checks.push(ok('bridge.reachable', '本地媒体桥接', health.body?.service || '在线'))

@@ -78,13 +78,36 @@ export const SCRIPT_APPROVING_DEPTHS = Object.freeze(['video', 'packaging', 'pub
 export const PUBLISH_SUBMIT_MODES = Object.freeze(['confirm', 'auto'])
 export const SCHEDULE_PUBLISH_ACCOUNT_LIMIT = 5
 
+/**
+ * 各阶段的等待**下限**（毫秒）。
+ *
+ * 这一层不是判死线——真正的判死在 #poll：停滞预算（NO_PROGRESS_BUDGET_MS，
+ * 「完全没有进展」多久才判死）加硬顶（STEP_CEILING_MS，防一直动却跑不完）。
+ * 这里只决定「不管多慢，至少给多久」，字数/镜头数不够时会由 voiceoverTimeoutMs /
+ * videoTimeoutMs 往上抬。所以取值原则是：**低于实测值就该调**，否则一个正常的
+ * 长任务会被下限卡住，而上浮逻辑还没来得及生效。
+ *
+ * 2026-10-10 实测校准（468 秒成片 / 14000 帧 / 审片返工一轮）：
+ *   · 配音 2709 字实际约 11-12 分钟 → 下限 10 分钟只差 1 分钟余量，抬到 20。
+ *     注意真正兜底的是 12 分钟的停滞预算，那次 21:00 的失败是撞的停滞预算
+ *     （任务不再更新 updatedAt），不是撞这个下限。
+ *   · 视频实测整个 video 阶段 34 分钟（渲染 + 审片返工重渲染）→ 下限 40 分钟
+ *     只剩 6 分钟余量。镜头少时 videoTimeoutMs 的估算值会低于下限、直接取下限，
+ *     于是 34 分钟的实测随时可能翻车。抬到 60，与 publish 的量级看齐。
+ */
 export const STEP_TIMEOUT_MS = Object.freeze({
   topic: 15 * 60_000,
   script: 15 * 60_000,
   approve: 60_000,
-  voiceover: 10 * 60_000,
+  voiceover: 20 * 60_000,
   subtitles: 10 * 60_000,
-  video: 40 * 60_000,
+  // 2026-10-10 从 40 抬到 75，依据是历史 57 条 video 任务的真实分布与失败构成：
+  // 最长 62 分钟，且**最长的三条（45/58/62 分钟）都不是超时，而是「审片不通过、
+  // 连做 2 次定向修复后仍没过」**——每条都有 technical-qc-attempt-1/2/3 三个文件，
+  // 即「1 次初渲染 + 2 轮返工重渲染」= 3 次完整渲染。长渲染恰恰是返工轮次多的那种，
+  // 原值 40 分钟会让这种再正常不过的情况被判死，而产物其实已落盘（技术质检
+  // passed=true），只是编辑层没过。75 分钟覆盖到历史最长值之上留 13 分钟余量。
+  video: 75 * 60_000,
   packaging: 15 * 60_000,
   // Uploading a long video to a platform takes longer than rendering it here.
   publish: 25 * 60_000,
@@ -137,7 +160,10 @@ export const STEP_CEILING_MS = Object.freeze({
   approve: 5 * 60_000,
   voiceover: 60 * 60_000,
   subtitles: 45 * 60_000,
-  video: 90 * 60_000,
+  // 2026-10-10 从 90 分钟抬到 120：实测一轮 video（含审片返工重渲染）34 分钟，
+  // 而返工不止一轮时是线性叠加的。硬顶的作用是「防跑飞」，不该在正常长任务
+  // 的量级上就顶上——90 分钟留给两轮返工，120 才够三轮。
+  video: 120 * 60_000,
   packaging: 45 * 60_000,
   publish: 60 * 60_000,
 })
@@ -505,6 +531,11 @@ function runRecord(value) {
     resumeCount: integer(item.resumeCount, '续跑次数', 0, 100, 0),
     resumedFromStep: text(item.resumedFromStep, '续跑起点阶段', 24, false),
     interruptedAt: text(item.interruptedAt, '中断时间', 64, false),
+    // 依赖故障挂起：轮次因为外部服务不可用而停在原地等待，已完成的产物全保留。
+    // blockedBy 记的是「在等谁」——界面据此显示「等待本地媒体桥接恢复，自动续跑中」
+    // 而不是一句干巴巴的失败。这两种情况对人的含义完全不同：前者会自己好。
+    blockedBy: text(item.blockedBy, '挂起原因', 64, false),
+    blockedAt: text(item.blockedAt, '挂起时间', 64, false),
     // 预检或分类给出的可执行修法，直接展示给用户，省去人工翻译报错。
     remedy: text(item.remedy, '修复建议', 600, false),
     failureCategory: text(item.failureCategory, '失败分类', 64, false),
@@ -622,7 +653,22 @@ export function scheduleView(schedule, runs) {
     nextRunAt: nextRunAt(schedule),
     approvesScript: approvesScript(schedule.depth),
     latestRun: latest
-      ? { id: latest.id, status: latest.status, trigger: latest.trigger, triggeredAt: latest.triggeredAt, completedAt: latest.completedAt, step: latest.step, message: latest.message, error: latest.error, itemCount: latest.items.length }
+      // blockedBy 必须带出来：界面要靠它区分「体检拦截」和「等依赖恢复」这两种
+      // blocked——后者不是失败，会自动续跑，标成红色会让人以为要手工处理。
+      // 少传这一个字段，任务卡片就会把「等得起」显示成「没通过」。
+      ? {
+          id: latest.id,
+          status: latest.status,
+          trigger: latest.trigger,
+          triggeredAt: latest.triggeredAt,
+          completedAt: latest.completedAt,
+          step: latest.step,
+          message: latest.message,
+          error: latest.error,
+          blockedBy: latest.blockedBy || null,
+          blockedAt: latest.blockedAt || null,
+          itemCount: latest.items.length,
+        }
       : null,
   }
 }

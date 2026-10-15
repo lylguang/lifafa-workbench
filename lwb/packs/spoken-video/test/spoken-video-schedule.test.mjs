@@ -27,15 +27,39 @@ import {
   weekdayLabels,
 } from '../spoken-video-schedule.mjs'
 import { SpokenVideoScheduleHost } from '../spoken-video-schedule-host.mjs'
+import {
+  classifyFailure,
+  EXTERNAL_DEPENDENCY_CATEGORIES,
+  repairBackoffMs,
+} from '../spoken-video-failure.mjs'
 
 function agent(cwd) { return { session: { header: { cwd } } } }
 
 /** A fixed local clock so weekday and minute matching are deterministic. */
 function at(parts) { return new Date(parts).toISOString() }
 
+/**
+ * 删临时工作区，重试几次再放弃。
+ *
+ * 调度用例会在 t.after 触发时仍有刚写完的记录文件在被后台轮询读取，
+ * Windows 上 rmdir 偶发 ENOTEMPTY（2026-10-13 全量跑时出现，单跑不复现）。
+ * 那是文件句柄释放时序，不是用例失败，所以清理失败不应当作测试失败。
+ */
+async function removeWorkspaceTree(root) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 120 })
+      return
+    } catch {
+      if (attempt === 5) return
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 250 * (attempt + 1)))
+    }
+  }
+}
+
 async function workspace(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'lwb-spoken-video-schedule-')))
-  t.after(() => rm(root, { recursive: true, force: true }))
+  t.after(() => removeWorkspaceTree(root))
   const cwd = join(root, 'workspace')
   await mkdir(join(cwd, 'data'), { recursive: true })
   await writeFile(join(cwd, 'data', 'signals.json'), JSON.stringify({
@@ -436,6 +460,9 @@ async function setup(t, options = {}) {
     //     单条测试要 3 秒，并发跑时更会互相拖慢——那条「预检拦截」的用例正是
     //     因此变成随机挂的。预检本身的拦截行为由下面的专门用例覆盖。
     ensureLocalEngine: async () => ({ ok: true, reason: 'stub' }),
+    // 桥接自愈同样要桩，否则它会真的去打 127.0.0.1:1（连接被立刻拒绝，倒是不慢，
+    // 但 2026-10-10 新增的自愈用例需要按用例控制它返回 ok 还是失败）。
+    ensureLocalBridge: options.hostOptions?.ensureLocalBridge || (async () => ({ ok: true, reason: 'stub' })),
     environment: { LWB_MEDIA_BRIDGE_URL: 'http://127.0.0.1:1', ...(options.hostOptions?.environment || {}) },
     ...options.hostOptions,
   })
@@ -1418,14 +1445,105 @@ test('the voiceover wait limit scales with the script length', () => {
   // 2026-10-09 实测：2113 字稿件（云端分 27 段合成）实际跑了约 20 分钟、音频也落盘了，
   // 却因为刚过固定 10 分钟上限被判超时，整轮报废——纯粹的误判。2026-10-05 那轮同样原因。
   // 配音耗时随字数增长，所以等待上限必须跟着走。
+  //
+  // 2026-10-10 改了这里：下限从 10 分钟抬到 20（实测 2709 字要 11-12 分钟，原值只剩
+  // 1 分钟余量）。抬下限不等于「短稿要等 20 分钟」——真正判死的是 #poll 的停滞预算
+  //（12 分钟无进展），这个下限只在「任务还在动但很慢」时决定何时停止上浮。所以下面
+  // 两条断言语义变了：短稿拿到的仍是下限（20），长稿要在此之上按字数继续上浮。
   assert.equal(voiceoverTimeoutMs(0), STEP_TIMEOUT_MS.voiceover, 'no script length falls back to the default')
   assert.equal(voiceoverTimeoutMs(null), STEP_TIMEOUT_MS.voiceover)
   assert.equal(voiceoverTimeoutMs(NaN), STEP_TIMEOUT_MS.voiceover)
-  // 短稿不该被拖长：600 字仍在默认线上略上浮。
-  assert.ok(voiceoverTimeoutMs(600) < 15 * 60_000, 'a short script must not wait half an hour')
+  // 短稿不该被**上浮公式**拖长：600 字按 100 字/分钟估算是 6 分钟，×1.8 仍是 11 分钟，
+  // 不该超过 20 分钟的下限。
+  assert.ok(voiceoverTimeoutMs(600) <= 20 * 60_000, 'a short script must not be inflated beyond the floor')
   // 长稿要显著放宽。
-  assert.ok(voiceoverTimeoutMs(2113) >= 30 * 60_000, 'a 2000-word script needs far more than 10 minutes')
+  assert.ok(voiceoverTimeoutMs(2113) >= 30 * 60_000, 'a 2000-word script needs far more than the floor')
   // 单调递增，且有天花板防止无限等下去。
   assert.ok(voiceoverTimeoutMs(3000) >= voiceoverTimeoutMs(2000))
-  assert.ok(voiceoverTimeoutMs(99999) <= 45 * 60_000, 'the limit stays bounded')
+  assert.ok(voiceoverTimeoutMs(99999) <= 60 * 60_000, 'the limit stays bounded by the ceiling')
+})
+/* --------------------- 依赖自愈（2026-10-10 新增） ---------------------
+ *
+ * 起因是 18:13 那次真实故障：8199 桥接整个进程没了，配音三次尝试全打在死服务上，
+ * 38 秒后轮次判失败，而前四阶段的产物全在盘上。原有 442 条测试一条都没覆盖到
+ * 这条链路——它们测的是「业务失败怎么办」，没测「依赖本身不在怎么办」。
+ *
+ * 三处结构性缺口，各有至少一条用例钉住：
+ *   ① #autoRepair 只会拉引擎，救不了桥接自己（桥接是引擎的上一层）；
+ *   ② repairBackoffMs 被 import 却从未调用，真实间隔是 2 秒，那套阶梯是死代码；
+ *   ③ 重试耗尽一律判 failed，不区分「代码有 bug」和「服务暂时不在」。
+ */
+
+test('桥接不可达时先救桥接，救不回来就不去拉引擎', async (t) => {
+  const { host, currentAgent, fake } = await setup(t, {
+    depth: 'video',
+    hostOptions: {
+      // 桥接修不好：#autoRepair 应该在救桥接失败后就停手，而不是继续去拉 8188。
+      // 那是 18:13 那次浪费掉全部三次尝试的动作。
+      ensureLocalBridge: async () => ({ ok: false, reason: 'bridge-launch-failed', detail: 'bridge down' }),
+      dependencyWaitMs: 10,
+      repairBackoff: () => 1,
+    },
+  })
+  fake.hosts.media.startVoiceover = async () => { throw new Error('SciTiger TTS 提交不可访问：fetch failed') }
+  const created = await createTask(host, currentAgent, { depth: 'video' })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+
+  // 判据一：轮次挂起而不是判死。
+  assert.equal(run.status, 'blocked')
+  assert.equal(run.blockedBy, 'engine.down')
+  // 判据二：挂起不是终态——给了 completedAt，审计里这段等待就消失了。
+  assert.equal(run.completedAt, null)
+  // 判据三：已完成阶段的产物必须原样保留，续跑要靠它们跳过后面的活。
+  const stages = run.items[0].stages
+  assert.equal(stages.find((s) => s.step === 'topic').status, 'done')
+  assert.equal(stages.find((s) => s.step === 'script').status, 'done')
+  assert.equal(stages.find((s) => s.step === 'approve').status, 'done')
+})
+
+test('代码缺陷不会被当成「等会儿就好了」', () => {
+  // 挂起判据只认外部依赖类。TypeError 是我们自己的 bug，等多久都不会好；
+  // 挂起它等于让一轮永远不落地——那比失败更糟。
+  const defect = classifyFailure({ error: new Error('TypeError: a4 is not defined'), step: 'video' })
+  assert.equal(defect.category, 'code.defect')
+  assert.equal(EXTERNAL_DEPENDENCY_CATEGORIES.has(defect.category), false)
+  const engine = classifyFailure({ error: new Error('fetch failed'), step: 'voiceover' })
+  assert.equal(EXTERNAL_DEPENDENCY_CATEGORIES.has(engine.category), true)
+  // 非依赖类且可重试的故障（限流）也走长退避——服务端明确要求等待。
+  assert.equal(EXTERNAL_DEPENDENCY_CATEGORIES.has('credential.quota'), false)
+  assert.ok(repairBackoffMs(1, 'credential.quota') >= 60_000, '限流是服务端明确要求等待')
+})
+
+test('依赖恢复后桥接自愈会被再次调用，而不是一次性', async (t) => {
+  // 恢复路径也值得钉一下：#autoRepair 每次进入都会探一次桥接，所以「修好了」
+  // 这件事会被后续重试看见。2026-10-10 的修复不能是「只试一次就放弃」。
+  let bridgeProbes = 0
+  const { host, currentAgent, fake } = await setup(t, {
+    depth: 'video',
+    hostOptions: {
+      ensureLocalBridge: async () => { bridgeProbes += 1; return { ok: true, reason: 'launched' } },
+      dependencyWaitMs: 10,
+      repairBackoff: () => 1,
+    },
+  })
+  let attempts = 0
+  // 返回值必须沿用 fake 桩约定的 `${type}:${projectId}` 键——operations() 只认这个
+  // 形态，写成别的 id 会让后续轮询报「媒体任务记录丢失」，那测的是桩不是自愈逻辑。
+  fake.hosts.media.startVoiceover = async (_agent, request) => {
+    attempts += 1
+    // 前两次失败（走自愈），第三次成功：验证恢复后这一轮能重进本阶段。
+    if (attempts <= 2) throw new Error('SciTiger TTS 提交不可访问：fetch failed')
+    return { id: `voiceover:${request.projectId}` }
+  }
+  const created = await createTask(host, currentAgent, { depth: 'video' })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+
+  // 判据：重试真的重进了本阶段，且每次失败都探了一次桥接。2026-10-10 的修复不能是
+  // 「只试一次就放弃」——那正是 18:13 那次的行为。这里不钉最终状态：配音之后的
+  // 字幕/渲染阶段由各自用例覆盖，混进来只会让这条用例在别处出错时跟着红。
+  assert.ok(attempts >= 3, `重试必须真的重进本阶段，实际 ${attempts} 次`)
+  assert.ok(bridgeProbes >= 2, `每次失败都要探一次桥接，实际 ${bridgeProbes} 次`)
+  assert.equal(run.items[0].stages.find((s) => s.step === 'voiceover').status, 'done', '恢复后配音阶段应该完成')
 })

@@ -31,6 +31,7 @@ import {
 import {
   classifyFailure,
   CATEGORY_LABEL,
+  EXTERNAL_DEPENDENCY_CATEGORIES,
   repairBackoffMs,
   STAGE_MAX_ATTEMPTS,
 } from './spoken-video-failure.mjs'
@@ -43,8 +44,18 @@ import {
   queueEntry,
   waitingWithPosition,
 } from './spoken-video-queue.mjs'
-import { ensureLocalEngine as ensureEngineDefault, preflightSummary, runPreflight } from './spoken-video-runtime-preflight.mjs'
+import { ensureLocalBridge as ensureBridgeDefault, ensureLocalEngine as ensureEngineDefault, preflightSummary, runPreflight } from './spoken-video-runtime-preflight.mjs'
 const TICK_INTERVAL_MS = 30_000
+/**
+ * 等外部依赖（桥接/引擎）恢复的上限。保活计划任务每 5 分钟一轮，两轮足够；
+ * 超过说明不是「服务掉了」，继续等只会让整轮无限期挂着。
+ */
+const DEPENDENCY_WAIT_MS = 900_000
+/**
+ * 挂起轮次的最长等待。超时就判失败并清掉标记——不能让一轮永远占着 blocked
+ * 躺在列表里，那比失败更难让人理解（「到底还在跑还是在等？」）。
+ */
+const BLOCKED_MAX_WAIT_MS = 6 * 60 * 60 * 1000
 const LIVE = new Set(['queued', 'running'])
 /** 故障档案保留条数。够看清趋势，又不会让文件无限涨。 */
 const FAILURE_LIMIT = 500
@@ -166,6 +177,9 @@ export class SpokenVideoScheduleHost {
     environment = process.env,
     now = stamp,
     ensureLocalEngine = null,
+    ensureLocalBridge = null,
+    dependencyWaitMs = DEPENDENCY_WAIT_MS,
+    repairBackoff = repairBackoffMs,
   } = {}) {
     if (!content) throw new Error('SpokenVideoScheduleHost requires the content store.')
     if (!projects) throw new Error('SpokenVideoScheduleHost requires the project store.')
@@ -201,6 +215,15 @@ export class SpokenVideoScheduleHost {
     // 引擎自愈钩子。默认走 runtime-preflight 的真实实现；测试注入假实现，
     // 这样「预检拉起引擎」这条路径可以离线验证。
     this.ensureLocalEngine = ensureLocalEngine || ((kind, options) => ensureEngineDefault(kind, options))
+    // 桥接自愈钩子。桥接（8199）是引擎（8188/8187）的上一层，桥接没了引擎拉不动，
+    // 所以 #autoRepair 必须先救桥接再谈引擎——见该方法的注释与 2026-10-10 的事故。
+    this.ensureLocalBridge = ensureLocalBridge || ((options) => ensureBridgeDefault(options))
+    // 等依赖恢复的上限。生产 wiring 走 15 分钟默认值；测试会把它压到毫秒级，
+    // 否则这条分支在单测里等于 15 分钟——挂起逻辑就永远测不到。
+    this.dependencyWaitMs = Number.isSafeInteger(dependencyWaitMs) && dependencyWaitMs >= 0 ? dependencyWaitMs : DEPENDENCY_WAIT_MS
+    // 退避阶梯同理：生产用 spoken-video-failure 的真实曲线（engine.down 是
+    // 60s→180s→300s），测试注入一个恒为几毫秒的实现，否则一条重试链要跑几分钟。
+    this.repairBackoff = typeof repairBackoff === 'function' ? repairBackoff : repairBackoffMs
     /** Per-workspace write serialization for schedules.json. */
     this.writes = new Map()
     /** Live rounds: runId -> { workspace, scheduleId, controller }. */
@@ -750,13 +773,41 @@ export class SpokenVideoScheduleHost {
 
   /* -------------------------------- polling ------------------------------- */
 
-  async #sleep(signal) {
-    await new Promise((resolve, reject) => {
-      if (signal.aborted) { reject(signal.reason); return }
-      const onAbort = () => { clearTimeout(timer); reject(signal.reason) }
-      const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve() }, this.pollIntervalMs)
-      signal.addEventListener('abort', onAbort, { once: true })
-    })
+  /**
+   * 等待。`category`/`attempt` 给了就按失败类别走退避阶梯，否则是轮询间隔。
+   *
+   * 2026-10-10 修的实际 bug：这里原来无条件用 pollIntervalMs（2 秒），而
+   * `repairBackoffMs` 在整个包里只被 import 从未被调用——所以那套退避曲线
+   * 一直是死代码，真实的重试间隔就是 2 秒。2 秒对「服务掉了」毫无意义：
+   * 2026-10-10 18:13 那轮桥接整个进程没了，三次尝试在 38 秒里全打在死服务上，
+   * 于是轮次失败，而 repairBackoffMs 精心设计的阶梯从未生效过。
+   *
+   * 阶梯本身走 this.repairBackoff，覆盖后测试才能把 60s/180s 压到毫秒级走完
+   * 整条重试链路；生产 wiring 从不覆盖，仍然是 spoken-video-failure 的那一档。
+   */
+  async #sleep(signal, category = null, attempt = null) {
+    const budget = attempt === null
+      ? this.pollIntervalMs
+      : this.repairBackoff(attempt, category)
+    if (budget <= this.pollIntervalMs) {
+      await new Promise((resolve, reject) => {
+        if (signal.aborted) { reject(signal.reason); return }
+        const onAbort = () => { clearTimeout(timer); reject(signal.reason) }
+        const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve() }, this.pollIntervalMs)
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+      return
+    }
+    // 长等待要能被停止打断，所以拆成小段轮询而不是一个长 setTimeout。
+    const deadline = Date.now() + budget
+    while (Date.now() < deadline) {
+      await new Promise((resolve, reject) => {
+        if (signal.aborted) { reject(signal.reason); return }
+        const onAbort = () => { clearTimeout(timer); reject(signal.reason) }
+        const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve() }, this.pollIntervalMs)
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+    }
   }
 
   /**
@@ -1006,6 +1057,28 @@ export class SpokenVideoScheduleHost {
     const done = items.filter((item) => item.status === 'completed').length
     const status = reduceRunStatus(items, cancelled)
     const last = finalStep(schedule.depth, schedule.production.subtitleEnabled)
+
+    // 依赖挂起优先于失败判定。#runItem 在外部依赖不可用且重试耗尽时会把条目标成
+    // interrupted 并在轮次上打 blockedBy（见 #runItem 失败分支）。这时轮次不是
+    // 「做完了但不好」，而是「等得起」——已完成阶段的产物全在盘上，#requeueBlocked
+    // 会在依赖恢复后把这一轮原样续跑。所以不能落到 failed：那会让它看起来已经结束，
+    // 而实际上只差一个没人点的按钮。
+    const blockedRun = cancelled ? null : await this.#blockedBy(paths, runId)
+    if (blockedRun) {
+      await this.#finish(paths, runId, startedAt, 'blocked', blockedRun.step || last,
+        `${STEP_LABEL[blockedRun.step] || blockedRun.step || last}等待外部服务恢复，已完成的阶段产物全部保留；恢复后本轮会自动续跑。`,
+        null)
+      await this.#patch(paths, runId, (run) => {
+        run.blockedBy = blockedRun.blockedBy
+        run.blockedAt = blockedRun.blockedAt || this.now()
+        // 挂起不是终态：不给 completedAt / elapsedMs，否则续跑时这段等待时间
+        // 就从审计里消失了，看起来像「没等过就成功了」。
+        run.completedAt = null
+        run.elapsedMs = null
+      }).catch(() => {})
+      return
+    }
+
     // A confirm-mode round finishes its steps but leaves the platform's submit
     // button to a person. Saying "已发布" there would be a lie the audit trail
     // then repeats, so the closing message reports the handover instead.
@@ -1120,23 +1193,88 @@ export class SpokenVideoScheduleHost {
             return
           }
           await this.#recordStageFailure(paths, runId, projectId, step, failure, attempt)
+          // 外部依赖挂起：如果这一轮整体是因为服务不在才走不完的，把它标成 blocked
+          // 而不是 failed，交给 #requeueBlocked 在依赖恢复后续跑。判据是「失败分类属
+          // 于外部依赖类」——代码 bug（code.defect）永远不该被当成「等会儿就好了」。
+          const dependencyDown = EXTERNAL_DEPENDENCY_CATEGORIES.has(failure.category)
           if (failure.retryable && attempt < maxAttempts) {
-            await this.#sleep(signal)
-            await this.#autoRepair(failure, step, signal)
+            await this.#sleep(signal, failure.category, attempt)
+            const repair = await this.#autoRepair(failure, step, signal)
+            // 感知式重试：修复动作声称成功，但要确认依赖真的活了才值得再进本阶段。
+            // 否则就是拿剩余的尝试次数去打一个还没起来的服务——2026-10-10 18:13 那次
+            // 38 秒内三次全废，正是因为没人确认「桥接到底回来了没有」。
+            if (repair && repair.bridge && repair.bridge.ok === false) {
+              await this.#awaitDependency(paths, runId, projectId, step, repair.bridge, signal)
+            }
             // 重入本阶段：setStage 会把它重新标成 running，审计里能看到重试痕迹。
             continue
           }
           await this.#patchItem(paths, runId, projectId, (item) => {
-            item.status = 'failed'
+            item.status = dependencyDown && failure.retryable ? 'interrupted' : 'failed'
             item.error = message
             item.remedy = failure.remedy
             item.failureCategory = failure.category
+            if (dependencyDown && failure.retryable) {
+              item.resumeFrom = item.resumeFrom || step
+              item.message = '等待外部服务恢复后自动续跑，已完成的阶段产物全部保留。'
+            }
           })
+          if (dependencyDown && failure.retryable) {
+            // 轮次级挂起标记。#execute 收尾时读到它就不会把轮次判死。
+            await this.#patch(paths, runId, (run) => {
+              run.blockedBy = failure.category
+              run.blockedAt = this.now()
+              run.completedAt = null
+              run.elapsedMs = null
+              run.error = null
+              run.remedy = failure.remedy
+              run.failureCategory = failure.category
+              run.message = `${STEP_LABEL[step] || step}等待外部服务恢复，已保留全部产物，恢复后自动续跑。`
+            }).catch(() => {})
+          }
           return
         }
       }
     }
     await this.#patchItem(paths, runId, projectId, (item) => { item.status = 'completed' })
+  }
+
+  /**
+   * 等外部依赖恢复，不消耗尝试次数。
+   *
+   * 什么时候用：#autoRepair 已经尽力了但依赖仍然不可达（比如桥接拉不起来）。
+   * 这时候「再试一次业务调用」是纯浪费——它必然以同样的 fetch failed 结束，
+   * 而每一次浪费掉的尝试都在压缩最后的机会。正确的做法是停下来等：保活
+   * （LWBKeepAlive，每 5 分钟一轮）把服务拉回来之后，这一轮自己接着走。
+   *
+   * 上限取 15 分钟：保活周期是 5 分钟，两轮足够；真超过这个数说明不是「服务
+   * 掉了」而是别的问题，继续等只是让整轮无限期挂着。到点后返回 false，让调用
+   * 方正常消耗一次尝试并最终判失败——宁可失败也不要永远不落地。
+   *
+   * 上限走 this.dependencyWaitMs 而不是模块常量，是为了让测试能把它压到毫秒级
+   * 走完这条分支；生产 wiring 从不覆盖它，仍然是 15 分钟。
+   */
+  async #awaitDependency(paths, runId, projectId, step, bridgeFailure, signal) {
+    const budget = this.dependencyWaitMs
+    const deadline = Date.now() + budget
+    await this.#patchItem(paths, runId, projectId, (item) => {
+      item.message = `本地媒体桥接不可用，正在等待自动恢复（最多 ${Math.max(1, Math.round(budget / 60_000))} 分钟）…`
+    }).catch(() => {})
+    while (Date.now() < deadline) {
+      signal.throwIfAborted()
+      await this.#sleep(signal)
+      try {
+        const probe = await this.ensureLocalBridge?.({ timeoutMs: 5000, signal })
+        if (probe?.ok) {
+          await this.#patchItem(paths, runId, projectId, (item) => { item.message = null }).catch(() => {})
+          return true
+        }
+      } catch { /* 继续等 */ }
+    }
+    await this.#patchItem(paths, runId, projectId, (item) => {
+      item.message = null
+    }).catch(() => {})
+    return false
   }
 
   /**
@@ -1149,8 +1287,72 @@ export class SpokenVideoScheduleHost {
    * 查不到子任务时返回 false（宁可重做，不可假定成功）。重做的代价是一次
    * 配音或渲染；跳过的代价是交付一个坏产物。
    */
-  async #stageAlreadyDone(paths, agent, runId, projectId, step) {
-    const data = await this.serial(paths.workspace, () => this.readFile(paths))
+  /** 轮次是否处于「等外部依赖」状态；是则返回挂起详情，否则 null。 */
+  async #blockedBy(paths, runId) {
+    try {
+      const run = await this.#patch(paths, runId, () => {})
+      if (!run?.blockedBy) return null
+      return {
+        blockedBy: run.blockedBy,
+        blockedAt: run.blockedAt,
+        step: run.items.find((item) => item.resumeFrom)?.resumeFrom || run.step,
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 依赖挂起后的续跑：探到依赖已经回来了，就把 blocked 的轮次重新入队。
+   *
+   * 与 #requeueInterrupted 的区别：那一条处理「主机重启」，不关心外部服务；
+   * 这一条处理「服务掉了」，所以入队前必须先探一次——否则每 30 秒的 tick 都会
+   * 把同一轮塞进队列，在服务仍然没起来的情况下反复消耗它的重试次数。2026-10-10
+   * 18:13 那轮的教训正是「没人确认服务到底回来没有」。
+   *
+   * 挂起上限 BLOCKED_MAX_WAIT_MS：真等不到（比如桥接被人手工停掉且不再启动）就
+   * 判失败并清理标记，不能让一轮永远占着 blocked 状态在列表里躺着。
+   */
+  async #requeueBlocked(paths, data) {
+    const clock = Date.now()
+    const waiting = data.runs.filter((run) => run.status === 'blocked' && run.blockedBy)
+    if (!waiting.length) return
+    for (const run of waiting) {
+      const blockedAt = Date.parse(run.blockedAt || run.triggeredAt || '') || clock
+      if (clock - blockedAt > BLOCKED_MAX_WAIT_MS) {
+        await this.#patch(paths, run.id, (record) => {
+          record.status = 'failed'
+          record.error = record.error || '等待外部服务恢复超时，本轮已结束。'
+          record.blockedBy = null
+          record.blockedAt = null
+          record.completedAt = this.now()
+          record.elapsedMs = elapsed(run.triggeredAt, record.completedAt)
+        }).catch(() => {})
+        continue
+      }
+      // 只有自己这一类依赖才探：engine.down 等价于「桥接或引擎不可达」。
+      if (!EXTERNAL_DEPENDENCY_CATEGORIES.has(run.blockedBy)) continue
+      const probe = await this.ensureLocalBridge?.({ timeoutMs: 5000 }).catch(() => null)
+      if (!probe?.ok) continue
+      const schedule = data.schedules.find((candidate) => candidate.id === run.scheduleId)
+      if (!schedule || schedule.disabledReason) continue
+      await this.serial(paths.workspace, async () => {
+        const queue = await this.#readQueue(paths)
+        if (queue.entries.some((item) => item.runId === run.id && item.status === 'waiting')) return
+        const next = enqueue(queue.entries, {
+          scheduleId: schedule.id,
+          scheduleName: schedule.name,
+          depth: run.depth,
+          trigger: 'resume',
+          resumeRunId: run.id,
+        }, this.now())
+        if (!next) return
+        await writeJsonFile(join(paths.root, QUEUE_FILE), { schemaVersion: 1, entries: next })
+      }).catch(() => {})
+    }
+  }
+
+  async #stageAlreadyDone(paths, agent, runId, projectId, step) {    const data = await this.serial(paths.workspace, () => this.readFile(paths))
     const run = data.runs.find((item) => item.id === runId)
     const entry = run?.items.find((item) => item.projectId === projectId)?.stages.find((item) => item.step === step)
     if (entry?.status !== 'done' || !entry.refId) return false
@@ -1207,15 +1409,32 @@ export class SpokenVideoScheduleHost {
   }
 
   /**
-   * 自动修复动作。目前只有一类是真正能自己做的：把本地推理引擎拉起来。
-   * 退避已经在调用方完成，这里只处理需要外部副作用的修复。
+   * 自动修复动作：把本地依赖拉回来。
+   *
+   * 分两层，因为它们是「负责拉起引擎的上一层」：
+   *   ① 桥接（8199）不可达 → 先救桥接。桥接死了 ensureLocalEngine 只会返回
+   *      bridge-unreachable，引擎在它之下无从谈起。2026-10-10 18:13 那次真实故障
+   *      就是死在这个夹缝里：8199 整个进程没了，这里却反复去拉 8188，三次全废。
+   *   ② 桥接活着但引擎（8188/8187）不在 → 拉引擎，这是原来的行为。
+   *
+   * 退避已经在调用方完成，这里只处理需要外部副作用的修复。任何一步失败都不抛：
+   * 真正的判定交给下一次尝试，否则修复动作本身会把重试循环变成一个异常源。
    */
   async #autoRepair(failure, step, signal) {
     if (failure.autoRepair !== 'ensureEngine') return
     const kind = (step === 'packaging' || step === 'publish') ? 'image' : 'tts'
+    const report = { bridge: null, engine: null }
     try {
-      await this.ensureLocalEngine?.(kind, { reason: failure.category })
+      report.bridge = await this.ensureLocalBridge?.({ signal }) || null
+    } catch (error) {
+      report.bridge = { ok: false, reason: 'bridge-repair-threw', detail: String(error?.message || error) }
+    }
+    // 桥接没救回来就别再试引擎了——那注定是 bridge-unreachable，白等一轮。
+    if (report.bridge && report.bridge.ok === false) return report
+    try {
+      report.engine = await this.ensureLocalEngine?.(kind, { reason: failure.category }) || null
     } catch { /* 修复失败不抛：真正的判定交给下一次尝试 */ }
+    return report
   }
 
   /** Explicit dispatch: private methods are not reachable by computed name. */
@@ -1611,11 +1830,25 @@ export class SpokenVideoScheduleHost {
       if (step) run.step = step
       run.message = message
       run.error = error
-      run.completedAt = completedAt
-      run.elapsedMs = elapsed(startedAt, completedAt)
+      // blocked 不是终态：它是「等得起」。给了 completedAt/elapsedMs，续跑时
+      // 这段等待就从审计里消失了，看起来像没等过就成功了；而且 #requeueBlocked
+      // 判超时靠的正是 blockedAt，completedAt 在这里只会添乱。
+      if (status !== 'blocked') {
+        run.completedAt = completedAt
+        run.elapsedMs = elapsed(startedAt, completedAt)
+      }
+      if (status !== 'blocked') {
+        run.blockedBy = null
+        run.blockedAt = null
+      }
       for (const item of run.items) {
-        if (item.status === 'running') item.status = status === 'completed' ? 'completed' : 'failed'
+        // 挂起时不要把条目判成 failed：它会在列表里显示成红色失败，而实际上
+        // 它只是「等得起」，续跑时会被 #requeueBlocked 捡回来接着跑。
+        if (status !== 'blocked' && item.status === 'running') item.status = status === 'completed' ? 'completed' : 'failed'
         for (const stage of item.stages) {
+          // 挂起时未完成的阶段保持原样（多数已被标 interrupted），标成 skipped
+          // 会让续跑以为这些阶段「被判定为不需要」而不是「还没轮到」。
+          if (status === 'blocked') continue
           if (stage.status === 'running' || stage.status === 'pending') stage.status = 'skipped'
         }
       }
@@ -1667,6 +1900,9 @@ export class SpokenVideoScheduleHost {
 
       // 1. 续跑中断的轮次（不占新槽位，只是把之前的活接着干完）
       await this.#requeueInterrupted(paths, data).catch(() => {})
+      // 1b. 依赖恢复后续跑挂起的轮次。与上面那条的区别是入队前要先探一次依赖，
+      // 否则每 30 秒都会把同一轮塞回队列，白白耗尽它的重试次数。
+      await this.#requeueBlocked(paths, data).catch(() => {})
 
       // 2. 到期的任务全部入队
       const due = data.schedules.filter((schedule) => !schedule.disabledReason && scheduleDue(schedule, clock))
