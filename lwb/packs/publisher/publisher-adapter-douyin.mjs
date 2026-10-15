@@ -397,6 +397,21 @@ async function openCoverDialog(page, point, { timeout = 12_000, expectTitle = nu
  * 绝不再退回隐藏 input 兜底，因为那条路会被平台判成「截屏封面」而拒收，
  * 却让调用方以为成功。第二版的误报就是这么来的。
  */
+/**
+ * 封面上传顺序（**竖先横后**）。
+ *
+ * 2026-10-11 用户实测发现：先传横封面再传竖封面时，横封面会跟着竖封面变换，
+ * 结果横槽里装的不是我们传的那张图。所以顺序本身就是修复的一部分，必须是
+ * 有序列表，不能退化成对象或集合。抽成导出函数是为了让测试能直接锁住这个
+ * 顺序——之前「竖槽里装的是横图」就是靠测试才发现的。
+ */
+export function coverUploadPlan(coverBoxes) {
+  return [
+    ['portrait', '竖封面 3:4', coverBoxes.portrait],
+    ['landscape', '横封面 4:3', coverBoxes.landscape],
+  ]
+}
+
 async function uploadCoverInDialog(page, coverPath) {
   // 这里**不再切标签**：竖封面靠主页面上的第二个方块打开另一个弹窗，而那个弹窗
   // 一打开就已经是竖封面通道了。在弹窗内找「设置竖封面」标签是上一版的错误——
@@ -687,15 +702,24 @@ export const douyinAdapter = {
     if (!coverBoxes.landscape || !coverBoxes.portrait) {
       await onStep('cover-boxes', `封面区只找到 ${coverBoxes.all.length} 个入口（预期 2 个：横 4:3 / 竖 3:4）`)
     }
-    // 按 x 排序：左边是横封面，右边是竖封面（实测横 160×120、竖 90×147）。
+    // **顺序有语义：必须先竖后横**（2026-10-11 用户实测发现）。
+    // 先横后竖时，竖封面一传上去，横封面会被它带偏/重算，结果横槽里装的
+    // 不是我们传的那张图。用户原话：「如果先上传横封面，再上传竖封面，
+    // 横封面会根据竖封面来变换」。所以这里是有序数组，不能用对象或集合——
+    // 顺序就是修复的一部分。
     //
-    // 刻意不按弹窗标题区分横竖：实测点开**竖**封面那个方块，弹窗标题仍然是
-    // 「设置横封面」——抖音不区分，点哪个方块决定的是它自己的通道。用标题去要求
-    // 「设置竖封面」会把竖封面那轮直接判失败（这个错我犯过一次）。
-    const plan = [
-      ['landscape', '横封面 4:3', coverBoxes.landscape],
-      ['portrait', '竖封面 3:4', coverBoxes.portrait],
-    ]
+    // 注意这跟下面按 x 排序取坐标是两件事：locateCoverBoxes 用 x 排序是为了
+    // 分辨哪个方块是横、哪个是竖（左边横右边竖，实测横 160×120、竖 90×147）；
+    // 而这里的 plan 顺序只管上传先后。刻意不按弹窗标题区分横竖：实测点开
+    // **竖**封面那个方块，弹窗标题仍然是「设置横封面」——抖音不区分，点哪个
+    // 方块决定的是它自己的通道。用标题去要求「设置竖封面」会把竖封面那轮
+    // 直接判失败（这个错我犯过一次）。
+    // **顺序有语义：必须先竖后横**，理由与锚定方式见 coverUploadPlan()。
+    //
+    // 别和下面按 x 排序取坐标混淆：locateCoverBoxes 用 x 排序是为了分辨哪个
+    // 方块是横、哪个是竖（左边横右边竖，实测横 160×120、竖 90×147）；这里
+    // 的 plan 顺序只管上传先后。
+    const plan = coverUploadPlan(coverBoxes)
     for (const [kind, ratioLabel, boxPoint] of plan) {
       const coverPath = coverPaths[kind]
       if (!coverPath) continue

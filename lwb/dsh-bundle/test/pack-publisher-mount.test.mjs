@@ -109,8 +109,11 @@ test('browser automation is opt-in and reported when unavailable', async (t) => 
   }
   assert.equal(status.spokenVideo.available, false)
   // Every declared adapter must be present in status so the form and the docs
-  // cannot drift from the registry.
-  assert.deepEqual(status.adapters, ['douyin', 'bilibili', 'kuaishou'])
+  // cannot drift from the registry. Compared against the registry itself: a
+  // literal list here would fail the moment a platform is added, which is the
+  // drift this assertion exists to catch.
+  const { ADAPTER_PLATFORMS } = await import('../../packs/publisher/publisher-store.mjs')
+  assert.deepEqual(status.adapters, [...ADAPTER_PLATFORMS])
 })
 
 test('a pack workspace is isolated from other packs', async (t) => {

@@ -9,6 +9,107 @@ window.__ModuleLoader__.load({
     const PACK_ID = 'publisher';
     const PLUGIN_NAME = '@scitiger-ai/lwb-publisher';
 
+    // ---------------------------------------------------------------------
+    // 提示音与桌面通知。
+    //
+    // 2026-10-13 用户反馈「桌面通知和提示音都没有效果」。真因不是设置坏了，
+    // 而是**这个包里压根没有任何通知代码**（grep Notification/AudioContext
+    // 零命中）—— 只有 spoken-video 包有，发布任务这条链路从没接过。发布要跑
+    // 好几分钟、还停在「等待确认」等人点发表，正是最需要提醒的场景。
+    //
+    // 照 spoken-video 的那套实现（同一份 NOTIFY_VOICES 音色表），本地存储
+    // 单独用 publisher 自己的键，免得两个包互相覆盖对方的开关。
+    // ---------------------------------------------------------------------
+    const NOTIFY_KEY = 'lwb.publisher.notify';
+    const notifySettings = { sound: true, desktop: false };
+    try {
+      const raw = window.localStorage?.getItem(NOTIFY_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed.sound === 'boolean') notifySettings.sound = parsed.sound;
+        if (typeof parsed.desktop === 'boolean') notifySettings.desktop = parsed.desktop;
+      }
+    } catch (_) { /* 隐私模式下 localStorage 会抛 */ }
+    const notifySave = () => { try { window.localStorage?.setItem(NOTIFY_KEY, JSON.stringify(notifySettings)); } catch (_) {} };
+    // 上行双音 = 到头了，好事；下行低音 = 沉、留尾巴。
+    const NOTIFY_VOICES = {
+      success: [[660, 0.18, 0.22, 0], [880, 0.22, 0.22, 0.18]],
+      error: [[440, 0.22, 0.26, 0], [220, 0.34, 0.24, 0.22], [120, 0.5, 0.2, 0.24]],
+      attention: [[880, 0.16, 0.22, 0], [880, 0.16, 0.22, 0.26]],
+    };
+    let notifyCtx = null;
+    let notifyLast = { key: '', at: 0 };
+    const notifyAudio = () => {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return null;
+      if (!notifyCtx || notifyCtx.state === 'closed') notifyCtx = new Ctx();
+      return notifyCtx;
+    };
+    function notifyPlay(voiceName) {
+      if (!notifySettings.sound) return false;
+      const voice = NOTIFY_VOICES[voiceName];
+      if (!voice) return false;
+      try {
+        const ctx = notifyAudio();
+        if (!ctx) return false;
+        if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+        const now = ctx.currentTime;
+        for (const [frequency, duration, peak, delay] of voice) {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(frequency, now + delay);
+          // 5 毫秒淡入、指数衰减：避免咔哒声。
+          gain.gain.setValueAtTime(0.0001, now + delay);
+          gain.gain.exponentialRampToValueAtTime(peak, now + delay + 0.005);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + delay + duration);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(now + delay);
+          osc.stop(now + delay + duration + 0.02);
+        }
+        return true;
+      } catch (_) { return false; }
+    }
+    /** 解锁音频：必须在用户手势里调用一次，否则后续自动播放全被拦。 */
+    function notifyUnlock() {
+      try {
+        const ctx = notifyAudio();
+        if (!ctx) return false;
+        if (ctx.state === 'suspended') ctx.resume();
+        return ctx.state === 'running';
+      } catch (_) { return false; }
+    }
+    /** 同一事件只响一次：轮询会连续几轮读到同一终态，不去重就响成一片。 */
+    function notifyOnce(key, voiceName) {
+      const signature = `${key}:${voiceName}`;
+      const at = Date.now();
+      if (notifyLast.key === signature && at - notifyLast.at < 60_000) return false;
+      notifyLast = { key: signature, at };
+      return notifyPlay(voiceName);
+    }
+    function notifyDesktop(title, body) {
+      if (!notifySettings.desktop || typeof window.Notification !== 'function') return false;
+      if (window.Notification.permission !== 'granted') return false;
+      try {
+        const n = new window.Notification(title, { body, tag: title, silent: true });
+        n.onclick = () => { window.focus?.(); n.close(); };
+        return true;
+      } catch (_) { return false; }
+    }
+    function notifyRequestDesktop() {
+      if (typeof window.Notification !== 'function') return Promise.resolve('unsupported');
+      if (window.Notification.permission !== 'default') return Promise.resolve(window.Notification.permission);
+      return window.Notification.requestPermission().then((permission) => {
+        if (permission === 'granted') { notifySettings.desktop = true; notifySave(); }
+        return permission;
+      }).catch(() => 'denied');
+    }
+    const notify = { play: notifyPlay, playOnce: notifyOnce, unlock: notifyUnlock, notifyDesktop, requestDesktop: notifyRequestDesktop, settings: notifySettings, save: notifySave };
+    // 任何一次点击都解锁音频：浏览器的自动播放策略只认用户手势，漏了就永远静音。
+    ['pointerdown', 'keydown'].forEach((type) => {
+      window.addEventListener(type, () => { if (notifySettings.sound) notifyUnlock(); }, { capture: true });
+    });
+
     const PLATFORM_OPTIONS = [
       { id: 'douyin', label: '抖音' },
       { id: 'wechat', label: '视频号' },
@@ -21,9 +122,19 @@ window.__ModuleLoader__.load({
     const JOB_TONE = { queued: 'muted', running: 'orange', 'awaiting-confirm': 'orange', succeeded: 'green', failed: 'red', cancelled: 'muted' };
     const PHASE_LABEL = {
       open: '打开上传页', upload: '上传视频', editor: '等待转码', metadata: '填写标题',
-      cover: '上传封面', 'cover-skipped': '跳过封面', 'awaiting-confirm': '等待确认',
+      cover: '上传封面', 'cover-skipped': '跳过封面', 'title-adjusted': '调整短标题', 'awaiting-confirm': '等待确认',
       submit: '提交发布', verify: '读回状态', done: '已完成', failed: '失败', cancelled: '已取消',
     };
+
+    /**
+     * The publish phases in the order a real run walks them. The task banner
+     * renders this as a checklist so the user can see where the job is without
+     * reading the records page, and so a stalled step is visibly the one that
+     * stalled.
+     */
+    const PHASE_FLOW = ['open', 'upload', 'editor', 'metadata', 'cover', 'awaiting-confirm', 'submit', 'verify'];
+    const PHASE_IS_STEP = (phase) => PHASE_FLOW.includes(phase);
+    const terminal = (job) => ['succeeded', 'failed', 'cancelled'].includes(job.status);
 
     const css = `
       .pb-page { display:grid; gap:18px; max-width:1420px; margin:0 auto; } .pb-page * { box-sizing:border-box; }
@@ -45,6 +156,43 @@ window.__ModuleLoader__.load({
       .pb-pill[data-tone="orange"] { color:#7a5b17; background:#fff4dd; }
       .pb-pill[data-tone="red"] { color:#a94343; background:#ffecec; }
       .pb-pill[data-tone="muted"] { color:var(--lwb-muted); background:var(--lwb-line); }
+
+      /* --- run banner: 2026-10-13 用户反馈原来那条「顶部通栏」太占版面，
+         改成右下角悬浮小卡片，步骤条默认折叠成「进度 5/7」。 --- */
+      .pb-run { position:fixed; right:18px; bottom:18px; z-index:30; display:grid; gap:8px; width:min(340px,calc(100vw - 36px)); margin:0; padding:11px 13px; border:1px solid var(--lwb-line); border-left:3px solid var(--lwb-blue); border-radius:10px; background:var(--lwb-surface); box-shadow:0 10px 30px rgba(16,24,40,.18); }
+      .pb-run[data-state="failed"] { border-left-color:#d05a5a; }
+      .pb-run[data-state="succeeded"] { border-left-color:var(--lwb-green); }
+      .pb-run[data-state="cancelled"] { border-left-color:var(--lwb-muted); }
+      .pb-run-head { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:9px; }
+      /* 标题占剩余宽度、按钮不换行：原来 flex-wrap 会把「待确认」标签挤到第二行，
+         卡片凭空高出一截（2026-10-13 实测截图）。 */
+      .pb-run-title { flex:1 1 190px; min-width:0; }
+      .pb-actions { flex:none; display:flex; align-items:center; gap:2px; }
+      .pb-run-title { display:grid; gap:2px; min-width:0; font-size:var(--lwb-text-base,14px); font-weight:700; }
+      /* 标题改成两行截断：横排 flex 时长标题会把整张卡片撑宽、按钮被挤出可视区
+         （2026-10-13 实测）。grid + min-width:0 才能真正触发省略号。 */
+      .pb-run-title > span:first-child { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; line-height:1.35; }
+      .pb-run-sub { display:flex; flex-wrap:wrap; gap:6px; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); font-weight:400; }
+      .pb-run-close { border:0; padding:0 6px; color:var(--lwb-muted); background:transparent; font:inherit; font-size:17px; line-height:1; cursor:pointer; }
+      .pb-run-close:hover { color:var(--lwb-ink); }
+      /* 步骤条：折叠时只留一个「进度 n/m」按钮，展开才铺开所有步骤。 */
+      .pb-steps-toggle { display:inline-flex; align-items:center; gap:6px; width:fit-content; padding:3px 9px; border:1px solid var(--lwb-line); border-radius:20px; color:var(--lwb-muted); background:var(--lwb-surface); font:inherit; font-size:var(--lwb-text-xs,12px); cursor:pointer; }
+      .pb-steps-toggle:hover { color:var(--lwb-ink); border-color:var(--lwb-blue); }
+      .pb-steps { display:flex; flex-wrap:wrap; gap:6px; margin:0; padding:0; list-style:none; max-height:148px; overflow:auto; }
+      .pb-steps li { display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border:1px solid var(--lwb-line); border-radius:20px; color:var(--lwb-muted); background:var(--lwb-surface); font-size:var(--lwb-text-xs,12px); }
+      .pb-steps li::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--lwb-line); }
+      .pb-steps li[data-state="done"] { color:var(--lwb-green); border-color:var(--lwb-green-soft); }
+      .pb-steps li[data-state="done"]::before { background:var(--lwb-green); }
+      .pb-steps li[data-state="current"] { color:var(--lwb-blue); border-color:var(--lwb-blue); background:var(--lwb-blue-soft); font-weight:700; }
+      .pb-steps li[data-state="current"]::before { background:var(--lwb-blue); animation:pb-pulse 1.3s ease-in-out infinite; }
+      .pb-steps li[data-state="failed"] { color:#a94343; border-color:#e6b5b5; background:#ffecec; font-weight:700; }
+      .pb-steps li[data-state="failed"]::before { background:#a94343; }
+      .pb-run-msg { margin:0; padding:9px 11px; border-radius:7px; font-size:var(--lwb-text-sm,13px); line-height:1.55; white-space:pre-wrap; }
+      .pb-run-msg[data-tone="green"] { color:var(--lwb-green); background:var(--lwb-green-soft); }
+      .pb-run-msg[data-tone="red"] { color:#994646; background:#fff7f7; }
+      .pb-run-msg[data-tone="muted"] { color:var(--lwb-muted); background:var(--lwb-line); }
+      @keyframes pb-pulse { 0%,100% { opacity:1 } 50% { opacity:.25 } }
+      @media (prefers-reduced-motion: reduce) { .pb-steps li[data-state="current"]::before { animation:none; } }
       .pb-error, .pb-note { margin:0; padding:10px 11px; border:1px solid #e6b5b5; border-radius:7px; color:#994646; background:#fff7f7; font-size:var(--lwb-text-sm,13px); line-height:1.55; white-space:pre-wrap; }
       .pb-note { border-color:#bad5ed; color:#486277; background:#f7fbff; }
       .pb-warn { margin:0; padding:10px 11px; border:1px solid #e2c58a; border-radius:7px; color:#7a5b17; background:#fffaf0; font-size:var(--lwb-text-sm,13px); line-height:1.55; }
@@ -71,6 +219,10 @@ window.__ModuleLoader__.load({
       body[data-ds-dark-theme] .pb-error { border-color:#7a4444; color:#e8b9b9; background:#3a2323; }
       body[data-ds-dark-theme] .pb-note { border-color:#2c5578; color:#a9c9e6; background:#16324a; }
       body[data-ds-dark-theme] .pb-warn { border-color:#6b5a2c; color:#e8d9a9; background:#332b1b; }
+      body[data-ds-dark-theme] .pb-run { box-shadow:none; }
+      body[data-ds-dark-theme] .pb-run[data-state="failed"] { border-left-color:#c97373; }
+      body[data-ds-dark-theme] .pb-steps li[data-state="failed"] { color:#e8b9b9; border-color:#7a4444; background:#3a2323; }
+      body[data-ds-dark-theme] .pb-run-msg[data-tone="red"] { color:#e8b9b9; background:#3a2323; }
       body[data-ds-dark-theme] .pb-pill[data-tone="orange"] { color:#e8d9a9; background:#332b1b; }
       body[data-ds-dark-theme] .pb-pill[data-tone="red"] { color:#e8b9b9; background:#3a2323; }
       body[data-ds-dark-theme] .pb-danger { border-color:#7a4444; color:#e8b9b9; background:#3a2323; }
@@ -98,6 +250,168 @@ window.__ModuleLoader__.load({
 
     function ErrorNotice({ error }) {
       return error ? h('p', { className: 'pb-error' }, String(error.message || error)) : null;
+    }
+
+    /* ------------------------------- run banner ------------------------------- */
+
+    /**
+     * One shared subscription for the job list, so the banner and the pages
+     * agree instead of each polling. The banner reads the newest job and stays
+     * visible while it is live; once the job reaches a terminal state the user
+     * is told so plainly and the banner can be dismissed. A finished banner
+     * never silently disappears — that is the whole point of it.
+     */
+    function RunBanner({ jobs, onOpenRecords }) {
+      const [dismissedId, setDismissedId] = React.useState(null);
+      // 步骤默认折叠：2026-10-13 用户反馈原来 7 个步骤条铺满整行「太难看、
+      // 占地方」。小卡片里只留一行「进度 n/m」，点开才看细节。
+      const [stepsOpen, setStepsOpen] = React.useState(false);
+      const newest = (jobs || []).find((job) => !terminal(job)) || (jobs || [])[0] || null;
+      const done = Boolean(newest && terminal(newest) && newest.id === dismissedId);
+      const phase = newest?.phase || '';
+      const atPhase = PHASE_FLOW.indexOf(phase);
+      const failed = newest?.status === 'failed';
+      const cancel = newest?.status === 'cancelled';
+      const ok = newest?.status === 'succeeded';
+      const stalled = phase === 'awaiting-confirm' && newest?.status === 'awaiting-confirm';
+      // 「等待确认」是唯一必须主动来叫人看的一步，所以这一档默认展开步骤条。
+      // 注意：这个 effect 必须排在下面的 early return **之前** —— hooks 不可条件调用，
+      // 放到 return 之后会炸（2026-10-13 改版时踩过一次）。
+      React.useEffect(() => { if (stalled || failed) setStepsOpen(true); }, [stalled, failed]);
+      if (!newest || done) return null;
+
+      const message = () => {
+        if (failed) return newest.error ? `发布失败：${newest.error}` : '发布失败，原因未记录。请到「记录」页查看截图证据。';
+        if (cancel) return '发布任务已取消。';
+        if (ok) return `发布已提交完成${newest.proof?.remoteUrl ? '。作品链接：' + newest.proof.remoteUrl : '。'}`;
+        if (stalled) return '视频已上传并填好资料，正停在发布前。请在浏览器窗口里点「发表」完成最后一步，或在「记录」页取消。';
+        return `正在${PHASE_LABEL[phase] || phase}…上传大文件可能需要几分钟，请不要关闭工作台。`;
+      };
+
+      return h('div', { className: 'pb-run', 'data-state': newest.status, role: 'status', 'aria-live': 'polite' },
+        h('div', { className: 'pb-run-head' },
+          h('div', { className: 'pb-run-title' },
+            h('span', null, newest.projectTitle || '发布任务'),
+            h('span', { className: 'pb-run-sub' }, `${newest.platformLabel || newest.platform} · ${newest.accountLabel || ''}`),
+            h(Pill, { tone: JOB_TONE[newest.status] || 'muted' }, JOB_LABEL[newest.status] || newest.status),
+          ),
+          h('div', { className: 'pb-actions' },
+            onOpenRecords ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: onOpenRecords }, '查看记录') : null,
+            // 「我已发布」：这一档没有自动回读（自动化不知道平台那边已提交），
+            // 所以必须给一个人工回执，否则卡片永远显示「待确认」
+            // （2026-10-13 反馈：用户点完发表，卡片还一直卡在待确认）。
+            stalled || newest.status === 'awaiting-confirm'
+              ? h('button', {
+                type: 'button', className: 'lwb-primary-button',
+                onClick: () => { void remote('confirmSubmitted', { jobId: newest.id }).catch(() => {}); },
+              }, '我已发布')
+              : null,
+            onOpenRecords ? null : null,
+            // 通知开关就地放在横幅里：用户说「没效果」时最该先能一键打开。
+            h('button', {
+              type: 'button',
+              className: 'pb-run-close',
+              title: notifySettings.sound ? '提示音：开（点此关闭）' : '提示音：关（点此开启）',
+              'aria-label': '提示音开关',
+              onClick: () => { notifySettings.sound = !notifySettings.sound; notifySave(); if (notifySettings.sound) notifyPlay('attention'); },
+            }, notifySettings.sound ? '🔔' : '🔕'),
+            notifySettings.desktop
+              ? h('button', {
+                type: 'button', className: 'pb-run-close',
+                title: '桌面通知：开（点此关闭）', 'aria-label': '桌面通知开关',
+                onClick: () => { notifySettings.desktop = false; notifySave(); },
+              }, '🖥️')
+              : h('button', {
+                type: 'button', className: 'pb-run-close',
+                title: '开启桌面通知（需要你授权）', 'aria-label': '开启桌面通知',
+                onClick: () => { void notifyRequestDesktop().then((p) => { if (p === 'denied') notifyPlay('error'); }); },
+              }, '🖥️'),
+            terminal(newest)
+              ? h('button', { type: 'button', className: 'pb-run-close', title: '关闭', 'aria-label': '关闭任务提示', onClick: () => setDismissedId(newest.id) }, '×')
+              : null,
+          ),
+        ),
+        // 折叠时给一行「进度 n/m」；展开（或等待确认/失败）才铺开全部步骤。
+        // 原先是 7 个步骤条无脑铺满整行，正是用户嫌「太难看、占地方」的地方。
+        (() => {
+          const steps = PHASE_FLOW.map((step) => {
+            const index = PHASE_FLOW.indexOf(step);
+            // A skipped step (cover) must read as done, never as the current one.
+            let stepState = 'todo';
+            if (terminal(newest)) stepState = failed && index === atPhase ? 'failed' : 'done';
+            else if (ok) stepState = 'done';
+            else if (index < atPhase || (phase === 'cover-skipped' && step === 'cover')) stepState = 'done';
+            else if (index === atPhase) stepState = 'current';
+            return h('li', { key: step, 'data-state': stepState }, PHASE_LABEL[step]);
+          });
+          const finished = steps.filter((node) => node.props['data-state'] === 'done' || node.props['data-state'] === 'failed').length;
+          return h(React.Fragment, null,
+            h('button', {
+              type: 'button',
+              className: 'pb-steps-toggle',
+              'aria-expanded': stepsOpen ? 'true' : 'false',
+              onClick: () => setStepsOpen((value) => !value),
+            }, `${stepsOpen ? '收起步骤' : `进度 ${finished}/${steps.length}`}`),
+            stepsOpen ? h('ul', { className: 'pb-steps' }, steps) : null,
+          );
+        })(),
+        h('p', { className: 'pb-run-msg', 'data-tone': ok ? 'green' : (failed || cancel) ? 'red' : 'muted' }, message()),
+      );
+    }
+
+    /**
+     * Fetch jobs once and share them. Pages already poll on their own timers;
+     * this hook is what the banner reads, so it needs its own tick but not its
+     * own copy of the rest of the state.
+     */
+    function useJobs(intervalMs = 3000) {
+      const [jobs, setJobs] = React.useState([]);
+      const [error, setError] = React.useState(null);
+      // 记住每个任务报过的状态，只在**状态变化**的那一刻响/弹一次。
+      // 直接按当前 jobs 触发会每轮都响 —— 轮询每 3 秒一次，一次发布能响几十遍。
+      const seen = React.useRef(new Map());
+      const announce = React.useCallback((next) => {
+        for (const job of next) {
+          if (!job?.id || !job.status) continue;
+          const before = seen.current.get(job.id);
+          seen.current.set(job.id, job.status);
+          // 首次读到（页面刚打开）不打扰，那是历史任务不是新事件。
+          if (before === undefined) continue;
+          if (before === job.status) continue;
+          const title = job.projectTitle || '发布任务';
+          const label = JOB_LABEL[job.status] || job.status;
+          if (job.status === 'awaiting-confirm') {
+            notifyOnce(`${job.id}:awaiting`, 'attention');
+            notifyDesktop(`需要确认：${title}`, '视频已上传并填好资料，正停在发布前，请到浏览器窗口点「发表」。');
+          } else if (job.status === 'succeeded') {
+            notifyOnce(`${job.id}:ok`, 'success');
+            notifyDesktop(`发布完成：${title}`, '作品已提交。');
+          } else if (job.status === 'failed') {
+            notifyOnce(`${job.id}:err`, 'error');
+            notifyDesktop(`发布失败：${title}`, job.error || '原因未记录，请到「记录」页查看截图证据。');
+          } else if (before === 'awaiting-confirm') {
+            // 从等待确认走了（用户发表了或取消了）：同样值得一声。
+            notifyOnce(`${job.id}:resolved`, job.status === 'succeeded' ? 'success' : 'attention');
+          } else {
+            void label;
+          }
+        }
+      }, []);
+      const reload = React.useCallback(async () => {
+        try {
+          const next = await remote('listJobs');
+          setJobs(next);
+          announce(next);
+          setError(null);
+        }
+        catch (err) { setError(err); }
+      }, [announce]);
+      React.useEffect(() => { void reload(); }, [reload]);
+      React.useEffect(() => {
+        const timer = setInterval(() => { void reload(); }, intervalMs);
+        return () => clearInterval(timer);
+      }, [reload, intervalMs]);
+      return { jobs, error, reload };
     }
     function EmptyState({ text }) {
       return h('div', { className: 'pb-empty' }, text);
@@ -132,7 +446,7 @@ window.__ModuleLoader__.load({
 
     /* ------------------------------ accounts ------------------------------ */
 
-    function AccountsPage() {
+    function AccountsPage({ openPackMenu }) {
       const [state, setState] = React.useState(null);
       const [error, setError] = React.useState(null);
       const [busy, setBusy] = React.useState('');
@@ -166,8 +480,10 @@ window.__ModuleLoader__.load({
       const accounts = state?.accounts || [];
       const status = state?.status || null;
       const browser = status?.browser || null;
+      const liveJobs = useJobs(2000);
 
       return h('div', { className: 'pb-page' },
+        h(RunBanner, { jobs: liveJobs.jobs, onOpenRecords: () => openPackMenu?.('records') }),
         h(PageTop, {
           title: '平台账号',
           copy: '这里管理要发布到的平台账号。登录使用本机 Chrome 的真实登录态：点「登录」会打开一个窗口显示平台二维码，用手机扫码即可，登录状态长期有效。',
@@ -387,8 +703,12 @@ window.__ModuleLoader__.load({
       const accounts = state?.accounts || [];
       const activeAccounts = accounts.filter((item) => item.status === 'active' && item.adapterReady);
       const settings = state?.status?.settings || {};
+      // Faster than this page's own 5s tick: a publish that stalls should say
+      // so within a couple of seconds, not half a minute later.
+      const liveJobs = useJobs(2000);
 
       return h('div', { className: 'pb-page' },
+        h(RunBanner, { jobs: liveJobs.jobs.length ? liveJobs.jobs : (state?.jobs || []), onOpenRecords: () => openPackMenu?.('records') }),
         h(PageTop, {
           title: '发布作品',
           copy: '选择一条已通过质检、且发布信息齐备的成片，挑一个平台账号提交。默认停在发布前，你在窗口里点最后一下。',
@@ -557,6 +877,7 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', { className: 'pb-page' },
+        h(RunBanner, { jobs }),
         h(PageTop, {
           title: '发布记录',
           copy: '每条发布任务都保留状态、阶段与截图证据。失败时先看最后一张截图，它通常直接指出平台页面哪里变了。',

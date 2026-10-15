@@ -5,13 +5,15 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { PublisherStore, defaultProfileDir, platformLabel, ADAPTER_PLATFORMS } from '../publisher-store.mjs'
 import { PublisherHost } from '../publisher-host.mjs'
-import { resolveBrowserExecutable } from '../publisher-browser.mjs'
+import { resolveBrowserExecutable, PublisherBrowserPool } from '../publisher-browser.mjs'
+import wechatAdapter, { composeDescription, sanitizeShortTitle } from '../publisher-adapter-wechat.mjs'
 import {
   DEFAULT_AI_DECLARATION,
   DOUYIN_TITLE_LIMIT,
   resolveDeclaration,
   truncateForDouyin,
   coverRatioWarning,
+  coverUploadPlan,
   pickCoverSlots,
   readCoverVerdict,
   waitForUploadComplete,
@@ -59,16 +61,90 @@ test('every adapter platform is one the store accepts, and an unadapted platform
       assert.equal(account.platform, platform)
     })
   }
-  // 视频号 is a known platform without an adapter yet: registering it works,
+  // 小红书 is still a known platform without an adapter: registering it works,
   // publishing through it must say so instead of failing deep in a browser.
   await withStore(async (store) => {
-    const account = await store.createAccount({ platform: 'wechat', label: '视频号·未适配' })
+    const account = await store.createAccount({ platform: 'xhs', label: '小红书·未适配' })
     await store.patchAccountState(account.id, { status: 'active' })
     const host = new PublisherHost({ store, browser: stubBrowser(), workspacePath: store.workspacePath })
     await assert.rejects(
       () => host.startPublish({ accountId: account.id, projectId: '11111111-2222-3333-4444-555555555555' }),
-      /视频号的发布流程尚未实现/u,
+      /小红书的发布流程尚未实现/u,
     )
+  })
+})
+
+test('the 视频号 adapter reads login state from the platform own redirect', async () => {
+  // Verified live: an unauthenticated visit is redirected to /login.html. That
+  // address is the login signal, so it must win over any selector — the login
+  // page also renders 登录视频号助手 text.
+  const page = {
+    async goto() { return { status: () => 200 } },
+    async waitForTimeout() {},
+    url: () => 'https://channels.weixin.qq.com/login.html',
+    locator() { return { first: () => ({ async count() { return 0 }, async isVisible() { return false }, async waitFor() {} }) } },
+  }
+  assert.equal(await wechatAdapter.isLoggedIn(page), false)
+
+  // Staying off the login document is the positive half of the same check.
+  const signedIn = { ...page, url: () => 'https://channels.weixin.qq.com/platform' }
+  assert.equal(await wechatAdapter.isLoggedIn(signedIn), true)
+})
+
+test('the 视频号 short title drops punctuation the editor rejects', async () => {
+  // The live editor refuses to submit and prints a red message when 短标题
+  // contains punctuation outside 书名号/引号/冒号/加号/问号/百分号/摄氏度.
+  // The production title ends in a comma, and the 10-char cut can expose a
+  // dangling bracket, so both have to be cleaned before it is typed in.
+  const { text } = sanitizeShortTitle('教出孙悟空的那个人，为什么不准他提自己的名字')
+  assert.equal(text.includes('，'), false)
+  assert.ok(text.length <= 10)
+  assert.ok(text.includes('教出孙悟空'))
+
+  assert.equal(sanitizeShortTitle('《西游记》解读').text, '《西游记》解读')
+  assert.equal(sanitizeShortTitle('教出孙悟空的那个人，').text, '教出孙悟空的那个人')
+  assert.equal(sanitizeShortTitle('看懂这一点').text, '看懂这一点')
+
+  // 2026-10-11：视频号短标题不收「，」——实测整串标题里的中文逗号被砍。
+  // 它既然连中文逗号都不收，英文引号 / 问号 / 百分号 / 加号 / 冒号 / 连字符
+  // 这些「特殊符号」同样会被平台拒绝或影响展示，只留书名号与引号类。
+  const stripped = sanitizeShortTitle('AI工具"实测"：三个技巧+50%效率')
+  for (const ch of ['"', '：', '+', '%']) assert.equal(stripped.text.includes(ch), false, `${ch} 不该留在短标题里`)
+  assert.equal(sanitizeShortTitle('100%的冷门').text, '100的冷门')
+  assert.equal(sanitizeShortTitle('GPT-6到底强不强？').text, 'GPT6到底强不强')
+
+  // 换行/制表符先压成空格再收敛：直接砍掉会让「带\n换行」拼成「带换行」，
+  // 字面读得通但语义全错，比砍掉更糟。
+  assert.equal(sanitizeShortTitle('带\n换行和\t制表符的标题').text, '带 换行和 制表符的')
+
+  // 10 字截断可能把成对引号切成半个（「「出海」指南2026」那个孤立的「）。
+  const long = sanitizeShortTitle('「这是一段很长的标题需要被截断处理」')
+  assert.ok(long.text.length <= 10, `不得超过 10 字：${long.text}`)
+  assert.ok(!long.text.endsWith('「') && !long.text.endsWith('《'), `不得以孤立的开引号结尾：${long.text}`)
+  assert.equal(sanitizeShortTitle('看懂这一点').text, '看懂这一点')
+})
+
+test('the 视频号 adapter folds body and tags into one capped description', async () => {
+  // The title has its own field, so it must not be repeated into 描述.
+  const long = 'x'.repeat(1500)
+  const description = composeDescription({ title: '标题', description: long, tags: ['a', '#b', ''] })
+  assert.ok(description.includes('#a'))
+  assert.ok(description.includes('#b'))
+  assert.ok(description.length <= 1000)
+  assert.ok(description.startsWith('x'))
+})
+
+test('every platform with an adapter is reported as adapter-ready', async () => {
+  // The account page gates 刷新状态 and the publish pickers on adapterReady,
+  // so this flag is what makes a platform actually usable end to end. Assert it
+  // through the host's own listAccounts, which is the value the UI reads.
+  await withStore(async (store) => {
+    const host = new PublisherHost({ store, browser: stubBrowser(), workspacePath: store.workspacePath })
+    for (const platform of ADAPTER_PLATFORMS) {
+      const account = await store.createAccount({ platform, label: platform })
+      const [listed] = (await host.listAccounts()).filter((item) => item.id === account.id)
+      assert.equal(listed.adapterReady, true, `${platform} 的账号应标记为适配器就绪`)
+    }
   })
 })
 
@@ -422,6 +498,52 @@ test('douyin surfaces a cover problem the platform flagged, instead of claiming 
 
 
 
+
+test('a task waiting for the user is never reaped by the idle timer', async () => {
+  // 2026-10-13 用户反馈：「在等待确认发布页停留久了，网页会自动关闭」。真因是
+  // idleTimeoutMs 默认 10 分钟且无交互就回收 —— 而「等待确认」这一档恰恰要用户
+  // 慢慢填、随时点提交，10 分钟远不够。
+  //
+  // 这里不真开 Chrome：只验计时器逻辑。session 是构造出来的假对象，
+  // 只要求 pool 认得它、并按 hold/release 正确挂/撤计时器。
+  const pool = new PublisherBrowserPool({ dataRoot: join(tmpdir(), 'lwb-hold-test'), idleTimeoutMs: 50 })
+  const session = {
+    accountId: 'acct-1',
+    lastUsedAt: Date.now(),
+    timer: null,
+    held: false,
+    context: { __closed: false, pages: () => [], close: async () => { session.context.__closed = true } },
+  }
+  pool.sessions.set('acct-1', session)
+
+  // 先跑一次 touch 让计时器真的挂上，再 hold 掉它。
+  pool.touch('acct-1')
+  assert.ok(session.timer, '没有 hold 时应当挂着空闲回收计时器')
+
+  assert.equal(pool.hold('acct-1'), true)
+  assert.equal(session.timer, null, 'hold 后必须解除空闲回收，否则用户的页面会被关掉')
+  assert.equal(session.held, true)
+
+  assert.equal(pool.release('acct-1'), true)
+  assert.ok(session.timer, 'release 后应当重新排上空闲回收')
+  assert.equal(session.held, false)
+
+  clearTimeout(session.timer)
+})
+
+test('douyin uploads the portrait cover before the landscape one', () => {
+  // 2026-10-11 用户实测发现：先传横封面、再传竖封面时，横封面会跟着竖封面变换，
+  // 结果横槽里装的不是我们传的那张图。所以顺序本身就是修复的一部分。
+  // （这跟之前「竖槽里装的是横图」是同一片区域的另一个 bug，两者互相独立：
+  //  那次是点错了方块导致两轮都传横图，这次是上传先后顺序导致横图被改写。）
+  const boxes = { portrait: { x: 300, y: 500 }, landscape: { x: 100, y: 500 } }
+  const kinds = coverUploadPlan(boxes).map(([kind]) => kind)
+  assert.deepEqual(kinds, ['portrait', 'landscape'], '竖封面必须先于横封面上传')
+  // 坐标不能因为调换顺序而错位：每行要带着自己那个方块的坐标。
+  const plan = coverUploadPlan(boxes)
+  assert.equal(plan[0][2], boxes.portrait, '竖那行必须用竖方块坐标')
+  assert.equal(plan[1][2], boxes.landscape, '横那行必须用横方块坐标')
+})
 
 test('douyin warns when a cover is wildly off the slot ratio, before uploading it', () => {
   // 实测：比例明显不符的平台会直接判「封面不任」，而那种失败在发布记录里看不出

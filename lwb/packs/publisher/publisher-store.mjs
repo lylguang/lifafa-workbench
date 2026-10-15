@@ -23,7 +23,7 @@ export const PLATFORM_LABELS = Object.freeze({
   kuaishou: '快手',
 })
 /** Platforms whose publish flow is implemented by an adapter in this pack. */
-export const ADAPTER_PLATFORMS = Object.freeze(['douyin', 'bilibili', 'kuaishou'])
+export const ADAPTER_PLATFORMS = Object.freeze(['douyin', 'bilibili', 'kuaishou', 'wechat'])
 
 export const ACCOUNT_STATES = Object.freeze(['active', 'expired'])
 export const JOB_STATUSES = Object.freeze(['queued', 'running', 'awaiting-confirm', 'succeeded', 'failed', 'cancelled'])

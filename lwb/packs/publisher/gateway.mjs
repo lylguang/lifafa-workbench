@@ -36,6 +36,9 @@ export class PublisherGateway extends TypertRemoteService {
   listJobs() { return this.ctx.publisherHost.listJobs() }
   job(request) { return this.ctx.publisherHost.job(request.jobId) }
   cancelJob(request) { return this.ctx.publisherHost.cancelJob(request.jobId) }
+  // 用户在平台页面点完「发表」后回执：这一档本来没有任何回读逻辑，任务会永远
+  // 停在「待确认」（2026-10-13 反馈）。
+  confirmSubmitted(request) { return this.ctx.publisherHost.confirmSubmitted(request.jobId, { remoteUrl: request.remoteUrl }) }
   evidence(request) { return this.ctx.publisherHost.evidence(request) }
   settings() { return this.ctx.publisherHost.store.settings() }
   updateSettings(request) { return this.ctx.publisherHost.store.updateSettings(request) }
@@ -44,7 +47,7 @@ export class PublisherGateway extends TypertRemoteService {
 for (const method of [
   'status', 'listAccounts', 'createAccount', 'updateAccount', 'deleteAccount',
   'startLogin', 'confirmLogin', 'checkAccount', 'closeSession',
-  'listShelf', 'startPublish', 'listJobs', 'job', 'cancelJob', 'evidence',
+  'listShelf', 'startPublish', 'listJobs', 'job', 'cancelJob', 'confirmSubmitted', 'evidence',
   'settings', 'updateSettings',
 ]) {
   decorateRemote(PublisherGateway.prototype, method, method)

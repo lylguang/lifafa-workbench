@@ -10,11 +10,13 @@ import { PublisherBrowserError } from './publisher-browser.mjs'
 import douyinAdapter from './publisher-adapter-douyin.mjs'
 import bilibiliAdapter from './publisher-adapter-bilibili.mjs'
 import kuaishouAdapter from './publisher-adapter-kuaishou.mjs'
+import wechatAdapter from './publisher-adapter-wechat.mjs'
 
 const ADAPTERS = new Map([
   [douyinAdapter.id, douyinAdapter],
   [bilibiliAdapter.id, bilibiliAdapter],
   [kuaishouAdapter.id, kuaishouAdapter],
+  [wechatAdapter.id, wechatAdapter],
 ])
 
 function fail(code, message) {
@@ -367,6 +369,33 @@ export class PublisherHost {
     return { ...job, platformLabel: platformLabel(job.platform), cancellable: ['queued', 'running', 'awaiting-confirm'].includes(job.status) }
   }
 
+  /**
+   * 用户在平台页面点完「发表」后回来自认。
+   *
+   * 2026-10-13 反馈：点完发表，卡片还一直显示「待确认」。真因是这一档之后**本来
+   * 就没有任何回读逻辑** —— 自动化不知道平台那边已经提交，只能一直停在原地，
+   * 于是任务永远不会自己走到 succeeded（PHASE_FLOW 里的 submit/verify 两步没有
+   * 任何代码会推进）。这里给一个人工回执入口，把状态收尾。
+   *
+   * 不关浏览器：用户可能还要在那个窗口里做别的事，只解除 hold 让它重新按空闲计时。
+   */
+  async confirmSubmitted(id, request = {}) {
+    const job = await this.store.getJob(id)
+    if (job.status !== 'awaiting-confirm') fail('PUBLISHER_JOB_NOT_CONFIRMABLE', '该任务当前不处于等待确认状态。')
+    const remoteUrl = String((request && typeof request === 'object' ? request.remoteUrl : '') || '').trim()
+    await this.store.mutateJob(job.id, (item) => {
+      item.status = 'succeeded'
+      item.phase = 'done'
+      item.completedAt = this.now()
+      item.proof.submittedAt = this.now()
+      if (remoteUrl) item.proof.remoteUrl = remoteUrl
+    })
+    // 不关浏览器（用户可能还要用），只解除 hold 让空闲回收重新生效。
+    this.browser.release(job.accountId)
+    this.onLog('publish', '用户已确认发布完成。')
+    return this.job(job.id)
+  }
+
   async cancelJob(id) {
     const job = await this.store.getJob(id)
     if (!['queued', 'running', 'awaiting-confirm'].includes(job.status)) fail('PUBLISHER_JOB_NOT_CANCELLABLE', '该任务已结束，无需取消。')
@@ -432,6 +461,10 @@ export class PublisherHost {
           item.phase = 'awaiting-confirm'
         })
         await this.#capture(account, jobId, 'step-awaiting-confirm')
+        // 停在这里等人点「发表」：暂停浏览器的空闲回收。默认 10 分钟没交互就把
+        // 会话关掉，而这一档恰恰要用户慢慢填、随时提交（2026-10-13 反馈「停留久了
+        // 网页会自动关闭」）。用户点「我已发布」或取消时再 release。
+        this.browser.hold(account.id)
       }
       this.onLog('publish', result.submitted ? '发布已提交。' : '已停在发布前，等待人工确认。')
     } catch (error) {

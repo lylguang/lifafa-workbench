@@ -145,8 +145,35 @@ export class PublisherBrowserPool {
     return session
   }
 
+  /**
+   * 暂停空闲回收：任务停在「等待确认」等人点「发表」时必须调这个。
+   *
+   * 2026-10-13 用户反馈「在等待确认发布页停留久了，网页会自动关闭」—— 真因是
+   * idleTimeoutMs 默认 10 分钟且没有任何交互就回收，而这一档恰恰要用户慢慢填、
+   * 随时点提交，10 分钟远不够。停在这里等用户的浏览器不能被回收。
+   */
+  hold(accountId) {
+    const session = this.sessions.get(accountId)
+    if (!session) return false
+    clearTimeout(session.timer)
+    session.timer = null
+    session.held = true
+    return true
+  }
+
+  /** 解除 hold：不再等人工后重新按空闲计时（取消/失败/确认完成时调用）。 */
+  release(accountId) {
+    const session = this.sessions.get(accountId)
+    if (!session) return false
+    session.held = false
+    this.#armIdleTimer(accountId, session)
+    return true
+  }
+
   #armIdleTimer(accountId, session) {
     if (this.idleTimeoutMs <= 0) return
+    // hold 期间不排空闲回收：正在等用户操作的会话不能被关掉。
+    if (session.held) return
     clearTimeout(session.timer)
     session.timer = setTimeout(() => { void this.close(accountId) }, this.idleTimeoutMs)
     if (typeof session.timer.unref === 'function') session.timer.unref()
