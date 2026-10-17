@@ -51,7 +51,7 @@ export function validateSrt(srt) {
 const DISPLAY_LIMIT = { landscape: 56, portrait: 44 }
 
 /** 一条 cue 里的字数（不计空白），与质检口径一致。 */
-function cueChars(text) {
+export function cueChars(text) {
   return (String(text || '').match(/[^\s]/gu) || []).length
 }
 

@@ -180,3 +180,40 @@ test('summarizeScriptInput describes mode, tier and basis', () => {
   )
   assert.equal(summary, '新起稿 · 中篇 · 2 条信号依据')
 })
+
+test('normalizeDraft strips a leading hook annotation line but keeps plain prose', () => {
+  // 标注头独立成行：整行剥掉，正文保留
+  const annotated = normalizeDraft({ script: '钩子=scene-drop 触发点=fear-cost\n一家女装店倒闭了，老板娘却在门口贴了张红纸。' })
+  assert.equal(annotated.usable, true)
+  assert.equal(annotated.draft.script, '一家女装店倒闭了，老板娘却在门口贴了张红纸。')
+
+  // 行内前缀残留：只剥前缀
+  const inline = normalizeDraft({ script: '钩子=scene-drop 一家女装店倒闭了。' })
+  assert.equal(inline.draft.script, '一家女装店倒闭了。')
+
+  // 正文不带任何标注：原样保留（2026-10-16 僵死事故的触发形态）
+  const plain = normalizeDraft({ script: '一家女装店倒闭了，老板娘却在门口贴了张红纸。' })
+  assert.equal(plain.draft.script, '一家女装店倒闭了，老板娘却在门口贴了张红纸。')
+
+  // 中间出现的「钩子=」不动——那可能是真内容
+  const middle = normalizeDraft({ script: '她讲起钩子=招式的来历，没人笑。' })
+  assert.equal(middle.draft.script, '她讲起钩子=招式的来历，没人笑。')
+
+  // 剥完只剩空白：回退原文（与既有行为一致，不让正文变空）
+  const onlyAnnotation = normalizeDraft({ script: '钩子=scene-drop\n' })
+  assert.equal(onlyAnnotation.usable, true)
+  assert.equal(onlyAnnotation.draft.script, '钩子=scene-drop')
+})
+
+test('stripHookAnnotation stays linear on long unannotated prose', () => {
+  // 2026-10-16 僵死事故的回归锁：初版正则带 (?:[\s\S]{0,2})* 前缀，
+  // 正文不带标注时灾难性回溯，几千字稿件冻结事件循环数小时。
+  // 线性实现下近 3 万字必须毫秒级返回。
+  // 2.86 万字 < BODY_MAX(30000)，不触发截断
+  const body = '一家女装店倒闭了，老板娘却在门口贴了张红纸。'.repeat(1300)
+  const startedAt = process.hrtime.bigint()
+  const result = normalizeDraft({ script: body })
+  const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6
+  assert.equal(result.draft.script, body)
+  assert.ok(elapsedMs < 1000, `stripHookAnnotation 耗时 ${elapsedMs.toFixed(0)}ms，疑似回溯失控`)
+})

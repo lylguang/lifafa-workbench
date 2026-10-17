@@ -79,8 +79,20 @@ export function alreadyQueued(entries, { scheduleId, trigger, slotKey }) {
  *   that is the idempotence the thirty second tick depends on.
  */
 export function enqueue(entries, request, now = new Date().toISOString()) {
-  const slotKey = request.slotKey || null
-  if (alreadyQueued(entries, { scheduleId: request.scheduleId, trigger: request.trigger, slotKey })) return null
+  // 续跑条目的身份是 resumeRunId 而不是 scheduleId+trigger：同一条轮次可能被
+  // 中断多次，每次都该能重新入队。若沿用 alreadyQueued（无 slotKey 时只按
+  // scheduleId+trigger 匹配），队列里一条早已 done 的历史续跑条目就会永久
+  // 挡死该计划后续所有续跑——2026-10-16 实测：早7点两轮 interrupted 整整
+  // 一天无人接手，tick 每 30 秒想入队一次、每次被这条去重吞掉。
+  if (request.trigger === 'resume' && request.resumeRunId) {
+    const inFlight = entries.some((entry) => entry.trigger === 'resume'
+      && entry.resumeRunId === request.resumeRunId
+      && (entry.status === 'waiting' || entry.status === 'active'))
+    if (inFlight) return null
+  } else {
+    const slotKey = request.slotKey || null
+    if (alreadyQueued(entries, { scheduleId: request.scheduleId, trigger: request.trigger, slotKey })) return null
+  }
   const entry = queueEntry({
     ...request,
     status: 'waiting',

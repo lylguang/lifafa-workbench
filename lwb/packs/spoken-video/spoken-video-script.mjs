@@ -549,16 +549,27 @@ function cleanText(value, max) {
  * 防御性剥离：模型偶尔会把「钩子=xxx 触发点=xxx」这类内部标注写进正文开头
  * （prompt 要求进 factCheckItems，但不总是听话），配音会把它逐字念出来。
  * 只剥正文最前面的标注行/标注前缀，正文中间出现的不动——那可能是真内容。
+ *
+ * 全程线性扫描、无嵌套量词。2026-10-16 实测教训：初版用
+ * `(?:[\s\S]{0,2})*` 前缀正则去匹配「开头标注行」，正文不带标注时引擎
+ * 要穷举前缀的所有切分方式，几千字稿件直接把事件循环冻结数小时
+ * （进程端口还在、CPU 单核打满、HTTP 永不响应，且阻塞保活自愈）。
  */
 function stripHookAnnotation(body) {
-  let text = body
-  // 开头独立标注行：「钩子=scene-drop 触发点=fear-cost」
-  const head = text.match(/^(?:[\s\S]{0,2})*((?:钩子|触发点)\s*=\s*[\w-]+(?:\s+(?:钩子|触发点)\s*=\s*[\w-]+)*)\s*\n+/u)
-  if (head && head.index === 0 && text.slice(head[0].length).trim()) text = text.slice(head[0].length)
-  // 行内前缀残留：「钩子=x 触发点=y 一家女装店……」
-  text = text.replace(/^(?:钩子|触发点)\s*=\s*[\w-]+\s*/u, (match, offset) => (offset === 0 ? '' : match))
-  text = text.replace(/^(?:钩子|触发点)\s*=\s*[\w-]+\s*/u, '')
-  return text.trim() ? text : body
+  const text = String(body || '')
+  const head = headHookAnnotation(text)
+  const stripped = head ? text.slice(head.length).replace(/^\s*\n+/, '') : text
+  // 行内前缀残留：「钩子=x 触发点=y 一家女装店……」（连续剥两段）
+  const inline = stripped.replace(/^(?:钩子|触发点)\s*=\s*[\w-]+\s+/u, '').replace(/^(?:钩子|触发点)\s*=\s*[\w-]+\s*/u, '')
+  return inline.trim() ? inline : body
+}
+
+/** 只在正文最前面找一整行标注；找到返回该行原文，否则返回空串。 */
+function headHookAnnotation(text) {
+  const pattern = /^(?:钩子|触发点)\s*=\s*[\w-]+(?:\s+(?:钩子|触发点)\s*=\s*[\w-]+)*[^\S\n]*\n/
+  const match = text.match(pattern)
+  // 必须真是一整行标注（后面还有正文）；「钩子=x」单独成篇不算标注头。
+  return match && text.slice(match.index + match[0].length).trim() ? match[0] : ''
 }
 
 function cleanList(value, maxItems, maxChars) {

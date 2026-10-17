@@ -39,7 +39,7 @@ import {
   remotionRendererAvailable,
   renderSpokenVideoAgentProject,
 } from './spoken-video-remotion.mjs'
-import { splitLongCues, validateSrt } from './spoken-video-subtitles.mjs'
+import { cueChars, splitLongCues, validateSrt } from './spoken-video-subtitles.mjs'
 import { buildVideoCreatorPrompt, buildVideoCreatorRepairPrompt, buildVideoEditorialRepairPrompt, buildVideoReviewerPrompt, normalizeVideoReview, VIDEO_REVIEW_SCHEMA } from './spoken-video-video-agent.mjs'
 
 const execFilePromise = promisify(execFile)
@@ -1098,6 +1098,11 @@ function portableRelative(root, file) {
  * 项目命中 3/5），详见该文件头注。
  */
 export { parseSceneSpans } from './spoken-video-scene-table.mjs'
+// 本模块内部也要用（审片抽帧读场景表）。re-export 只是把别的模块的绑定再转出，
+// 并不会把名字引入本模块作用域——裸用会 ReferenceError。2026-10-17 实测：这个
+// ReferenceError 被 .catch(() => []) 吞掉后，场景对齐抽帧自 2026-10-15 统一实现起
+// 从未生效过，三个 attempt 全部落入盲选、审片永远看到入场动画期的半成品帧。
+import { parseSceneSpans as parseSceneTable } from './spoken-video-scene-table.mjs'
 
 /**
  * 审片抽帧的保底数量。
@@ -4166,7 +4171,10 @@ export class SpokenVideoMediaHost {
     if (!inspected.passed) fail('SPOKEN_VIDEO_VIDEO_AGENT_INVALID', `视频 Agent 产物未通过渲染前检查：${inspected.failures.join(' ')}`)
 
     const subtitleDisplayLimit = orientation === 'landscape' ? 56 : 44
-    const subtitleLengths = cues.map((cue) => Array.from(cue.text).length)
+    // 字数口径必须与 splitLongCues 的 cueChars 一致（不计空白）：2026-10-17 晚报实测，
+    // 一条「含数字时间」的字幕按 Array.from 计 66、按 cueChars 计 55——拆分方认为
+    // 合规不拆，质检方认为超限判死，整轮白跑且无法自愈。
+    const subtitleLengths = cues.map((cue) => cueChars(cue.text))
     const maxSubtitleChars = subtitleLengths.length ? Math.max(...subtitleLengths) : 0
     const longSubtitleCount = subtitleLengths.filter((length) => length > subtitleDisplayLimit).length
     const subtitleIssues = subtitleEnabled && longSubtitleCount ? [`${longSubtitleCount} 条字幕超过 ${subtitleDisplayLimit} 字的双行可读上限。`] : []
@@ -4198,9 +4206,28 @@ export class SpokenVideoMediaHost {
       // 「内容没画出来」这类并不存在的缺陷，然后要求导演去修——2026-10-10 统计的
       // 5 个审片失败案例全部由此而来（6 帧里 4 帧撞动画期，修复上限只有 2 轮）。
       // 读不到就退回盲选，不因此阻断流水线。
-      const sceneSpans = await readFile(join(workspace.projectDir, 'src', 'CreativeVideo.tsx'), 'utf8')
-        .then((source) => parseSceneSpans(source))
-        .catch(() => [])
+      //
+      // 2026-10-17 实测教训：这个 catch(() => []) 会把「读场景表失败」变成无声降级。
+      // 晚报一轮成片三个 attempt 全部落进 fallback 盲选（抽帧点精确命中 3%/11%/20%…因子），
+      // 其中 4 帧落在场景入场动画期（1%/7%/11% 相位），审片看到的都是「60% 时刻仍是
+      // 半成品」，2 轮定向修复必然失败——而日志里没有任何一条线索指向这里。Windows 下
+      // creator 子会话写完 tsx 与渲染进程读它之间只有几秒，EBUSY/EPERM（见 atomic-write
+      // EPERM 记忆）足以触发一次 readFile 失败。修复：重试 3 次（200ms 退避），仍失败
+      // 就写一条 run event 让操作者看得见「本轮抽帧退回了盲选」，不再无声。
+      const sceneTablePath = join(workspace.projectDir, 'src', 'CreativeVideo.tsx')
+      let sceneSpans = []
+      for (let readAttempt = 1; readAttempt <= 3; readAttempt += 1) {
+        try {
+          sceneSpans = parseSceneTable(await readFile(sceneTablePath, 'utf8'))
+          break
+        } catch (error) {
+          if (readAttempt === 3) {
+            await this.#runEvent(root, run.id, '审片抽帧退回盲选', `读取场景表失败（已重试 3 次）：${String(error?.message || error).slice(0, 200)}。本轮抽帧将不按场景对齐，审片结论请结合入场动画期甄别。`).catch(() => {})
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 200 * readAttempt)).catch(() => {})
+          }
+        }
+      }
       const sampled = await extractVideoReviewFrames(renderedPath, reviewFramesDir, videoProbe.durationSeconds || durationSeconds, this.signal, sceneSpans)
       const contactSheet = await renderVideoContactSheet(renderedPath, reviewFramesDir, videoProbe.durationSeconds || durationSeconds, this.signal)
       const variation = await measureVisualVariation(sampled.frameFiles, orientation, videoProbe.durationSeconds || durationSeconds, this.signal)

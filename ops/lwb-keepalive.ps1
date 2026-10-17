@@ -58,13 +58,23 @@ if (-not $repoRoot) { throw '保活脚本 无法定位仓库根：请设置 LWB_
 $stateDir = if ($env:LWB_STATE_DIR) { $env:LWB_STATE_DIR } else { 'E:\lifa-scratch' }
 $offSwitch = Join-Path $stateDir 'lwb-keepalive.off'
 
-$desktop = if ($env:LWB_DESKTOP) { $env:LWB_DESKTOP } else { Join-Path $env:USERPROFILE 'Desktop' }
-$workbenchDir = Join-Path $desktop 'lifafa-workbench-main'
+# 工作台目录必须从 $repoRoot 推导——它有四层带验证的解析（env → lwb-repo.txt →
+# 向上探测 → 逐盘验证）。2026-10-16 实测教训：早先版本用「桌面 + lifafa-workbench-main」
+# 硬拼，而这台机器的仓库在 桌面\李发发工作台\ 子目录下，拼出来的 C 盘路径不存在，
+# 拉起分支从 10-09 起 15 次全部「启动脚本不存在」静默失败，还留下十几个僵死 cmd。
+$workbenchDir = Join-Path $repoRoot 'lifafa-workbench-main'
+if (-not (Test-Path (Join-Path $workbenchDir '启动工作台.cmd'))) {
+  # repoRoot 直接就是工作台目录的部署形态（repoRoot 下即脚本）也算数。
+  if (Test-Path (Join-Path $repoRoot '启动工作台.cmd')) { $workbenchDir = $repoRoot }
+  else { $workbenchDir = $null }
+}
 # 桥接源码在仓库内（media-bridge/）。运行副本就是仓库那份——两份拷贝迟早不一致，
 # 而不一致的那份不会出现在 git 历史里，出问题时无从追溯。
 # config.json / data / voices 也在那儿，由 media-bridge/.gitignore 挡住密钥与产物。
 $bridgeDir = if ($env:LWB_BRIDGE_DIR) { $env:LWB_BRIDGE_DIR } else { Join-Path $repoRoot 'media-bridge' }
-$startWorkbench = Join-Path $workbenchDir '启动工作台.cmd'
+# $workbenchDir 为 null（两种部署形态都没找到脚本）时保持 null，拉起分支的
+# Test-Path 会自然走「启动脚本不存在」告警，绝不能拼出一个假路径假装能拉。
+$startWorkbench = if ($workbenchDir) { Join-Path $workbenchDir '启动工作台.cmd' } else { $null }
 
 $logFile = $stateDir + '\lwb-keepalive.log'
 
@@ -194,6 +204,12 @@ if (-not (Test-Alive 'http://127.0.0.1:8199/health')) {
 # 现在读到 running / interrupted 的 run 就推迟重启——工作台重启本来就会杀掉
 # 执行身份和子进程，而这些轮次在重启后已经能从断点自动续跑（interrupted），
 # 所以这个窗口内让任务自己接上比强杀更划算。
+#
+# 2026-10-16 实测教训：interrupted（主机重启后待续跑）也被算进「忙」，结果工作台
+# 僵死后它的调度器再也无法上线去续跑这些轮次，保活看到 interrupted 就永远不拉起
+# 工作台——自愈通道被自己锁死，整整一上午无人恢复。interrupted 的恢复前提恰恰是
+# 工作台在线，所以它不算忙。唯一要防的是「真主机刚重启完、工作台还在启动途中」
+# 这几分钟：给 interruptedAt 落地后 10 分钟的宽限期，期内仍按忙处理。
 function Test-ScheduleBusy {
   $root = $env:LWB_SPOKEN_VIDEO_WORKSPACE
   if (-not $root) { return $false }
@@ -205,9 +221,19 @@ function Test-ScheduleBusy {
     # 读不到多半是写盘窗口（原子 rename 落地前），下一轮再看。
     return $false
   }
-  $live = @($doc.runs | Where-Object { $_.status -eq 'running' -or $_.status -eq 'interrupted' })
-  if ($live.Count -gt 0) {
-    Write-Log ('检测到 {0} 轮自动化在执行或待续跑，推迟工作台重启' -f $live.Count)
+  $running = @($doc.runs | Where-Object { $_.status -eq 'running' })
+  if ($running.Count -gt 0) {
+    Write-Log ('检测到 {0} 轮自动化在执行，推迟工作台重启' -f $running.Count)
+    return $true
+  }
+  # interrupted：只认 10 分钟内新中断的；更早的说明等续跑已等了一段时间，
+  # 工作台必须先回来它们才有机会续跑，不能反过来阻塞拉起。
+  $recent = @($doc.runs | Where-Object {
+    $_.status -eq 'interrupted' -and $_.interruptedAt -and
+    ((Get-Date) - [datetime]$_.interruptedAt).TotalMinutes -lt 10
+  })
+  if ($recent.Count -gt 0) {
+    Write-Log ('检测到 {0} 轮自动化在 10 分钟内被中断，推迟工作台重启' -f $recent.Count)
     return $true
   }
   return $false

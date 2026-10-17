@@ -1687,7 +1687,8 @@ test('runs the DSH Remotion creator, deterministic QC, and independent reviewer 
   assert.equal(rendered.artifacts.video.data.backgroundMusic.name, '测试背景音乐.wav')
   assert.equal(rendered.artifacts.video.data.bgmVolume, 0.16)
   assert.equal(rendered.artifacts.qc.data.passed, true)
-  assert.equal(rendered.artifacts.qc.data.technical.subtitles.maxTextChars, 14)
+  // 字数口径 = cueChars（不计空白），与 splitLongCues 拆分口径一致（2026-10-17 起）
+  assert.equal(rendered.artifacts.qc.data.technical.subtitles.maxTextChars, 13)
   assert.equal(rendered.artifacts.qc.data.technical.subtitles.displayLimit, 56)
   assert.equal(rendered.artifacts.qc.data.technical.subtitles.longCueCount, 0)
   assert.equal(rendered.artifacts.qc.data.review.score, 88)

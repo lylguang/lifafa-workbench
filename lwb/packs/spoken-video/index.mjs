@@ -126,6 +126,35 @@ function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinua
         const detail = result.diagnostic ? `：${result.diagnostic}` : ''
         throw new Error(`生成未正常结束（${result.stopReason}）${detail}`)
       }
+      // structured 轮次正常结束但从未调 structured_output：模型偶尔会直接用一段
+      // 短文本收尾（2026-10-17 晚报实测：turn 正常 completed、文本仅百余 token、
+      // 无任何工具调用），in-process-driver 会把这种结果降级成 stopReason='error'
+      // 且不带 diagnostic——报错只有「生成未正常结束（error）」，且此前一次机会
+      // 都不重试。这里在判定之前给一次同会话补交的机会：followup 提醒模型必须
+      // 走 structured_output 提交，成功则照常返回。
+      if (structured && result.structured === undefined) {
+        const child = run.localAgent
+        if (child?.followup && child?.whenIdle) {
+          await onDshContinuation?.({
+            childSessionId: String(childSessionId),
+            attempt: continuationCount + 1,
+            maximum: 1,
+            label: '模型未提交结构化结果，要求补交',
+          }).catch(() => {})
+          child.followup(createUserMessage({
+            content: [{ type: 'text', text: '你的上一轮回答是普通文本，没有调用 structured_output 工具提交结果。请严格按任务要求重新产出完整结果，并必须通过 structured_output 工具提交（参数须完全符合给定 schema）。不要输出任何普通文本作为最终答案。' }],
+            source: { kind: 'plugin', plugin: 'spoken-video-video-creator' },
+          }))
+          await child.whenIdle()
+          await traceTail
+          runSignal.throwIfAborted()
+          const followup = await run.result
+          if (followup.structured !== undefined) result = followup
+        }
+      }
+      if (structured && result.structured === undefined) {
+        throw new Error('生成未正常结束（error）：模型未通过 structured_output 提交结果（已重试一次）。')
+      }
       // The driver keeps the published local child alive until dispose(). A repair
       // is another turn in that same session, after the first result has settled.
       if (!structured && validate) {

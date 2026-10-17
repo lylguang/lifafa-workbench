@@ -99,7 +99,7 @@ rem a new machine profile) can be pointed at the right URL without digging throu
 rem this console window. 双击「打开工作台.cmd」即可用它。
 rem Same scratch root as 设置渲染暂存盘.ps1 chose -- 「打开工作台.ps1」 looks there too.
 set "LWB_ACCESS_URL_FILE=%LWB_SCRATCH_ROOT%\workbench-url.txt"
-if not exist "%LWB_ACCESS_URL_FILE%" mkdir "%LWB_ACCESS_URL_FILE%" 2>NUL
+if not exist "%LWB_SCRATCH_ROOT%" mkdir "%LWB_SCRATCH_ROOT%" & rmdir "%LWB_ACCESS_URL_FILE%" >NUL 2>&1 2>NUL
 if exist "%LWB_ACCESS_URL_FILE%" del "%LWB_ACCESS_URL_FILE%"
 
 rem 模型下载镜像：huggingface.co 在国内多数网络下连不通（2026-10-08 实测超时），

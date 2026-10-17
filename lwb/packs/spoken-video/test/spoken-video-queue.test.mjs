@@ -105,3 +105,48 @@ test('a malformed queue row is normalized rather than crashing the read', () => 
   assert.equal(entry.status, 'waiting')
   assert.equal(entry.trigger, 'automatic')
 })
+test('a resume can be re-enqueued after a previous resume entry already finished', () => {
+  // 2026-10-16 实测回归锁：同一轮被中断多次时，每次都必须能重新入队。
+  // 旧去重按 scheduleId+trigger 匹配且 resume 条目没有 slotKey，队列里一条
+  // 早已 done 的历史续跑条目把后续所有续跑永久挡死——早7点两轮 interrupted
+  // 整整一天无人接手。
+  let entries = enqueue(emptyQueueFile().entries, request({
+    trigger: 'resume',
+    resumeRunId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    slotKey: null,
+  }), '2026-10-16T00:09:45.000Z')
+  assert.equal(entries[0].status, 'waiting')
+  // 模拟这条续跑已被取走并完成（真正的宿主会把它落成 done）
+  entries = entries.map((entry) => queueEntry({ ...entry, status: 'done', finishedAt: '2026-10-16T00:10:00.000Z' }))
+  // 同一条轮次再次中断后再次入队：绝不能被历史 done 条目挡住
+  const again = enqueue(entries, request({
+    trigger: 'resume',
+    resumeRunId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    slotKey: null,
+  }), '2026-10-16T12:00:00.000Z')
+  assert.ok(again, '再次续跑必须能入队')
+  assert.equal(again[0].status, 'waiting')
+  // 但同一条轮次已在排队/执行中时不重复入队
+  const waiting = enqueue(again, request({
+    trigger: 'resume',
+    resumeRunId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    slotKey: null,
+  }), '2026-10-16T12:00:30.000Z')
+  assert.equal(waiting, null)
+})
+
+test('a done resume entry for another run of the same schedule does not block a new resume', () => {
+  // 同一计划的两条不同轮次：第一条的 done 续跑条目不能挡第二条。
+  const entries = enqueue(emptyQueueFile().entries, request({
+    trigger: 'resume',
+    resumeRunId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    slotKey: null,
+  }), '2026-10-16T00:09:45.000Z')
+  const settled = entries.map((entry) => queueEntry({ ...entry, status: 'done' }))
+  const next = enqueue(settled, request({
+    trigger: 'resume',
+    resumeRunId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+    slotKey: null,
+  }), '2026-10-16T01:00:00.000Z')
+  assert.ok(next, '不同轮次的续跑互不挡')
+})
