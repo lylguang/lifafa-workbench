@@ -421,6 +421,35 @@ export class PublisherHost {
     return { name, bytes: file.bytes, data: file.data.toString('base64') }
   }
 
+  /* ---------------------------- collection seam ---------------------------- */
+
+  /**
+   * 借用某账号已登录的浏览器上下文，供包外（比如数据看板的采集器）执行页面操作。
+   *
+   * 为什么必须经这里借，而不能自己开 Playwright：`chrome-profiles/<accountId>`
+   * 是 Chrome 持久化 profile，**同一时刻只能被一个 Chrome 实例持有**，第二个
+   * 实例打开同一目录会静默挂到错误进程上（见 browser.acquire 的注释）。登录态、
+   * 过期判定、截图证据、频控节奏都只有这一份。
+   *
+   * 责任划分（与已收敛的签名一致）：
+   *  - 超时由本方法持有：默认 120s，`options.timeoutMs` 可调；到期 abort signal
+   *    并强制关掉借出的 page。
+   *  - 释放由本方法持有：`finally` 里必定 busy.delete + touch 重起空闲计时。
+   *    把释放收到内部，是为了让调用方**即使忘记写 finally 也不会泄漏 busy 标记**
+   *    ——那正是「账号永久显示忙」的故障来源。
+   *  - `fn` 只需在 signal 上干活，不负责清理。
+   *
+   * 并发：直接快速失败，不排队。账号正在被占用即抛 ACCOUNT_BUSY（可重试），
+   * 让采集方退避重试，而不是让调用方干等——采集调度本身已按账号串行，撞上说明
+   * 两个 run 并发，快速失败比排队等几分钟更好定位。这里刻意不实现 `waitMs`
+   * 等待：等待期间若已占用账号，会把自己判定成 busy 而死锁。
+   *
+   * @param {string} accountId publisher accounts.json 的 id
+   * @param {(lease: object) => Promise<any>} fn
+   * @param {{timeoutMs?: number, allowExpired?: boolean}} options
+   * @returns {Promise<any>} fn 的返回值原样透传
+   */
+
   /* ------------------------------- internals ------------------------------ */
 
   async #run(account, jobId, { videoPath, coverPaths, signal }) {
@@ -500,6 +529,83 @@ export class PublisherHost {
         if (!item.proof.screenshots.includes(relative)) item.proof.screenshots.push(relative)
       })
       return relative
+    } catch { return null }
+  }
+
+  /**
+   * Lend one account's browser page to a caller in another pack (analytics
+   * collector). The Chrome profile under `chrome-profiles/<accountId>` is locked
+   * to a single instance, so the caller must come in here instead of opening a
+   * second Playwright against the same profile.
+   *
+   * Contract (see 数据看板 §P2 前置):
+   *   - The gate is the existing `this.busy` set. There is deliberately no second
+   *     lock: two gates would drift apart and leak "permanently busy" accounts.
+   *   - Release happens here in `finally`, so a caller that forgets its own
+   *     cleanup still cannot leak the busy mark.
+   *   - The caller never closes the page; this method owns its lifetime.
+   *   - Errors thrown by `fn` pass through byte-for-byte, so the caller keeps
+   *     its own error codes (e.g. ANALYTICS_COLLECTOR_SELECTOR_MISSING).
+   */
+  async withAccountPage(accountId, fn, options = {}) {
+    if (typeof fn !== 'function') fail('PUBLISHER_INVALID_INPUT', '借用任务必须是函数。')
+    const account = await this.store.getAccount(accountId)
+    if (this.busy.has(account.id)) fail('PUBLISHER_ACCOUNT_BUSY', '该账号正在执行其他操作，请稍候。')
+    if (account.status === 'expired' && options.allowExpired !== true) {
+      fail('PUBLISHER_ACCOUNT_EXPIRED', '登录态已过期，请到「发布与账号管理 → 账号」重新扫码登录。')
+    }
+    this.busy.add(account.id)
+    const controller = new AbortController()
+    const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 120_000
+    let borrowed = false
+    let timer = null
+    try {
+      const session = await this.browser.acquire(account, { headless: true })
+      const page = await this.browser.page(session)
+      borrowed = true
+      this.browser.touch(account.id)
+      // The caller drives the page but does not own its lifetime: a page
+      // operation that never settles must not pin this account's session open.
+      const task = Promise.resolve().then(() => fn({
+        accountId: account.id,
+        page,
+        context: session.context,
+        platform: account.platform,
+        status: account.status,
+        signal: controller.signal,
+        evidence: (name) => this.saveCollectionEvidence(account.id, name),
+      }))
+      const guard = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort()
+          reject(new PublisherStoreError('PUBLISHER_ACCOUNT_TIMEOUT', '采集超时，该平台响应过慢。'))
+        }, timeoutMs)
+      })
+      return await Promise.race([task, guard])
+    } finally {
+      if (timer) clearTimeout(timer)
+      // Abort first, then close: closing the borrowed page must be the last word.
+      controller.abort()
+      if (borrowed) await this.browser.close(account.id).catch(() => {})
+      this.busy.delete(account.id)
+    }
+  }
+
+  /**
+   * Screenshot a borrowed page into `collection/<accountId>/`, kept out of the
+   * publish evidence tree (`evidence/<jobId>/`) so the two namespaces cannot
+   * collide or cross-validate each other.
+   */
+  async saveCollectionEvidence(accountId, name) {
+    try {
+      const session = this.browser.sessions.get(accountId)
+      if (!session) return null
+      const page = session.context.pages().find((item) => !item.isClosed())
+      if (!page) return null
+      const bytes = await page.screenshot({ type: 'png', animations: 'disabled' })
+      const safeName = String(name || 'collection').replace(/[^A-Za-z0-9._-]/gu, '-').slice(0, 80)
+      const relative = await this.store.saveCollectionEvidence(accountId, `${safeName}-${Date.now()}.png`, bytes)
+      return { relativePath: relative, mediaType: 'image/png', bytes: bytes.length }
     } catch { return null }
   }
 

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 
 const ACCOUNTS_SCHEMA_VERSION = 1
 const JOBS_SCHEMA_VERSION = 1
@@ -437,6 +437,32 @@ export class PublisherStore {
 
   async readEvidence(relative) {
     const value = text(relative, '证据路径', 400)
+    const absolute = this.root(value)
+    const info = await stat(absolute).catch(() => null)
+    if (!info?.isFile()) fail('PUBLISHER_NOT_FOUND', '证据文件不存在。')
+    return { path: absolute, bytes: info.size, data: await readFile(absolute) }
+  }
+
+  /**
+   * Collector screenshots live under `collection/<collectionId>/`, never under
+   * the publish `evidence/<jobId>/` tree: a collection run is not a job, and
+   * sharing the tree would let one namespace validate the other's files.
+   */
+  async saveCollectionEvidence(collectionId, name, bytes) {
+    const target = identifier(collectionId, '采集标识')
+    const safeName = text(name, '证据文件名', 120).replace(/[^A-Za-z0-9._-]/gu, '-')
+    const relative = join('collection', target, safeName)
+    const absolute = this.root(relative)
+    await mkdir(dirname(absolute), { recursive: true, mode: 0o700 })
+    await writeFile(absolute, bytes, { mode: 0o600 })
+    return relative
+  }
+
+  /** Read one collector screenshot back, refusing paths outside its own run. */
+  async readCollectionEvidence(collectionId, name) {
+    const target = identifier(collectionId, '采集标识')
+    const value = text(name, '证据路径', 400)
+    if (!value.startsWith(`collection${sep}${target}${sep}`)) fail('PUBLISHER_NOT_FOUND', '该证据不属于此采集任务。')
     const absolute = this.root(value)
     const info = await stat(absolute).catch(() => null)
     if (!info?.isFile()) fail('PUBLISHER_NOT_FOUND', '证据文件不存在。')
