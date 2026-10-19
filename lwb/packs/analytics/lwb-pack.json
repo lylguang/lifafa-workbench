@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "id": "analytics",
+  "packageName": "@scitiger-ai/lwb-analytics",
+  "name": "数据看板",
+  "version": "0.1.0",
+  "description": "把各平台的播放、点赞、评论与涨粉汇成一块看板：先看清自己的产能与发布表现，再看作品数据。",
+  "market": {
+    "category": "内容运营",
+    "tags": [
+      "数据看板",
+      "播放数据",
+      "涨粉",
+      "互动率",
+      "产能分析"
+    ],
+    "workflow": [
+      "查看产能与发布表现",
+      "对照账号维度指标",
+      "查看作品表现明细"
+    ],
+    "icon": "数",
+    "introduction": "回答自媒体最常问的三件事：我今天产了多少、发得怎么样、发出去的反响如何。概览页把生产漏斗、发布量与成功率放在最前，作品数据在采集能力上线后逐步补齐。",
+    "workflowHint": "所有指标都标注来源与采集时间，缺失一律显示「—」，不会用 0 冒充未知。",
+    "gettingStarted": [
+      "P1 版本只读本地记录：生产漏斗、发布量、发布成功率，不依赖任何平台登录态。",
+      "平台侧的播放、点赞、评论与涨粉需要后续版本开启采集后才会出现。",
+      "生产漏斗是「当前时点」的存量快照，不随上方的时间范围变化。",
+      "创作数据保存在专属工作区，卸载能力包会保留工作区和数据。"
+    ],
+    "features": [
+      {
+        "menuId": "overview",
+        "title": "概览",
+        "description": "产能漏斗、发布量趋势与账号表现。",
+        "icon": "pack"
+      },
+      {
+        "menuId": "accounts",
+        "title": "账号",
+        "description": "按平台账号对照粉丝、发布量与互动率。",
+        "icon": "profile"
+      },
+      {
+        "menuId": "contents",
+        "title": "作品",
+        "description": "已发布作品的逐条表现明细。",
+        "icon": "signal"
+      }
+    ]
+  },
+  "menus": [
+    { "id": "overview", "label": "概览", "glyph": "览", "tone": "blue" },
+    { "id": "accounts", "label": "账号", "glyph": "号", "tone": "green" },
+    { "id": "contents", "label": "作品", "glyph": "作", "tone": "orange" }
+  ]
+}
