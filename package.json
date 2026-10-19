@@ -32,6 +32,9 @@
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "remotion": "4.0.522",
-    "ws": "8.18.3"
+    "ws": "8.22.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true
   }
 }
