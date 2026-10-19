@@ -200,6 +200,18 @@ export async function removeLwbPack(id) {
   await writeRegistry({ schemaVersion: REGISTRY_SCHEMA_VERSION, packs })
 }
 
+/** Record that an installed pack should be loaded at the next host start. */
+export async function loadLwbPack(id) {
+  const target = text(id, 'LWB pack id', 63)
+  const registry = await readRegistry()
+  const current = registry.packs.find((item) => item.id === target)
+  if (!current) throw new Error(`No installed LWB pack has id ${JSON.stringify(target)}.`)
+  if (current.enabled === true) return current
+  const packs = registry.packs.map((item) => item.id === target ? { ...item, enabled: true } : item)
+  await writeRegistry({ schemaVersion: REGISTRY_SCHEMA_VERSION, packs })
+  return { ...current, enabled: true }
+}
+
 /** Record that a known local package was unloaded without deleting its source or durable data. */
 export async function unloadLwbPack(id) {
   const target = text(id, 'LWB pack id', 63)
@@ -310,7 +322,13 @@ async function main(argv) {
     return
   }
   if (command === 'install' && argument !== undefined) {
-    process.stdout.write(`${JSON.stringify(printablePack(await installLwbPack(argument)), null, 2)}\n`)
+    const pack = await installLwbPack(argument)
+    process.stdout.write(`${JSON.stringify(printablePack(pack), null, 2)}\n`)
+    // 装完默认 enabled:false，宿主不会加载它 —— 不说清楚的话，用户会以为
+    // 「页面不存在」是安装失败，而真相只是没启用。
+    if (pack.enabled !== true) {
+      process.stderr.write(`Installed but not enabled. Run: node lwb/pack-manager.mjs enable ${pack.manifest.id}\n`)
+    }
     return
   }
   if (command === 'remove' && argument !== undefined) {
@@ -318,7 +336,15 @@ async function main(argv) {
     process.stdout.write(`${JSON.stringify({ removed: argument })}\n`)
     return
   }
-  throw new Error('Usage: node lwb/pack-manager.mjs <list | install <directory> | remove <id>>')
+  if (command === 'enable' && argument !== undefined) {
+    process.stdout.write(`${JSON.stringify(printablePack(await loadLwbPack(argument)), null, 2)}\n`)
+    return
+  }
+  if (command === 'disable' && argument !== undefined) {
+    process.stdout.write(`${JSON.stringify(printablePack(await unloadLwbPack(argument)), null, 2)}\n`)
+    return
+  }
+  throw new Error('Usage: node lwb/pack-manager.mjs <list | install <directory> | remove <id> | enable <id> | disable <id>>')
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
