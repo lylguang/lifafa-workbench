@@ -2,9 +2,42 @@
 
 本指南面向首次使用工作台的本机单用户。工作台可以持续接入独立场景能力包；下面以随仓库提供的第一个包“口播视频内容创作”为例。
 
+## 环境要求（装机前置清单）
+
+动手安装前先核对下表。缺项不会在安装时全部暴露，往往在后面的环节才以报错出现，先补前置比排查报错更快。
+
+| 前置 | 要求 | 不满足时的现象 |
+|---|---|---|
+| Node.js | `^22.19.0 || >=24.0.0`，建议 22 LTS 最新补丁版本 | 版本过低时安装即失败或 JSON import 报错 |
+| Git | 终端可直接执行 `git` | `npm run setup` 无法克隆/检出上游 |
+| Corepack | 适配当前 Node 的版本，可用 `npm install -g corepack` 安装 | `setup` 依赖 `corepack pnpm` 构建上游 |
+| C/C++ 编译环境 | Node 原生依赖的编译工具链（macOS 用 `xcode-select --install`） | `npm ci` 或上游构建阶段编译原生模块失败 |
+| FFmpeg | 在**启动工作台的同一终端**里 `ffmpeg -version`、`ffprobe -version` 均可执行 | 配音、视频合成与转码链路不可用 |
+| Python 3（含 pip） | 解释器具备 `opencv-python`、`numpy`、`Pillow` 三个库 | 白板手绘动画（独立的白板包，以及口播视频里的白板画面）依赖它们。系统 Python 已具备时会被直接复用；缺失时可在「渲染」页点「准备环境」建隔离 `.venv`，但国内网络下安装 opencv-python 可能拖几十分钟，建议提前给系统 Python 装好三件套 |
+| Windows 符号链接权限 | 开启「开发者模式」（设置 → 隐私和安全性 → 开发者选项），或用管理员身份运行终端 | npm/pnpm 安装依赖和运行期建链会创建符号链接，未开启时报 `EPERM` / `operation not permitted` |
+| 中文字体 | 视频含中文时，运行主机有可用的中文字体 | 成片出现方框或缺字 |
+
+### 全新克隆的正确顺序
+
+`npm run dev` 只负责启动工作台，**不下载也不构建上游**。全新克隆必须按顺序执行：
+
+```bash
+git clone https://github.com/lylguang/lifafa-workbench.git
+cd lifafa-workbench
+npm ci            # 1. 按锁文件安装根目录依赖
+npm run setup     # 2. 克隆并构建上游 DSH（耗时最长）
+npm run dev -- --port 4173   # 3. 启动
+```
+
+跳过前两步直接启动，会报 `Missing vendored DSH checkout`，或在测试/加载能力包时报 `ERR_MODULE_NOT_FOUND`——上游运行期链接尚未建立。
+
+### GitHub 访问超时的替代做法（镜像）
+
+`setup` 需要从 GitHub 克隆上游仓库。网络超时或限速时，不要修改 `UPSTREAM.lock.json` 来“解决”网络问题。可行的变通做法：先用任意可用的 GitHub 镜像把上游仓库克隆到 `vendor/deepseek-harness`（镜像需包含 `lwb/UPSTREAM.lock.json` 指定的 commit），再执行 `npm run setup`；脚本检测到该目录已存在会跳过克隆，只做 fetch、检出锁定 commit 并构建。建议后续由后端同学给 `npm run setup` 增加 GitHub 镜像 fallback 参数，此处先以文档说明变通步骤。
+
 ## 1. 安装工作台
 
-准备 Git、Node.js `^22.19.0 || >=24.0.0`、npm、Corepack 和本机 C/C++ 编译环境。建议使用 Node.js 22 LTS 最新补丁版本；macOS 编译工具可通过 `xcode-select --install` 安装。其他系统的完整安装和媒体制作兼容性需要在目标环境验证。
+先按上面的[环境要求](#环境要求装机前置清单)核对 Node.js、Git、Corepack 和本机 C/C++ 编译环境，再执行：
 
 ```bash
 git clone https://github.com/lylguang/lifafa-workbench.git

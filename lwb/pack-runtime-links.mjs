@@ -85,7 +85,7 @@ export async function linkInRepoPacks() {
   // built would create junctions to paths that do not exist, and the second
   // run then fails with EEXIST instead of a useful message. Say so plainly.
   if (!existsSync(DSH_DIR)) {
-    console.warn(`[warn] 未找到 ${DSH_DIR}，跳过运行期链接。请先构建上游：npm run setup（Windows 见 docs/部署说明）。`)
+    console.warn(`[warn] 未找到 ${DSH_DIR}，跳过运行期链接。请先构建上游：npm run setup（Windows 见 docs/quickstart.md）。`)
     return []
   }
   const linked = []
