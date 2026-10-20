@@ -13,8 +13,10 @@ import { buildVideoCreatorContinuationPrompt, VIDEO_REVIEW_SCHEMA } from './spok
 
 export const inject = ['lwbPackRegistry', 'lwbPackServices', 'subagents', 'tools', 'settings']
 
+// 配音渠道：小米 MiMo 是唯一启用的渠道。bailian/scitiger 仍留在枚举里，
+// 这样老设置文件能继续读出来（老任务也要能打开），只是新建任务时前端只给 mimo。
 const MediaConnectionSettings = z.object({
-  provider: z.union(['bailian', 'scitiger']).default('bailian'),
+  provider: z.union(['mimo', 'bailian', 'scitiger']).default('mimo'),
   bailianReferenceVoices: z.any().default({}),
 })
 

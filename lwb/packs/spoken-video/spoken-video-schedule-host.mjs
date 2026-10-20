@@ -345,7 +345,7 @@ export class SpokenVideoScheduleHost {
     let publish = null
     try { media = await this.media.status() } catch { /* surfaced as unavailable below */ }
     try { publish = await this.publish.status() } catch { /* same */ }
-    const provider = media?.connection?.provider || 'bailian'
+    const provider = media?.connection?.provider || 'mimo'
     // `connection.providers[p]` IS the credential status ({ configured, source,
     // writable }) — it has no nested `.credential`. The audio page reads the very
     // same object through `providers[p].credential`, so both paths must agree.
@@ -1515,9 +1515,9 @@ export class SpokenVideoScheduleHost {
     return { message: `稿件版本 ${summary.scriptApproval?.revision || '?'} 已由自动化确认` }
   }
 
-  /** The configured voiceover channel; the request normalizer would otherwise pin media runs to bailian. */
+  /** The configured voiceover channel; the request normalizer would otherwise pin media runs to the default provider. */
   async #mediaProvider() {
-    try { return (await this.media.status())?.connection?.provider || 'bailian' } catch { return 'bailian' }
+    try { return (await this.media.status())?.connection?.provider || 'mimo' } catch { return 'mimo' }
   }
 
   async #stageVoiceover(agent, schedule, projectId, step, signal, paths, runId) {
@@ -1532,6 +1532,9 @@ export class SpokenVideoScheduleHost {
       const preset = { provider: await this.#mediaProvider(), voiceSource: voice?.voiceSource || 'system', rate: voice?.rate ?? 1, volume: voice?.volume ?? 1, pitch: voice?.pitch ?? 0 }
       if (voice?.voiceId) preset.voiceId = voice.voiceId
       if (voice?.voiceName) preset.voiceName = voice.voiceName
+      // 三模式（音色设计/声音克隆）的参数也要带进排期，否则定时生成时会退回默认音色。
+      if (voice?.voiceDesign) preset.voiceDesign = voice.voiceDesign
+      if (Array.isArray(voice?.audioTags) && voice.audioTags.length) preset.audioTags = voice.audioTags
       if (voice?.bridge) preset.bridge = voice.bridge
       if (voice?.voiceSource === 'upload' && voice.referenceAudio) {
         preset.referenceAudio = await this.media.stageScheduleVoiceReference(agent, { projectId, reference: voice.referenceAudio })

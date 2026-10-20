@@ -10,6 +10,7 @@ import { spokenVideoDataPath } from './spoken-video-paths.mjs'
 import { guardSubtitleTimeline, decodePcmMono8k, speechIntervalsFromPcm } from './spoken-video-subtitle-align.mjs'
 import { buildLineArtPlanPrompt, checkImageEngine, generateLineArtImage, LINE_ART_PLAN_SCHEMA, normalizeLineArtPlan, whiteboardBridgeUrl } from './spoken-video-whiteboard-art.mjs'
 import { executionEvent, executionTransition } from './spoken-video-execution.mjs'
+import { MimoClient, MimoError, MimoThrottle, MIMO_CLONE_MIME, MIMO_CLONE_TRANSCODE, MIMO_VOICES } from './spoken-video-media-mimo.mjs'
 import WebSocket from 'ws'
 import {
   buildTechnicalReport,
@@ -22,6 +23,7 @@ import {
   normalizeProbe,
   normalizeRenderRequest,
   normalizeSubtitleRequest,
+  assertTotalAudioTags,
   normalizeVoiceoverRequest,
   serviceData,
   serviceHeaders,
@@ -176,7 +178,11 @@ export function groupRunsByCharWeight(runs, texts) {
   return groups
 }
 
-async function segmentTimelineSrt(task, environment, fetchJson, { audioPath } = {}) {
+async function segmentTimelineSrt(task, environment, fetchJson, { audioPath, localTimeline = null } = {}) {
+  // 直连小米 MiMo 时时间轴随配音一起落盘，没有桥接任务可查。
+  if (Array.isArray(localTimeline?.segments) && localTimeline.segments.length) {
+    return buildTimelineSrt(localTimeline, task.source?.text, audioPath)
+  }
   if (task.input?.provider !== 'scitiger') return null
   const bridgeTaskId = task.result?.taskId
   if (!bridgeTaskId) return null
@@ -186,7 +192,20 @@ async function segmentTimelineSrt(task, environment, fetchJson, { audioPath } = 
     timeline = (Array.isArray(body?.tasks) ? body.tasks : []).find((t) => t.id === bridgeTaskId)?.segmentTimeline || null
   } catch { return null }
   if (!timeline?.segments?.length) return null
+  return buildTimelineSrt(timeline, task.source?.text, audioPath)
+}
 
+/**
+ * 时间轴 + 原稿 → SRT。桥接与小米 MiMo 共用这一段排版与配对逻辑。
+ *
+ * 段边界（ffprobe 实测）是地面真值；段内句界用 VAD 语音段顺序配对，
+ * 再退到段内字符占比。取不到就返回 null，由调用方决定回退或报错。
+ */
+function buildTimelineSrt(timeline, referenceText, audioPath) {
+  return timelineSrtInner(timeline, referenceText, audioPath)
+}
+
+async function timelineSrtInner(timeline, referenceText, audioPath) {
   // 段边界（ffprobe 实测）是地面真值，但段内句子按字符占比只对「连续语流」成立——
   // TTS 在句号处也停 0.2~0.3s，段内句间停顿会让后面的句子累积偏移 1~2s
   // （2026-10-11 首验：40 句里 18 句 onset 偏差 >0.4s，全部集中在段内第二句起）。
@@ -202,7 +221,7 @@ async function segmentTimelineSrt(task, environment, fetchJson, { audioPath } = 
 
   // 原稿按同一分句正则切句，与时间轴逐序号配对。
   const SENTENCE_SPLIT = /(?<=[。！？!?；;\n])/
-  const source = String(task.source?.text || '').replace(/\s+/g, ' ')
+  const source = String(referenceText || '').replace(/\s+/g, ' ')
   const sourceSentences = source.split(SENTENCE_SPLIT).map((s) => s.trim()).filter(Boolean)
   const entries = timeline.segments.flatMap((seg) => seg.sentences || [])
 
@@ -599,6 +618,9 @@ function runSummary(run) {
       voiceSource: run.input.voiceSource || null,
       voiceId: run.input.voiceId || null,
       voiceName: run.input.voiceName || null,
+      // 三模式下音色来源各不相同，回读缺一项就会让重试变成另一种声音。
+      voiceDesign: run.input.voiceDesign || null,
+      audioTags: Array.isArray(run.input.audioTags) ? run.input.audioTags : null,
       rate: run.input.rate ?? null,
       volume: run.input.volume ?? null,
       language: run.input.language || null,
@@ -675,6 +697,9 @@ function audioTaskSummary(task) {
       voiceSource: task.input.voiceSource || null,
       voiceId: task.input.voiceId || null,
       voiceName: task.input.voiceName || null,
+      // 三模式下音色来源各不相同，回读缺一项就会让重试变成另一种声音。
+      voiceDesign: task.input.voiceDesign || null,
+      audioTags: Array.isArray(task.input.audioTags) ? task.input.audioTags : null,
       // 桥接覆盖要随任务回传：任务卡要显示用的哪种合成，失败重试要原样重放。
       bridge: task.input.bridge || null,
       rate: task.input.rate ?? null,
@@ -923,6 +948,50 @@ function srtFromSentences(sentences) {
 }
 
 /** Qwen TTS accepts at most 512 input tokens. Four hundred Unicode code points is intentionally conservative. */
+/**
+ * 段间固定静音（毫秒）。与拼接时写入的间隔一致——时间轴的累计游标必须
+ * 把这段静音算进去，否则每段之后字幕都会提前。
+ */
+const MIMO_SEGMENT_GAP_MS = 200
+
+/**
+ * 由分段合成结果构建句级时间轴。
+ *
+ * 段边界用 ffprobe 实测的每段真实时长（不是按字数估）；段内的句子按**字符
+ * 占比**分配。这是桥接侧验证过的做法：TTS 各句语速接近，字数是最强的单一先验。
+ *
+ * 语速调整（ffmpeg atempo）会让整体时长按 1/rate 缩放，时间轴同步缩放；
+ * 音量不影响时间，故不参与。
+ *
+ * @returns {{gapMs:number, segments:Array}|null} 没有可用时长时返回 null，
+ *   由调用方决定是报错还是回退——**不允许静默按猜测出轴**。
+ */
+export function buildMimoTimeline({ segments, durations, rate = 1 }) {
+  if (!Array.isArray(segments) || !segments.length) return null
+  if (!Array.isArray(durations) || durations.length !== segments.length) return null
+  const scale = Math.abs(Number(rate) - 1) > 0.02 ? 1 / Number(rate) : 1
+  // 与字幕侧同一分句正则，保证时间轴的句子能与原稿逐序号配对。
+  const SENTENCE_SPLIT = /(?<=[。！？!?；;\n])/u
+  const rows = []
+  let cursorMs = 0
+  for (const [index, segment] of segments.entries()) {
+    const measured = Number(durations[index])
+    if (!Number.isFinite(measured) || measured <= 0) return null
+    const durMs = Math.round(measured * 1000 * scale)
+    const text = String(segment ?? '')
+    // 段内句子按字符占比切分，start/end 是**段内相对偏移**，
+    // 与桥接时间轴的字段语义一致（segmentTimelineSrt 依赖它做相对换算）。
+    const sentences = text.split(SENTENCE_SPLIT).map((s) => s.trim()).filter(Boolean).map((sentence, sIndex, all) => {
+      const consumed = all.slice(0, sIndex).reduce((sum, s) => sum + s.length, 0)
+      const start = text.length ? (consumed / text.length) * text.length : 0
+      return { text: sentence, start, end: start + sentence.length }
+    })
+    rows.push({ index, text, startMs: cursorMs, durMs, sentences })
+    cursorMs += durMs + (index < segments.length - 1 ? MIMO_SEGMENT_GAP_MS : 0)
+  }
+  return { gapMs: MIMO_SEGMENT_GAP_MS, scale, segments: rows }
+}
+
 function splitTtsText(value, maximum = 400) {
   const source = text(value, '配音文稿', 60_000)
   const sentences = source.match(/[^。！？!?；;…\n]+[。！？!?；;…]?|\n+/gu) || [source]
@@ -1358,6 +1427,17 @@ async function measureVisualVariation(frameFiles, orientation, durationSeconds, 
  * Host-side media adapter. It owns provider calls and local binaries; the browser
  * only sees durable operation summaries and bounded media reads through the gateway.
  */
+/**
+ * 是否属于「凭据被拒」——只有 401/403 说明 Key 本身不对。
+ *
+ * 401/403 = Key 错或失效（用户该去换Key）；400/429/5xx = 别的成因
+ * （参数、限流、服务端故障），把它们标成 rejected 会让用户白跑一趟换 Key。
+ * 独立成纯函数是为了能离线钉住这个判定，不必驱动整条配音链路。
+ */
+export function isCredentialRejection(status) {
+  return status === 401 || status === 403
+}
+
 export class SpokenVideoMediaHost {
   constructor({ background = (work) => work, signal, projectsStore, credentials, connectionSettings, videoCreator, videoReviewer, lineArtPlanner, fetch = globalThis.fetch, environment = process.env } = {}) {
     if (!projectsStore) throw new Error('SpokenVideoMediaHost requires projectsStore.')
@@ -1375,6 +1455,8 @@ export class SpokenVideoMediaHost {
     this.runSecrets = new Map()
     this.activeRunIds = new Set()
     this.bailianReferenceVoices = new Map()
+    // 最近一次被服务端拒绝（401/403）的凭据引用，仅供 connection() 展示状态。
+    this.rejectedCredentials = new Set()
     this.bailianReferenceVoiceEnrollments = new Map()
     this.audioTaskWrites = new Map()
     this.runWrites = new Map()
@@ -1394,6 +1476,16 @@ export class SpokenVideoMediaHost {
       ttsEndpoint: config.baseUrl ? new URL(config.baseUrl).origin : null,
       defaultVoice: { id: DEFAULT_VOICE_PROFILE.id, name: DEFAULT_VOICE_PROFILE.name },
       providers: {
+        // 小米 MiMo：唯一启用的配音渠道。音色表是官方「预置音色」，
+        // 复刻（voiceclone）按定案不提供，所以 referenceVoiceConfigured 恒 false。
+        mimo: {
+          configured: true,
+          referenceVoiceConfigured: false,
+          label: '小米 MiMo',
+          endpoint: config.mimoBaseUrl,
+          voices: MIMO_VOICES,
+          credential: connection.providers.mimo,
+        },
         bailian: { configured: true, referenceVoiceConfigured, label: '使用自己的百炼账户', credential: connection.providers.bailian },
         scitiger: {
           configured: config.scitigerConfigured,
@@ -1415,10 +1507,13 @@ export class SpokenVideoMediaHost {
   }
 
   async connection() {
-    const provider = this.connectionSettings?.get?.().provider || 'bailian'
+    const provider = this.connectionSettings?.get?.().provider || 'mimo'
     return {
       provider,
       providers: {
+        // 小米 MiMo 是唯一启用的渠道，但旧渠道仍要报出凭据状态，
+        // 这样老设置在界面上能看出「这个渠道没配」而不是凭空消失。
+        mimo: await this.#credentialStatus('mimo'),
         bailian: await this.#credentialStatus('bailian'),
         scitiger: await this.#credentialStatus('scitiger'),
       },
@@ -1802,7 +1897,11 @@ export class SpokenVideoMediaHost {
       ? null
       : text(input.apiKey, 'API Key', 512)
     if (!this.connectionSettings?.update) fail('SPOKEN_VIDEO_MEDIA_CONNECTION_UNAVAILABLE', '当前运行环境不支持保存连接设置。')
-    if (apiKey) await this.#credentials().set(ref, apiKey)
+    if (apiKey) {
+      await this.#credentials().set(ref, apiKey)
+      // 换了 Key 就把「被拒绝」清掉，否则界面还停在旧Key 的失败态。
+      this.#markCredentialRejected(input.provider, false)
+    }
     await this.connectionSettings.update({ provider })
     return this.connection()
   }
@@ -2120,7 +2219,7 @@ export class SpokenVideoMediaHost {
     const tasks = await readAudioTasks(root)
     const query = typeof input.query === 'string' ? input.query.trim().toLowerCase() : ''
     const status = typeof input.status === 'string' && ['all', 'active', 'terminal', 'queued', 'running', 'succeeded', 'failed'].includes(input.status) ? input.status : 'all'
-    const provider = typeof input.provider === 'string' && ['all', 'bailian', 'scitiger', 'legacy'].includes(input.provider) ? input.provider : 'all'
+    const provider = typeof input.provider === 'string' && ['all', 'mimo', 'bailian', 'scitiger', 'legacy'].includes(input.provider) ? input.provider : 'all'
     const recovered = await this.#recoverInterruptedAudioTasks(root, tasks)
     const projects = accountId || generalOnly ? await this.projectsStore.list(agent) : []
     const accountsByProject = new Map(projects.map((project) => [project.id, project.account?.id || null]))
@@ -2543,6 +2642,9 @@ export class SpokenVideoMediaHost {
       if (task.input.provider === 'bailian') {
         generated = await this.#bailianVoiceover(root, task, task.source.text, task.input)
         outputFormat = 'wav'
+      } else if (task.input.provider === 'mimo') {
+        generated = await this.#mimoVoiceover(root, task, task.source.text, task.input)
+        outputFormat = 'wav'
       } else if (task.input.provider === 'scitiger') {
         generated = await this.#scitigerVoiceover(root, task, task.source.text, task.input)
       } else {
@@ -2559,7 +2661,7 @@ export class SpokenVideoMediaHost {
       const written = await this.#writeAudioTaskVoiceover(root, task.id, generated.audio, outputFormat, task.input, generated.provider === 'bailian')
       const probe = await this.#probe(written.output)
       const audio = { file: written.relativePath, mediaType: mediaTypeForFormat(outputFormat), bytes: written.bytes, durationSeconds: probe.durationSeconds || generated.durationSeconds || null, sampleRate: probe.sampleRate }
-      task = await this.#mutateAudioTask(root, task.id, (current) => ({ ...current, result: { audio, provider: generated.provider, taskId: generated.taskId || null, voiceId: generated.voiceId || current.input.voiceId || null } }))
+      task = await this.#mutateAudioTask(root, task.id, (current) => ({ ...current, result: { audio, provider: generated.provider, taskId: generated.taskId || null, voiceId: generated.voiceId || current.input.voiceId || null }, ...(generated.timeline ? { timeline: generated.timeline } : {}) }))
       await this.#syncAudioTaskProject(agent, task, { replace: true })
       // autoAdopt 任务把「落 succeeded」推迟到采纳之后：对用户「生成=已在项目里」
       // 是一个原子事实，轮询者不应看到「成功但未同步」的中间态。
@@ -2617,7 +2719,8 @@ export class SpokenVideoMediaHost {
       await this.#writeSyncedMedia(projectRoot, projectFile, await readFile(sourceFile))
       const committed = voice?.data?.audio?.file === projectFile ? { project: detail } : await this.projectsStore.commitProduced(agent, {
         projectId: detail.id, expectedRevision: detail.revision, stage: 'voiceover', idempotencyKey: `audio-task-${task.id}`, source: 'spoken-video/tts',
-        payload: { mode: 'tts', provider: task.result.provider, taskId: task.result.taskId, voiceId: task.result.voiceId, voiceName: task.input.voiceName, settings: { rate: task.input.rate, volume: task.input.volume, pitch: task.input.pitch }, audio: { ...task.result.audio, file: projectFile } },
+        payload: { mode: 'tts', provider: task.result.provider, taskId: task.result.taskId, voiceId: task.result.voiceId, voiceName: task.input.voiceName, // 三模式的音色来源不同，采纳进项目时也要带全，否则重试会变成另一种声音。
+          voiceDesign: task.input.voiceDesign || null, audioTags: Array.isArray(task.input.audioTags) ? task.input.audioTags : null, settings: { rate: task.input.rate, volume: task.input.volume, pitch: task.input.pitch }, audio: { ...task.result.audio, file: projectFile } },
       })
       return await this.#mutateAudioTask(sourceRoot, task.id, (current) => ({ ...current, projectSyncError: null, projectSync: { projectId: detail.id, revision: committed.project.revision, voiceFile: projectFile } }))
     } catch (error) {
@@ -2637,7 +2740,18 @@ export class SpokenVideoMediaHost {
       // 句在段内按字符占比），有它就直接产出精确 SRT、跳过 ASR——时间不靠猜。
       // 拿不到（旧任务 / 非桥接 provider / 原稿与时间轴句数对不上）才走 ASR+守卫。
       let viaTimeline = false
-      if (input.provider === 'scitiger') {
+      // 直连小米 MiMo：时间轴随配音落盘，没有桥接可查。
+      if (input.provider === 'mimo') {
+        const timelineSrt = await segmentTimelineSrt(task, this.environment, null, { audioPath, localTimeline: task.timeline })
+        if (timelineSrt) {
+          result = { taskId: `segments-${task.id}`, subtitle: subtitleResult({ subtitle_srt: timelineSrt }), diagnostics: { provider: 'mimo-segment-timeline' } }
+          viaTimeline = true
+        } else {
+          // 不用可用的对齐来源就出不了可信时间戳——宁可报错，也不让字幕靠猜。
+          fail('SPOKEN_VIDEO_SUBTITLES_ALIGNMENT_UNAVAILABLE', '这条配音没有句级时间轴，且未配置可用的字幕对齐服务，无法生成准确字幕。请重新生成配音，或配置字幕对齐服务后重试。')
+        }
+      }
+      if (!viaTimeline && input.provider === 'scitiger') {
         try {
           const timelineSrt = await segmentTimelineSrt(task, this.environment, (url, label) => this.#externalJson(url, { signal: AbortSignal.timeout(8000) }, label))
           if (timelineSrt) {
@@ -2829,7 +2943,29 @@ export class SpokenVideoMediaHost {
       fail('SPOKEN_VIDEO_MEDIA_CONNECTION_UNAVAILABLE', '当前运行环境不支持读取连接状态。')
     }
     const status = await credentials.describe(ref)
-    return { configured: status.configured === true, source: status.source || null, writable: status.writable === true }
+    const configured = status.configured === true
+    return {
+      configured,
+      source: status.source || null,
+      writable: status.writable === true,
+      // 契约冻结：这是**新增的可选字段**，不改上面三项的名字与语义、也不删任何字段。
+      // 目的只是让界面区分「还没填 Key」与「填了但被服务端拒绝」——两者 configured 都是
+      // true，只看布尔用户无从判断。取值：
+      //   missing  没填过Key
+      //   rejected 填了，但最近一次真实调用被服务端以 401/403 拒绝
+      //   ok       填了，且最近一次调用成功（或尚未被拒绝过）
+      // 只用于展示，前端不应拿它做逻辑判断；判定依据是上一次真实调用的结果，
+      // 重启宿主后回到 ok（内存态，不落盘、不跨进程）。
+      credentialHint: !configured ? 'missing' : (this.rejectedCredentials.has(ref) ? 'rejected' : 'ok'),
+    }
+  }
+
+  /** 记录一次凭据被服务端拒绝，供 connection() 展示；成功即清除。 */
+  #markCredentialRejected(provider, rejected) {
+    let ref
+    try { ref = mediaCredentialRef(provider) } catch { return }
+    if (rejected) this.rejectedCredentials.add(ref)
+    else this.rejectedCredentials.delete(ref)
   }
 
   async #prepareRunCredentials(run) {
@@ -2839,7 +2975,7 @@ export class SpokenVideoMediaHost {
     const ref = mediaCredentialRef(provider)
     const resolved = await this.#credentials().resolve(ref)
     if (!resolved?.value) {
-      const label = provider === 'bailian' ? '百炼 BYOK' : 'SciTiger 云端'
+      const label = { bailian: '百炼 BYOK', scitiger: 'SciTiger 云端', mimo: '小米 MiMo' }[provider] || '配音服务'
       fail('SPOKEN_VIDEO_MEDIA_CREDENTIAL_REQUIRED', `${label}尚未保存 API Key。请在连接设置中保存后重试。`)
     }
     this.runSecrets.set(run.id, { apiKey: resolved.value })
@@ -3042,6 +3178,142 @@ export class SpokenVideoMediaHost {
       return { provider: 'bailian', taskId: taskIds.at(-1) || null, voiceId: voice, audio: await this.#concatBailianWavSegments(directory, chunks) }
     } finally {
       await rm(directory, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+
+  /**
+   * 小米 MiMo TTS 配音（直连，不经本机桥接）。
+   *
+   * 沿用与桥接一致的管线：**分段合成 → 每段 ffprobe 实测时长 → 按段内字符占比
+   * 分配到句 → 段间固定静音**，因此句子起止在合成时就确定，字幕无需 ASR 猜时间戳。
+   * 语速通过 ffmpeg atempo 施加（见 #writeVoiceoverAudio 的 applySettings），
+   * 时间轴按 1/rate 同步缩放——与桥接的处理一致。
+   *
+   * 声音复刻按定案不实现：voiceSource 的 upload/reference 一律按内置音色处理。
+   */
+  async #mimoVoiceover(root, run, script, input) {
+    const config = mediaServiceConfig(this.environment)
+    const apiKey = this.#apiKey(run, '小米 MiMo')
+    const segments = splitTtsText(script)
+    if (!segments.length) fail('SPOKEN_VIDEO_STAGE_BLOCKED', '当前稿件没有可合成的文本。')
+    const directory = await mkdtemp(join(tmpdir(), 'lwb-spoken-video-mimo-'))
+    try {
+      const client = new MimoClient({
+        apiKey,
+        baseUrl: config.mimoBaseUrl,
+        model: config.mimoModel,
+        defaultVoice: config.mimoDefaultVoice,
+        throttle: new MimoThrottle({ minGapMs: config.mimoMinGapMs }),
+        fetchImpl: (url, init) => this.fetch(url, init),
+      })
+      // 三模式互斥：音色来源各不相同，这里各自分配，不做回退。
+      //   preset  预置音色名
+      //   design  文字描述（user 消息）
+      //   clone   参考音频 data URL（必要时先转码成 wav）
+      const mode = input.voiceSource === 'upload' ? 'clone' : input.voiceSource === 'design' ? 'design' : 'preset'
+      const referenceDataUrl = mode === 'clone'
+        ? await this.#mimoReferenceDataUrl(root, input)
+        : null
+      // 标签只贴在第一段：官方语法是 `(标签)` 开头、[标签] 内插，
+      // 贴到每段会让整篇都带着标签语气，反而不再是「这一段的表演提示」。
+      const tags = Array.isArray(input.audioTags) ? input.audioTags : []
+      // 两类标签同口径计数：入参的 (风格) 与正文里用户手写的 [叹气] 内插标签。
+      // 内插的那种不经入参，不清点就能无限贴，而且和入参标签一样是裸传给模型的形态。
+      assertTotalAudioTags(script, tags)
+      const chunks = []
+      const durations = []
+      for (const [offset, segment] of segments.entries()) {
+        const index = offset + 1
+        const file = join(directory, `segment-${String(index).padStart(3, '0')}.wav`)
+        const audio = await client.synthesize({
+          text: segment,
+          mode,
+          voiceId: input.voiceSource === 'preset' ? input.voiceId : null,
+          referenceDataUrl,
+          style: mode === 'design' ? input.voiceDesign : (config.mimoStyle || ''),
+          tags: index === 1 ? tags : [],
+        })
+        if (!audio?.length) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `小米 MiMo 第 ${index}/${segments.length} 段返回空音频。`)
+        // 合成成功即清除 rejected 标记，避免换了正确 Key 后状态仍停在「被拒绝」。
+        this.#markCredentialRejected('mimo', false)
+        await writeFile(file, audio, { mode: 0o600 })
+        // 段边界必须是实测值，不能按字数估——整条时间轴的精度都压在这一步。
+        const probe = await this.#probe(file)
+        if (!probe.hasAudio || !probe.durationSeconds) {
+          fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `小米 MiMo 第 ${index}/${segments.length} 段不含可播放的音频流。`)
+        }
+        chunks.push({ file })
+        durations.push(probe.durationSeconds)
+        await this.#runEvent(root, run.id, `小米 MiMo 配音合成 ${index}/${segments.length}`, { provider: 'mimo', stage: '合成中' })
+      }
+
+      const audio = await this.#concatWavSegments(directory, chunks, '小米 MiMo')
+      const timeline = buildMimoTimeline({ segments, durations, rate: input.rate })
+      return { provider: 'mimo', taskId: null, voiceId: input.voiceId || config.mimoDefaultVoice, audio, timeline, mode }
+    } catch (error) {
+      // MiMo 的错误分级（可重试 / 致命）在这里翻译成宿主错误码，别把原始 message 泄给用户。
+      if (error instanceof MimoError) {
+        // 401/403 说明 Key 本身不对（而非额度、参数问题），记下来供 connection() 展示
+        // credentialHint: 'rejected'，这样用户能区分「没填」与「填错」。
+        if (isCredentialRejection(error.status)) this.#markCredentialRejected('mimo', true)
+        fail(error.code === 'SPOKEN_VIDEO_MEDIA_CREDENTIAL_REQUIRED' ? error.code : 'SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', error.message)
+      }
+      throw error
+    } finally {
+      await rm(directory, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+
+  /**
+ * 参考音频 → data URL（voiceclone 用）。
+ *
+ * 官方只认 wav/mp3，其余格式必须先转码，否则 400。这里沿用桥接里已验证的做法：
+ * 按真实扩展名给 mime，不认就经 ffmpeg 转成 24kHz 单声道 wav。
+ *
+ * 注意别用「重试掩盖真因」的错误做法：m4a 直接传会 400，而密集重试会被转成
+ * 429，真因（格式不支持）就被掩盖成「请求过于频繁」了。
+ */
+async #mimoReferenceDataUrl(root, input) {
+    const uploaded = await this.#uploadedVoiceReference(root, input.referenceAudio, /^audio-media\/references\/[a-f0-9]{32}\.(?:mp3|wav|m4a|ogg|aac|flac)$/u, '克隆参考音频')
+    const file = await this.#audioTaskFile(root, uploaded.file, '克隆参考音频')
+    const extension = extname(uploaded.file).slice(1).toLowerCase()
+    let mime = MIMO_CLONE_MIME[extension]
+    let bytes = await readFile(file)
+    if (!mime) {
+      const directory = await mkdtemp(join(tmpdir(), 'lwb-spoken-video-mimo-ref-'))
+      const converted = join(directory, 'reference.wav')
+      try {
+        await execFileAsync('ffmpeg', ['-y', '-i', file, ...MIMO_CLONE_TRANSCODE, converted], { signal: this.signal, maxBuffer: 1024 * 1024 * 4 })
+        bytes = await readFile(converted)
+      } catch (error) {
+        throw commandError(error, '克隆参考音频转码')
+      } finally {
+        await rm(directory, { recursive: true, force: true }).catch(() => {})
+      }
+      mime = MIMO_CLONE_MIME.wav
+    }
+    return `data:${mime};base64,${bytes.toString('base64')}`
+  }
+
+  /** 通用 WAV 分段合并（小米 MiMo 用）。与百炼版本的差异只在报错文案。 */
+  async #concatWavSegments(directory, chunks, label) {
+    if (chunks.length === 1) return readFile(chunks[0].file)
+    const manifest = join(directory, 'concat.txt')
+    const output = join(directory, 'merged.wav')
+    await writeFile(manifest, `${chunks.map((chunk) => ffmpegConcatEntry(chunk.file)).join('\n')}\n`, { encoding: 'utf8', mode: 0o600 })
+    try {
+      await execFileAsync('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', manifest, '-map', '0:a:0', '-c:a', 'pcm_s16le', output], { signal: this.signal, maxBuffer: 1024 * 1024 * 4 })
+      await chmod(output, 0o600)
+      const audio = await readFile(output)
+      if (!audio.length || audio.length > MAX_MEDIA_BYTES) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `${label} 合并后的 WAV 为空或超出 80 MiB 限制。`)
+      const containerError = wavContainerError(audio)
+      if (containerError) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `${label} 合并后的 WAV 校验失败：${containerError}。`)
+      const probe = await this.#probe(output)
+      if (!probe.hasAudio || !probe.durationSeconds) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `${label} 合并后的 WAV 不含可播放的音频流。`)
+      return audio
+    } catch (error) {
+      if (error instanceof SpokenVideoMediaError) throw error
+      throw commandError(error, `${label} 分段音频合并`)
     }
   }
 
@@ -3468,6 +3740,9 @@ export class SpokenVideoMediaHost {
     if (input.provider === 'bailian') {
       generated = await this.#bailianVoiceover(root, run, script, input)
       outputFormat = 'wav'
+    } else if (input.provider === 'mimo') {
+      generated = await this.#mimoVoiceover(root, run, script, input)
+      outputFormat = 'wav'
     } else if (input.provider === 'scitiger') {
       generated = await this.#scitigerVoiceover(root, run, script, input)
     } else {
@@ -3506,6 +3781,9 @@ export class SpokenVideoMediaHost {
         mode: 'tts', provider: generated.provider, taskId: generated.taskId, voiceId: generated.voiceId || input.voiceId, voiceName: input.voiceName,
         settings: { rate: input.rate, volume: input.volume, pitch: input.pitch },
         audio: { file: relativePath, mediaType: mediaTypeForFormat(outputFormat), bytes: written.bytes, durationSeconds: probe.durationSeconds || generated.durationSeconds || null, sampleRate: probe.sampleRate },
+        // 句级时间轴随配音一起落盘：直连小米时没有桥接可查，字幕只能从这里读。
+        // 拿不到就写 null，字幕侧会显式报错，绝不按猜测出轴。
+        ...(generated.timeline ? { timeline: generated.timeline } : {}),
       },
     })
     return { project: committed.project, artifact: committed.artifact, audio: { file: relativePath, durationSeconds: probe.durationSeconds, bytes: written.bytes, sampleRate: probe.sampleRate }, taskId: generated.taskId }
@@ -3527,7 +3805,17 @@ export class SpokenVideoMediaHost {
     // 守卫的锚点修正只能在锚点间插值，句间仍有 1~3s 残差。拿不到时间轴
     // （旧配音 / 非桥接 provider / 原稿句数与时间轴对不上）才走 ASR+守卫。
     let viaTimeline = false
-    if (run.input.provider === 'scitiger') {
+    if (run.input.provider === 'mimo') {
+      const localTimeline = detail.artifacts?.voiceover?.data?.timeline || null
+      const timelineSrt = await segmentTimelineSrt({ input: run.input, source: { text: script } }, this.environment, null, { audioPath, localTimeline })
+      if (timelineSrt) {
+        result = { taskId: `segments-${run.id}`, subtitle: subtitleResult({ subtitle_srt: timelineSrt }), diagnostics: { provider: 'mimo-segment-timeline' } }
+        viaTimeline = true
+      } else {
+        fail('SPOKEN_VIDEO_SUBTITLES_ALIGNMENT_UNAVAILABLE', '这条配音没有句级时间轴，且未配置可用的字幕对齐服务，无法生成准确字幕。请重新生成配音，或配置字幕对齐服务后重试。')
+      }
+    }
+    if (!viaTimeline && run.input.provider === 'scitiger') {
       try {
         const timelineSrt = await segmentTimelineSrt({ input: run.input, source: { text: script }, result: { taskId: detail.artifacts?.voiceover?.data?.taskId } }, this.environment, (url, label) => this.#externalJson(url, { signal: AbortSignal.timeout(8000) }, label), { audioPath })
         if (timelineSrt) {

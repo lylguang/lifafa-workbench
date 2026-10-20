@@ -16,6 +16,7 @@ vendor/
 # 测试与构建残留
 **/.tmp-*/
 .tmp/
+.dsh-tmp/
 
 # Runtime state and local credentials
 .dsh/

@@ -1,16 +1,33 @@
 import { validateSrt } from './spoken-video-subtitles.mjs'
+import { countInlineAudioTags } from './spoken-video-media-mimo.mjs'
 import { measureNarrativeRhythm, measureSceneTimeline } from './spoken-video-rhythm.mjs'
 
 export const MEDIA_OPERATION_TYPES = Object.freeze(['voiceover', 'subtitles', 'video', 'qc'])
 export const MEDIA_OPERATION_STATES = Object.freeze(['queued', 'running', 'succeeded', 'failed'])
-export const MEDIA_PROVIDERS = Object.freeze(['bailian', 'scitiger', 'legacy'])
-export const MEDIA_CONNECTION_PROVIDERS = Object.freeze(['bailian', 'scitiger'])
+export const MEDIA_PROVIDERS = Object.freeze(['bailian', 'scitiger', 'legacy', 'mimo'])
+export const MEDIA_CONNECTION_PROVIDERS = Object.freeze(['bailian', 'scitiger', 'mimo'])
 export const VIDEO_ORIENTATIONS = Object.freeze(['portrait', 'landscape'])
 export const MEDIA_PROVIDER_CREDENTIAL_REFS = Object.freeze({
   bailian: 'DASHSCOPE_API_KEY',
   scitiger: 'LWB_SPOKEN_VIDEO_SCITIGER_API_KEY',
+  /**
+   * 小米 MiMo：platform.xiaomimimo.com 创建的 sk-... key，免费、无需实名。
+   *
+   * **运行时真正生效的是用户在连接设置界面保存到本包命名空间的那一份**，
+   * 不是团队凭据库里同名的共享条目——两者并存、互不覆盖，也不要当成同一份：
+   *   · 界面保存 → pack-services.mjs:17 先做 `toLowerCase().replaceAll('_','-')`
+   *     → packCredentialRef() 再拼上包前缀，最终条目形如
+   *     `LWB_PACK_12_SPOKEN_VIDEO_18_XIAOMIMIMO_API_KEY`；
+   *   · 团队共享条目 `XIAOMIMIMO_API_KEY` 是独立通道，只有直接读
+   *     `$DSH_SECRET_XIAOMIMIMO_API_KEY`（脚本、冒烟、CI）才会用到。
+   *
+   * 包前缀是刻意的隔离设计（pack-services.test.mjs 有跨包互不可见的断言），
+   * 不要为了让两边「收敛成一条」而绕过它——那会破坏包间隔离。
+   * 撤销/轮换 Key 时注意区分这两条，别只撤其中一份就以为完事。
+   */
+  mimo: 'XIAOMIMIMO_API_KEY',
 })
-export const VOICE_SOURCES = Object.freeze(['system', 'upload', 'reference', 'preset'])
+export const VOICE_SOURCES = Object.freeze(['system', 'preset', 'upload', 'reference', 'design'])
 export const DEFAULT_VOICE_PROFILE = Object.freeze({
   id: 'tiffy-confident',
   name: 'Tiffy - 自信',
@@ -136,6 +153,17 @@ export function mediaServiceConfig(environment = process.env) {
     bailianVoiceCloneModel: optionalText(environment.LWB_SPOKEN_VIDEO_BAILIAN_VOICE_CLONE_MODEL, '百炼复刻 TTS 模型', 120) || 'qwen3-tts-vc-2026-01-22',
     scitigerBaseUrl,
     scitigerConfigured: Boolean(scitigerBaseUrl),
+    // 小米 MiMo TTS。注意它是 chat/completions 形态（不是 /audio/speech），
+    // 鉴权头是 api-key —— 见 spoken-video-media-mimo.mjs 头部说明。
+    mimoBaseUrl: endpoint(environment.LWB_SPOKEN_VIDEO_MIMO_BASE_URL || 'https://api.xiaomimimo.com/v1'),
+    mimoModel: optionalText(environment.LWB_SPOKEN_VIDEO_MIMO_MODEL, '小米 MiMo TTS 模型', 120) || 'mimo-v2.5-tts',
+    mimoDefaultVoice: optionalText(environment.LWB_SPOKEN_VIDEO_MIMO_DEFAULT_VOICE, '小米 MiMo 默认音色', 80) || '冰糖',
+    mimoStyle: optionalText(environment.LWB_SPOKEN_VIDEO_MIMO_STYLE, '小米 MiMo 语气风格', 200) || '',
+    // 相邻两次请求最小间隔（毫秒）。官方 RPM 100 看似宽裕，但分段连发实测会 429，
+    // 串行 + 2 秒间隔把峰值压到 ~30 RPM。
+    mimoMinGapMs: number(environment.LWB_SPOKEN_VIDEO_MIMO_MIN_GAP_MS, '小米 MiMo 请求间隔', 0, 60_000, 2000),
+    // 音频标签由前端拼进正文发送（见 buildTaggedText），后端只做长度与形态校验。
+    mimoMaxAudioTags: number(environment.LWB_SPOKEN_VIDEO_MIMO_MAX_AUDIO_TAGS, '小米 MiMo 音频标签数上限', 0, 20, 8),
   }
 }
 
@@ -156,16 +184,31 @@ export function normalizeVoiceoverRequest(value) {
   if (voiceSource === 'upload' && (!referenceAudio?.id || !referenceAudio.file || !referenceAudio.name || !referenceAudio.mediaType)) {
     throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '使用自定义音色时请先上传参考音频。')
   }
+  // voicedesign：音色的唯一来源就是这句描述，缺了就没有音色可用。
+  const voiceDesign = optionalText(input.voiceDesign, '音色描述', 500)
+  if (voiceSource === 'design' && !voiceDesign) {
+    throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音色设计模式需要填写音色描述。')
+  }
+  if (voiceSource !== 'design' && voiceDesign) {
+    throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音色描述只在音色设计模式下有效。')
+  }
+  // 音频标签由前端拼进正文（用户要能在文本框里看见自己插的标签），后端只校验形态。
+  // 正文本身不在本函数可见范围（稿件是项目里的 artifact），所以**内插标签的计数
+  // 在 host 拿到正文时再做**（见 spoken-video-media-host.mjs 的 #mimoVoiceover），
+  // 那里才能把两种括号形式的标签放进同一个上限里算。
+  const audioTags = normalizeAudioTags(input.audioTags)
   // 桥接（SciTiger 端点）专属提示，仅当请求打到桥接时生效：channel 覆盖桥接的
   // 云端/本地开关，style 覆盖其预期风格；其他渠道原样忽略。
   const bridgeInput = input.bridge == null ? null : object(input.bridge, '桥接配音设置')
   return {
-    provider: oneOf(input.provider, '生成方式', MEDIA_PROVIDERS, 'bailian'),
+    provider: oneOf(input.provider, '生成方式', MEDIA_PROVIDERS, 'mimo'),
     voiceSource,
     voiceId,
     voiceName: optionalText(input.voiceName, '音色名称', 120)
       || (voiceSource === 'upload' ? referenceAudio.name : ['system', 'reference'].includes(voiceSource) ? DEFAULT_VOICE_PROFILE.name : null),
     referenceAudio: voiceSource === 'upload' ? referenceAudio : null,
+    voiceDesign: voiceSource === 'design' ? voiceDesign : null,
+    audioTags,
     outputFormat: outputFormat(input.outputFormat, '输出格式'),
     rate: number(input.rate, '语速', 0.5, 2, 1),
     volume: number(input.volume, '音量', 0, 2, 1),
@@ -177,10 +220,57 @@ export function normalizeVoiceoverRequest(value) {
   }
 }
 
+/**
+ * 音频标签形态校验。
+ *
+ * 官方是两套语法：开头 `(风格)`（由 audioTags 入参承载）与正文内插 `[音频标签]`
+ * （用户直接写在文本里）。两套**共用同一个数量上限**——内插的那种不经过入参，
+ * 若不单独清点就能无限贴，等于把正文变成一串标签，也是裸传给模型的形态。
+ */
+function normalizeAudioTags(value) {
+  if (value == null) return []
+  if (!Array.isArray(value)) throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音频标签必须是数组。')
+  const list = value.map((item) => {
+    const raw = String(item ?? '').trim()
+    // 官方只承认 () / （） / [] 三种外层括号，其余（如【】）不当成标签壳。
+    const TAG_SHELL = /^[(（\[［](.*)[)）\]］]$/u
+    const inner = TAG_SHELL.test(raw) ? raw.replace(TAG_SHELL, '$1').trim() : raw
+    if (!inner) throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音频标签不能为空。')
+    if (inner.length > 40) throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '单个音频标签不能超过 40 字。')
+    // 标签内不得再带任何括号（含官方不认的【】），否则拼接后会与官方语法冲突、模型解析歧义。
+    if (/[[\]［］()（）【】]/u.test(inner)) throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音频标签内不能包含括号。')
+    return inner
+  })
+  if (list.length > MIMO_TOTAL_TAG_LIMIT) {
+    throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', `音频标签最多 ${MIMO_TOTAL_TAG_LIMIT} 个。`)
+  }
+  return list
+}
+
+/** 入参标签 + 正文内插标签的合计上限。 */
+export const MIMO_TOTAL_TAG_LIMIT = 8
+
+/**
+ * 在拿到正文后做最终计数：入参标签与正文里用户手写的 [叹气] 这类内插标签
+ * 共用同一个上限。内插的那种不经入参，不清点就能无限贴，且是裸传给模型的形态。
+ *
+ * 内插只认**成对且形态合法**的（≤40 字、内部无括号），`[1]` 这类中括号引用与孤立
+ * 起始符一律放行——误判正常文案会让用户改稿时莫名被拒，比漏算一个标签更糟。
+ * 前后端口径必须一致，见 countInlineAudioTags 的注释。
+ */
+export function assertTotalAudioTags(script, audioTags) {
+  const inline = countInlineAudioTags(script)
+  const total = (Array.isArray(audioTags) ? audioTags.length : 0) + inline
+  if (total > MIMO_TOTAL_TAG_LIMIT) {
+    throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', `音频标签最多 ${MIMO_TOTAL_TAG_LIMIT} 个（当前 ${total} 个：入参 ${audioTags?.length ?? 0} 个，正文内插 ${inline} 个）。`)
+  }
+  return total
+}
+
 export function normalizeSubtitleRequest(value) {
   const input = object(value ?? {}, '字幕请求')
   return {
-    provider: oneOf(input.provider, '生成方式', MEDIA_PROVIDERS, 'bailian'),
+    provider: oneOf(input.provider, '生成方式', MEDIA_PROVIDERS, 'mimo'),
     language: optionalText(input.language, '字幕语言', 16) || 'zh',
     aiOptimize: input.aiOptimize === true,
   }
@@ -355,7 +445,7 @@ export const DEFAULT_RHYTHM_THRESHOLDS = Object.freeze({
  *
  * 分级理由：技术问题（分辨率、帧率）会直接毁掉片子，必须 fail；
  * 节奏问题多数是「值得再看一眼」而不是「片子不能用」，默认走 warnings。
- * 只��一条进 issues——前 3 秒完全静默，因为那是最贵的三秒。
+ * 只报一条进 issues——前 3 秒完全静默，因为那是最贵的三秒。
  */
 export function evaluateRhythm(rhythm, thresholds = DEFAULT_RHYTHM_THRESHOLDS) {
   const issues = []

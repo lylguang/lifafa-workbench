@@ -451,6 +451,58 @@ function publishPackaging(value) {
 }
 
 /** Validate the limited production payload written only by the host media adapters. */
+/**
+ * 校验句级时间轴。
+ *
+ * 段数上限 512、单段文本上限 1000、时长上限 36_000 秒——与其它媒体字段同量级，
+ * 防止异常数据把 SRT 生成撑爆。任何一段不合法就整体拒绝：时间轴错一半比没有更糟。
+ */
+function producedTimeline(value) {
+  const input = object(value, '句级时间轴')
+  const segments = Array.isArray(input.segments) ? input.segments : null
+  if (!segments?.length || segments.length > 512) throw failure('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '句级时间轴的段数无效。')
+  const rows = segments.map((row, index) => {
+    const segment = object(row, `句级时间轴第 ${index + 1} 段`)
+    const startMs = optionalNumber(segment.startMs, `句级时间轴第 ${index + 1} 段起点`, 0, 36_000_000)
+    const durMs = optionalNumber(segment.durMs, `句级时间轴第 ${index + 1} 段时长`, 0.001, 36_000_000)
+    if (startMs === null || durMs === null) throw failure('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', `句级时间轴第 ${index + 1} 段缺少有效时间。`)
+    return {
+      index,
+      text: String(segment.text ?? '').slice(0, 1000),
+      startMs,
+      durMs,
+      // 段内句子（相对段起点的字符偏移）。缺失时字幕会回退到段级窗口，
+      // 但仍不发猜测时间——见 producedTimeline 的说明。
+      ...(Array.isArray(segment.sentences) && segment.sentences.length
+        ? {
+          sentences: segment.sentences.slice(0, 512).map((sentence) => ({
+            text: String(sentence?.text ?? '').slice(0, 1000),
+            start: optionalNumber(sentence?.start, '句子起点偏移', 0, 1_000_000) ?? 0,
+            end: optionalNumber(sentence?.end, '句子终点偏移', 0, 1_000_000) ?? 0,
+          })),
+        }
+        : {}),
+    }
+  })
+  return {
+    gapMs: optionalNumber(input.gapMs, '句级时间轴段间静音', 0, 10_000) ?? 0,
+    scale: optionalNumber(input.scale, '句级时间轴缩放', 0.01, 100) ?? 1,
+    segments: rows,
+  }
+}
+
+/** 音频标签落盘白名单：方括号内文，最多 8 个、单个不超 40 字。 */
+function normalizeAudioTagList(value) {
+  if (value == null) return []
+  if (!Array.isArray(value)) fail('SPOKEN_VIDEO_INVALID_INPUT', '音频标签必须是数组。')
+  if (value.length > 8) fail('SPOKEN_VIDEO_INVALID_INPUT', '音频标签最多 8 个。')
+  return value.map((item) => {
+    const inner = String(item ?? '').replace(/^\[(.*)\]$/u, '$1').trim()
+    if (!inner || inner.length > 40) fail('SPOKEN_VIDEO_INVALID_INPUT', '音频标签为空或超长。')
+    return inner
+  })
+}
+
 function producedStageData(stage, payload) {
   const input = object(payload, '自动阶段内容')
   if (stage === 'voiceover') {
@@ -459,6 +511,10 @@ function producedStageData(stage, payload) {
     return {
       mode: text(input.mode, '配音模式', 40), provider: text(input.provider, 'TTS 提供方', 80), taskId: optionalText(input.taskId, 'TTS 任务标识', 200) || null,
       voiceId: optionalText(input.voiceId, '音色标识', 160) || null, voiceName: optionalText(input.voiceName, '音色名称', 120) || null,
+      // 三模式下音色来源不同（预置音色名/文字描述/参考音频），落盘要留全，
+      // 否则任务回读后重试会变成另一种声音。
+      voiceDesign: optionalText(input.voiceDesign, '音色描述', 500) || null,
+      audioTags: normalizeAudioTagList(input.audioTags),
       settings: {
         rate: optionalNumber(settings.rate, '配音参数.rate', 0.5, 2) ?? 1,
         volume: optionalNumber(settings.volume, '配音参数.volume', 0, 2) ?? 1,
@@ -471,6 +527,9 @@ function producedStageData(stage, payload) {
         durationSeconds: optionalNumber(audio.durationSeconds, '自动配音时长', 0.01, 36_000),
         sampleRate: optionalInteger(audio.sampleRate, '自动配音采样率', 1, 384_000),
       },
+      // 句级时间轴（小米 MiMo 直连时由合成侧生成）。可选：老数据与其它 provider
+      // 没有它，缺失时字幕会显式报错而不是按猜测出轴，所以不必补默认值。
+      ...(input.timeline ? { timeline: producedTimeline(input.timeline) } : {}),
     }
   }
   if (stage === 'subtitles') {
