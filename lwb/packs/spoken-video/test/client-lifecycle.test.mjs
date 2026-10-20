@@ -6,7 +6,13 @@ import test from 'node:test'
 test('unloading releases capability pages so the client can be loaded again', async () => {
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
   const start = source.indexOf('    async function apply(ctx)')
-  const end = source.indexOf('    exports.inject', start)
+  // 只取到「第一个顶格导出行」为止。vm 沙箱只注入了 apply 需要的宿主依赖、
+  // 并没有 `exports`，把导出语句切进来会抛 ReferenceError: exports is not defined。
+  // 按正则找第一个 `^ {4}exports\.` 而不是枚举具体导出名：将来新增任何导出
+  // （排在 exports.inject 之前或之后都一样）都不会再被切进沙箱。
+  const rest = source.slice(start)
+  const match = /^\s{4}exports\./mu.exec(rest)
+  const end = match ? start + match.index : source.length
   assert.ok(start >= 0 && end > start)
   const components = ['AccountPositioningPage', 'SignalsPage', 'TopicsPage', 'ScriptPage',
     'AudioCaptionsPageV2', 'VideoPreviewPageV2', 'PublishPageV4', 'ContentSchedulePage', 'PipelineBoardPage']

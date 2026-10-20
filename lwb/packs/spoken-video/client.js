@@ -386,40 +386,12 @@ window.__ModuleLoader__.load({
       .sv-fail-recent { display:grid; gap:6px; }
       /* 页面内弹窗：与提示音同源同人不在电脑前时的兜底。 */
       .sv-toast-stack { position:fixed; z-index:60; right:18px; bottom:18px; display:grid; gap:9px; width:min(380px,calc(100vw - 36px)); }
-      /* 本地引擎面板 */
-      .sv-engine-panel { display:grid; gap:12px; padding:15px 17px; border:1px solid var(--lwb-line); border-radius:11px; background:var(--lwb-surface); }
-      /*
-       * 配音页顶部三个面板（本地推理引擎 / 本地配音配置 / 参考音色库）的栅格。
-       *
-       * 2026-10-11 重排。此前它们是竖着平铺的三块整宽卡片，标题、说明、控件
-       * 各占一行，读起来像三个互不相干的设置页堆在一起——尤其「参考音色库」
-       * 本来是可扫读的列表，被拉成整宽后一行只有一个音色。
-       *
-       * 现在：宽屏两列（引擎 + 配音配置并排，音色库单独占下方整行放列表），
-       * 窄屏回落成单列。用 grid 而不是 flex，列宽才能真正均分。
-       */
-      .sv-setup-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:start; }
-      .sv-setup-grid > .sv-voice-panel { grid-column:1 / -1; }
-      /*
-       * 刻意**不**做等高（align-items:start）。
-       * 试过 stretch 把两栏拉到一样高，结果引擎面板内容只到 560px、面板却有 675px，
-       * 底下留出 115px 纯空白，比底边不齐更难看。两栏内容天然不等量
-       * （引擎就两个运行项，配置有一堆字段），顶部对齐、各自伸展才是对的。
-       */
-      /* 云端/本地分组的小标题：把「这一组字段属于哪种合成方式」讲清楚，
-         免得切到本地还看见小米音色那几个字段，以为它也在生效。 */
-      .sv-setup-subsection { display:grid; gap:9px; padding:11px 12px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-page); }
-      .sv-subsection-title { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); font-weight:800; }
-      .sv-style-presets { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
       /* 音色库的上传区：和上面的音色卡片之间有一道虚线，视觉上分得开「已有的」
          与「往里加」，否则一排卡片下面跟着输入框会以为是某个音色的编辑框。 */
       .sv-voice-upload { display:grid; gap:7px; padding-top:11px; border-top:1px dashed var(--lwb-line); }
       .sv-voice-upload-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
       .sv-voice-upload-row .sv-input { flex:1 1 240px; min-width:0; }
       .sv-voice-upload-row button { flex:none; }
-      .sv-style-presets > .sv-meta { margin-right:2px; }
-      body[data-ds-dark-theme] .sv-setup-subsection { background:#1b2530; }
-      @media (max-width:900px) { .sv-setup-grid { grid-template-columns:1fr; } .sv-setup-grid > .sv-voice-panel { grid-column:auto; } }
       .sv-engine-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:9px; }
       .sv-engine-head h3 { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-md,15px); }
       .sv-engine-actions { display:flex; flex-wrap:wrap; gap:7px; }
@@ -683,6 +655,25 @@ window.__ModuleLoader__.load({
       .sv-media-field-wide { grid-column:1/-1; }
       .sv-style-presets { display:flex; flex-wrap:wrap; align-items:center; gap:5px; }
       .sv-style-presets > .sv-meta { margin:0 2px 0 0; }
+      /* 三模式切换：三个模型互斥，所以做成并列的 radio 卡而不是一个下拉——
+         下拉会让人以为可以混着填，radio 卡把「互斥」这件事说在明面上。 */
+      .sv-voice-modes { display:grid; grid-template-columns:repeat(auto-fit,minmax(0,1fr)); gap:8px; margin:2px 0 4px; }
+      .sv-voice-modes-wide { grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }
+      .sv-voice-mode { display:flex; flex-direction:column; gap:3px; padding:9px 11px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-page); color:var(--lwb-text); font:inherit; text-align:left; cursor:pointer; }
+      .sv-voice-mode[data-active="true"] { border-color:var(--lwb-accent,#3b82f6); box-shadow:0 0 0 1px var(--lwb-accent,#3b82f6) inset; }
+      .sv-voice-mode:disabled { opacity:.55; cursor:not-allowed; }
+      .sv-voice-mode-label { font-size:var(--lwb-text-sm,13px); font-weight:700; }
+      .sv-voice-mode-hint { font-size:var(--lwb-text-xs,12px); color:var(--lwb-muted); line-height:1.5; }
+      body[data-ds-dark-theme] .sv-voice-mode { background:#182430; border-color:#2c3a48; }
+      body[data-ds-dark-theme] .sv-voice-mode[data-active="true"] { background:#1d2b3a; }
+      /* 音频标签按钮组：贴着文本框放，按组分行，一行放不下自然换行。 */
+      .sv-audio-tags { display:flex; flex-direction:column; gap:6px; margin:2px 0 4px; }
+      .sv-audio-tags-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+      .sv-audio-tags-head .sv-meta { margin:0; }
+      .sv-audio-tags-head .sv-meta[data-tone="warn"] { color:#7a5b17; font-weight:700; }
+      body[data-ds-dark-theme] .sv-audio-tags-head .sv-meta[data-tone="warn"] { color:#e8d9a9; }
+      .sv-audio-tag-row { display:flex; flex-wrap:wrap; align-items:center; gap:5px; }
+      .sv-audio-tag-group { min-width:64px; font-size:var(--lwb-text-xs,12px); color:var(--lwb-muted); }
       .sv-warn { margin:0; padding:10px 11px; border:1px solid #ecd39b; border-radius:7px; color:#7a5b17; background:#fffaf0; font-size:var(--lwb-text-sm,13px); line-height:1.55; }
       body[data-ds-dark-theme] .sv-warn { border-color:#7a6534; color:#e8d9a9; background:#332b1b; }
       .sv-media-drawer-foot { display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:14px; border-top:1px solid var(--lwb-line); }
@@ -1311,469 +1302,6 @@ window.__ModuleLoader__.load({
      * 音频上下文必须在用户手势里首次解锁，这是浏览器自动播放策略的要求——
      * 所以开关按钮同时承担「开声音」和「解锁音频」两件事，光勾选不点不会生效。
      */
-    /**
-     * 本地引擎面板：桥接与两个 ComfyUI 引擎的状态、启停、显存释放与日志。
-     *
-     * 此前这些只能在桥接自带的独立网页（127.0.0.1:8199）里操作，而那个页面没有
-     * 任何入口链接——用户得自己记住地址。把它搬进工作台之后，「引擎挂了怎么办」
-     * 这件事从「知道一个隐藏网址」变成「打开这个页面看一眼」。
-     *
-     * 不做的事：不绕过桥接直接操作引擎。桥接才是引擎状态的唯一持有者（它记着
-     * starting、做过空闲回收、知道端口对应哪个 PID），工作台只做数据搬运。
-     */
-    /**
-     * 参考音色库。
-     *
-     * 音频本体始终在桥接的 voices/ 目录里（那是本机素材，不在版本控制中）；这里
-     * 只列元信息并给出试听地址。删除交给桥接执行——只有它知道一个音色对应哪几个
-     * 文件（音频 + 转写文本 + 参数 json），工作台只发一个 id。
-     */
-    function VoiceLibraryPanel() {
-      const [state, setState] = React.useState(null);
-      const [busy, setBusy] = React.useState(null);
-      const [error, setError] = React.useState(null);
-      const [audio, setAudio] = React.useState(null);
-      const [uploading, setUploading] = React.useState(false);
-      const [notice, setNotice] = React.useState(null);
-      const [voiceId, setVoiceId] = React.useState('');
-      const fileRef = React.useRef(null);
-
-      const load = React.useCallback(async () => {
-        try { const next = await remoteStatic('bridgeVoices'); setState(next); setError(null); }
-        catch (cause) { setError(cause.message); }
-      }, []);
-
-      React.useEffect(() => { void load(); }, [load]);
-
-      /**
-       * 往音色库存一个参考音频。
-       *
-       * 2026-10-11 补。之前这个面板只有试听和删除，上传被塞在「新建配音任务」
-       * 的表单里（走 uploadVoiceReference，传的是**这一次任务**的参考音频，
-       * 不进音色库）。逻辑因此是断的：想扩充音色库得先建一个配音任务，传进来的
-       * 音色还只在那个任务里可见。
-       */
-      const upload = async (event) => {
-        const file = event.target.files?.[0] || null;
-        event.target.value = '';
-        if (!file || uploading) return;
-        setUploading(true); setError(null); setNotice(null);
-        try {
-          const data = await base64FromAudioFile(file);
-          const result = await remoteStatic('bridgeVoiceUpload', {
-            name: file.name,
-            mediaType: file.type,
-            data,
-            id: voiceId.trim() || undefined,
-          });
-          if (!result?.ok) {
-            setError(result?.reason || '上传失败');
-          } else {
-            setVoiceId('');
-            setNotice(`已入库：${result.id}。可在上面「默认音色」选用，也可配音时选它。`);
-            await load();
-          }
-        } catch (cause) { setError(cause.message); }
-        finally { setUploading(false); }
-      };
-
-      const remove = async (id) => {
-        setBusy(id); setError(null);
-        try {
-          const result = await remoteStatic('bridgeVoiceDelete', { id });
-          if (!result?.ok) setError(result?.reason || '删除失败');
-          else { setAudio(null); await load(); }
-        } catch (cause) { setError(cause.message); }
-        finally { setBusy(null); }
-      };
-
-      if (!state) return h('section', { className: 'sv-voice-panel' }, h('p', { className: 'sv-meta' }, '正在读取音色库…'));
-      if (!state.available) return null;
-
-      // 拆出中间变量而不是一路套下去：三层 h() 嵌套加 map() 再加三元，括号数到
-      // 第四层就没法靠眼睛数了（这次就数错过一次）。
-      const voiceMeta = (voice) => [
-        voice.ext.toUpperCase(),
-        voice.size ? `${Math.round(voice.size / 1024)} KB` : null,
-        voice.hasTxt ? '含转写' : null,
-        voice.hasJson ? '含参数' : null,
-      ].filter(Boolean).join(' · ');
-
-      const voiceRow = (voice) => h('li', { key: voice.id, className: 'sv-voice-row' },
-        h('div', { className: 'sv-voice-head' },
-          h('div', { className: 'sv-voice-id' },
-            h('strong', null, voice.id),
-            h('span', { className: 'sv-meta' }, voiceMeta(voice))),
-          h('div', { className: 'sv-voice-buttons' },
-            h('button', {
-              type: 'button', className: 'lwb-plain-button',
-              onClick: () => setAudio(audio === voice.id ? null : voice.id),
-            }, audio === voice.id ? '收起' : '试听'),
-            h('button', {
-              type: 'button', className: 'lwb-plain-button', disabled: busy === voice.id,
-              title: '删除该音色及其转写文本与参数文件',
-              onClick: () => { void remove(voice.id); },
-            }, busy === voice.id ? '删除中…' : '删除'))),
-        audio === voice.id
-          ? h('audio', { className: 'sv-voice-audio', controls: true, src: voice.audioUrl })
-          : null);
-
-      return h('section', { className: 'sv-voice-panel' },
-        h('header', { className: 'sv-engine-head' },
-          h('h3', null, '参考音色库'),
-          h('div', { className: 'sv-engine-actions' },
-            h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => { void load(); } }, '刷新'))),
-        state.voices.length === 0
-          ? h('p', { className: 'sv-meta' }, '还没有参考音色。传了参考音频时配音会自动走声音复刻。')
-          : h('ul', { className: 'sv-voice-list' }, state.voices.map(voiceRow)),
-        // 上传区放在列表下面而不是标题栏里：它是「往库里加东西」的动作，
-        // 和「刷新/试听/删除」这类查看操作不是一类，混在一排会让人以为标题栏
-        // 那三个按钮管着全部操作。
-        h('div', { className: 'sv-voice-upload' },
-          h('input', {
-            type: 'file', ref: fileRef, accept: 'audio/*,.wav,.mp3,.m4a,.flac,.ogg,.aiff',
-            style: { display: 'none' }, onChange: (event) => { void upload(event); },
-          }),
-          h('div', { className: 'sv-voice-upload-row' },
-            h('input', {
-              className: 'sv-input', value: voiceId, maxLength: 64,
-              placeholder: '音色 ID（可留空，默认用文件名）',
-              disabled: uploading,
-              onChange: (event) => setVoiceId(event.target.value),
-            }),
-            h('button', {
-              type: 'button', className: 'lwb-primary-button', disabled: uploading,
-              onClick: () => fileRef.current?.click?.(),
-            }, uploading ? '正在上传…' : '上传参考音频')),
-          h('p', { className: 'sv-meta' }, '支持 WAV / MP3 / M4A / FLAC / OGG / AIFF，单个不超过 60 MiB。音色 ID 留空则用文件名。填中文时桥接可能改成拼音或短 id——上传成功后会显示它实际保存的名字，以那个为准。')),
-        notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null,
-        error ? h('p', { className: 'sv-error' }, error) : null);
-    }
-
-    /**
-     * 桥接配置：配音方式、小米音色与语气、默认音色、数字中文读法。
-     *
-     * **API Key 不回显。** 桥接的 /admin/config 会把整份 config.json 原样返回，
-     * 其中 mimo.apiKey 是明文；这里只显示「已配置 / 未配置」。真要换 Key 去 8199
-     * 的配置中心——那个网页本来就要保留，它还管音色上传等这里不做的事。
-     */
-    function BridgeConfigPanel() {
-      const [config, setConfig] = React.useState(null);
-      const [form, setForm] = React.useState(null);
-      const [busy, setBusy] = React.useState(null);
-      const [error, setError] = React.useState(null);
-      const [test, setTest] = React.useState(null);
-      /**
-       * 折叠状态。
-       *
-       * 2026-10-11 用户要求：这组配置「一般用不到」，不该每次进配音页都铺开占掉
-       * 半屏。默认收起，但**不能**每次进来都要手点两下才看得到内容——所以状态存
-       * localStorage，跨刷新保留；只有显式点开才展开到本次会话。
-       *
-       * localStorage 在隐私模式下会抛（见本文件 NOTIFY_KEY 的处理），包一层。
-       */
-      const [expanded, setExpanded] = React.useState(() => {
-        try { return window.localStorage?.getItem('lwb-sv-bridge-config-open') === '1' } catch { return false }
-      });
-      const toggleExpanded = () => setExpanded((current) => {
-        const next = !current;
-        try { window.localStorage?.setItem('lwb-sv-bridge-config-open', next ? '1' : '0') } catch { /* 隐私模式，忽略 */ }
-        return next;
-      });
-
-      const load = React.useCallback(async () => {
-        try {
-          const next = await remoteStatic('bridgeConfig');
-          setConfig(next);
-          if (next?.available) {
-            setForm((current) => current || {
-              ttsProvider: next.ttsProvider,
-              mimoVoice: next.mimo?.voice || '',
-              mimoStyle: next.mimo?.style || '',
-              defaultVoice: next.defaultVoice || '',
-              chineseNumbers: next.chineseNumbers !== false,
-            });
-          }
-          setError(null);
-        } catch (cause) { setError(cause.message); }
-      }, []);
-
-      React.useEffect(() => { void load(); }, [load]);
-
-      const save = async () => {
-        setBusy('save'); setError(null); setTest(null);
-        try {
-          const next = await remoteStatic('bridgeConfigUpdate', {
-            ttsProvider: form.ttsProvider,
-            mimo: { voice: form.mimoVoice, style: form.mimoStyle },
-            defaultVoice: form.defaultVoice,
-            chineseNumbers: form.chineseNumbers,
-          });
-          if (next?.available === false) setError(next.reason || '保存失败');
-          else { setConfig(next); setForm(null); }
-        } catch (cause) { setError(cause.message); }
-        finally { setBusy(null); }
-      };
-
-      const tryVoice = async () => {
-        setBusy('test'); setError(null); setTest(null);
-        try {
-          const result = await remoteStatic('bridgeVoiceTest', { voice: form.mimoVoice, style: form.mimoStyle });
-          setTest(result);
-        } catch (cause) { setError(cause.message); }
-        finally { setBusy(null); }
-      };
-
-      if (!config) return null;
-      if (config.available === false) return null;
-      if (!form) return h('section', { className: 'sv-engine-panel' }, h('p', { className: 'sv-meta' }, '正在读取桥接配置…'));
-
-      const isCloud = form.ttsProvider === 'cloud';
-      // 下拉选项以桥接实测返回的 builtin_voices 为准，回落到前端兜底表；
-      // 当前值如果不在表里（老配置或桥接新增了音色）也要补进去，否则 select
-      // 会把已保存的值显示成第一项——看着像配好了，其实存的是别的音色。
-      const voiceOptions = Array.from(new Set([
-        ...(Array.isArray(config.mimo?.builtinVoices) && config.mimo.builtinVoices.length ? config.mimo.builtinVoices : SV_MIMO_BUILTIN_VOICES),
-        form.mimoVoice,
-      ].filter((value) => typeof value === 'string' && value.trim()))).filter(Boolean);
-      // 默认音色指向的是本机音色库（参考音频），所以选项来自音色库而不是内置音色。
-      const libraryOptions = Array.from(new Set([
-        ...(Array.isArray(config.voices) ? config.voices.map((voice) => voice.id) : []),
-        form.defaultVoice,
-      ].filter((value) => typeof value === 'string' && value.trim()))).filter(Boolean);
-
-      const setField = (patch) => setForm({ ...form, ...patch });
-
-      return h('section', { className: 'sv-engine-panel' },
-        // 收起时也要看得见当前是什么配置——只留一个标题会让人以为面板空了。
-        // 所以标题栏常驻一行摘要：合成方式 + 音色 + 语气。
-        h('header', { className: 'sv-engine-head' },
-          h('button', {
-            type: 'button', className: 'sv-collapsible-head', 'aria-expanded': expanded ? 'true' : 'false',
-            onClick: toggleExpanded,
-          },
-            h('span', { className: 'sv-collapse-caret', 'aria-hidden': 'true' }, expanded ? '▾' : '▸'),
-            h('h3', null, '本地配音配置')),
-          expanded
-            ? h('span', { className: 'sv-meta' }, '保存在本机桥接的 config.json，不进版本库')
-            : h('span', { className: 'sv-meta' },
-              `${isCloud ? '云端' : '本地'}合成`
-              + `${form.mimoVoice ? ` · ${form.mimoVoice}` : ''}`
-              + `${form.mimoStyle ? ` · ${form.mimoStyle.replace(/[，。]$/u, '')}` : ''}`
-              + `${form.defaultVoice ? ` · 默认音色 ${form.defaultVoice}` : ''}`)),
-        !expanded
-          ? h('p', { className: 'sv-meta' }, '这组配置一般很少改动，收起了。点标题展开。')
-          : null,
-
-        expanded ? h(React.Fragment, null,
-        h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '配音方式' },
-          [['cloud', '云端合成（小米 MiMo）'], ['local', '本地合成（LongCat）']].map(([id, label]) =>
-            h('button', {
-              key: id, type: 'button', className: 'sv-media-provider-choice',
-              'data-active': form.ttsProvider === id ? 'true' : 'false',
-              onClick: () => setField({ ttsProvider: id }),
-            }, label))),
-
-        // 云端与本地的可调项完全不同：小米音色/语气只对云端生效，本地合成用音色库。
-        // 分开展示而不是一股脑列出来再各自置灰——置灰的字段会让人以为坏了。
-        isCloud
-          ? h('div', { className: 'sv-setup-subsection' },
-            h('p', { className: 'sv-subsection-title' }, '云端合成 · 小米 MiMo'),
-            h('div', { className: 'sv-bridge-fields' },
-              h('label', { className: 'sv-media-field' }, h('span', null, '小米音色'),
-                h('select', { className: 'sv-select', value: form.mimoVoice, onChange: (e) => setField({ mimoVoice: e.target.value }) },
-                  h('option', { value: '' }, '未指定（跟随平台默认）'),
-                  voiceOptions.map((voice) => h('option', { key: voice, value: voice },
-                    SV_MIMO_VOICE_HINTS[voice] ? `${voice} — ${SV_MIMO_VOICE_HINTS[voice]}` : voice))))),
-            SV_MIMO_VOICE_HINTS[form.mimoVoice]
-              ? h('p', { className: 'sv-note' }, `当前音色「${form.mimoVoice}」：${SV_MIMO_VOICE_HINTS[form.mimoVoice]}`)
-              : null,
-            h('label', { className: 'sv-media-field' }, h('span', null, '语气 / 节奏（可留空）'),
-              h('input', {
-                className: 'sv-input', value: form.mimoStyle, maxLength: 200,
-                placeholder: '留空则用平台默认语气；也可点下方胶囊一键填入',
-                onChange: (e) => setField({ mimoStyle: e.target.value }),
-              })),
-            SV_VOICE_STYLE_PRESETS.length
-              ? h('div', { className: 'sv-style-presets' },
-                h('span', { className: 'sv-meta' }, '常用语气'),
-                SV_VOICE_STYLE_PRESETS.map((style) => h('button', {
-                  key: style, type: 'button', className: 'sv-filter-chip',
-                  'data-on': form.mimoStyle === style ? 'true' : 'false',
-                  onClick: () => setField({ mimoStyle: form.mimoStyle === style ? '' : style }),
-                }, style.replace(/[，。]$/u, ''))))
-              : null)
-          : h('div', { className: 'sv-setup-subsection' },
-            h('p', { className: 'sv-subsection-title' }, '本地合成 · LongCat'),
-            h('p', { className: 'sv-note' }, '本地合成需要约 23 GB 空闲内存，且 16G 显卡上无法与封面生图同时驻留。多数情况应选云端。'),
-            h('p', { className: 'sv-meta' }, '本地合成不使用「小米音色」和「语气」，它读的是下方默认音色指向的本机参考音频。')),
-
-        // 「默认音色」独占一行，checkbox 另起一行。
-        // 之前两者同在 .sv-bridge-fields（auto-fit minmax(215px,1fr)）里，在 535px
-        // 宽的那一栏会分成两列，checkbox 被挤到右边还换行，读起来像两个不相干的
-        // 开关。默认音色是「选哪个声音」、中文读法是「怎么念」，本来就该分开讲。
-        h('div', { className: 'sv-setup-subsection' },
-          h('label', { className: 'sv-media-field' }, h('span', null, '默认音色（参考音频）'),
-            libraryOptions.length
-              ? h('select', { className: 'sv-select', value: form.defaultVoice, onChange: (e) => setField({ defaultVoice: e.target.value }) },
-                h('option', { value: '' }, '未设置（用系统默认音色）'),
-                libraryOptions.map((id) => h('option', { key: id, value: id }, id)))
-              : h('input', {
-                className: 'sv-input', value: form.defaultVoice, maxLength: 60,
-                placeholder: '音色库为空，先到下方「参考音色库」上传参考音频',
-                onChange: (e) => setField({ defaultVoice: e.target.value }),
-              })),
-          h('label', { className: 'sv-checks' }, h('input', { type: 'checkbox', checked: form.chineseNumbers, onChange: (e) => setField({ chineseNumbers: e.target.checked }) }), '数字按中文读法念（避免 TTS 念成「二零二五」）')),
-
-        h('div', { className: 'sv-engine-actions' },
-          h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(busy), onClick: () => { void tryVoice(); } }, busy === 'test' ? '正在合成…' : '试听一句'),
-          h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(busy), onClick: () => { void save(); } }, busy === 'save' ? '保存中…' : '保存配置')),
-
-        test ? (test.ok
-          ? h('div', { className: 'sv-bridge-test' },
-            h('p', { className: 'sv-meta' }, `试听成功${test.seconds ? ` · ${test.seconds} 秒` : ''}`),
-            test.audioUrl ? h('audio', { className: 'sv-voice-audio', controls: true, src: test.audioUrl }) : null)
-          : h('p', { className: 'sv-error' }, `试听失败：${test.reason || '未知原因'}`)) : null,
-        error ? h('p', { className: 'sv-error' }, error) : null,
-        ) : null);
-    }
-
-    function LocalEnginePanel({ packId }) {
-      const [state, setState] = React.useState(null);
-      const [busy, setBusy] = React.useState(null);
-      const [showLogs, setShowLogs] = React.useState(false);
-      const [logs, setLogs] = React.useState(null);
-      const [tasks, setTasks] = React.useState(null);
-      const [error, setError] = React.useState(null);
-
-      const load = React.useCallback(async () => {
-        try {
-          const next = await remoteStatic('bridgeControl');
-          setState(next); setError(null);
-        } catch (cause) { setError(cause.message); }
-      }, []);
-
-      React.useEffect(() => {
-        let active = true;
-        const tick = async () => { if (active) await load(); };
-        void tick();
-        // 引擎有「正在启动」的中间态，刷新太慢会让人以为按钮没生效。
-        const timer = setInterval(tick, 5000);
-        return () => { active = false; clearInterval(timer); };
-      }, [load]);
-
-      const act = async (kind, action) => {
-        setBusy(`${kind}:${action}`); setError(null);
-        try {
-          const result = await remoteStatic('bridgeEngineAction', { kind, action });
-          if (!result?.ok) setError(result?.reason || '操作失败');
-          await load();
-        } catch (cause) { setError(cause.message); }
-        finally { setBusy(null); }
-      };
-
-      const openLogs = async () => {
-        if (showLogs) { setShowLogs(false); return; }
-        setShowLogs(true);
-        try {
-          const next = await remoteStatic('bridgeLogs', { lines: 80 });
-          setLogs(next); setError(null);
-        } catch (cause) { setError(cause.message); }
-      };
-
-      const openTasks = async () => {
-        try {
-          const next = await remoteStatic('bridgeTasks');
-          setTasks(next); setError(null);
-        } catch (cause) { setError(cause.message); }
-      };
-
-      if (!state) return h('section', { className: 'sv-engine-panel' }, h('p', { className: 'sv-meta' }, '正在读取本地引擎状态…'));
-      if (!state.available) {
-        return h('section', { className: 'sv-engine-panel' },
-          h('header', { className: 'sv-engine-head' },
-            h('h3', null, '本地推理引擎'),
-            h('span', { className: 'sv-tag sv-status-error' }, '桥接未运行')),
-          h('p', { className: 'sv-note' }, `本地媒体桥接不可用：${state.reason || '未知原因'}。请确认它已启动——保活脚本每 5 分钟会自动拉起一次，也可双击 media-bridge 目录下的「启动桥接.cmd」。`),
-          error ? h('p', { className: 'sv-error' }, error) : null);
-      }
-
-      const gpu = state.gpu;
-      const memory = state.memory;
-      const gpuPercent = gpu && gpu.totalMiB ? Math.round((gpu.usedMiB / gpu.totalMiB) * 100) : null;
-      const memPercent = memory && memory.totalMiB ? Math.round(((memory.totalMiB - memory.freeMiB) / memory.totalMiB) * 100) : null;
-
-      return h('section', { className: 'sv-engine-panel' },
-        h('header', { className: 'sv-engine-head' },
-          h('h3', null, '本地推理引擎'),
-          h('div', { className: 'sv-engine-actions' },
-            h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => { void load(); } }, '刷新'),
-            h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => { void openLogs(); } }, showLogs ? '收起日志' : '查看日志'),
-            h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => { void openTasks(); } }, '近期任务'))),
-
-        h('div', { className: 'sv-engine-usage' },
-          gpu && gpu.totalMiB ? h('div', { className: 'sv-usage' },
-            h('span', { className: 'sv-usage-label' }, '显存'),
-            h('span', { className: 'sv-usage-value' }, `${(gpu.usedMiB / 1024).toFixed(1)} / ${(gpu.totalMiB / 1024).toFixed(0)} GB`),
-            h('span', { className: 'sv-usage-bar', 'data-level': gpuPercent >= 90 ? 'high' : gpuPercent >= 70 ? 'mid' : 'low' },
-              h('span', { className: 'sv-usage-fill', style: { width: `${gpuPercent || 0}%` } }))) : null,
-          memory && memory.totalMiB ? h('div', { className: 'sv-usage' },
-            h('span', { className: 'sv-usage-label' }, '内存'),
-            h('span', { className: 'sv-usage-value' }, `${((memory.totalMiB - memory.freeMiB) / 1024).toFixed(1)} / ${(memory.totalMiB / 1024).toFixed(0)} GB`),
-            h('span', { className: 'sv-usage-bar', 'data-level': memPercent >= 90 ? 'high' : memPercent >= 70 ? 'mid' : 'low' },
-              h('span', { className: 'sv-usage-fill', style: { width: `${memPercent || 0}%` } }))) : null),
-
-        // 两个引擎（字幕 / 生图）并排：2026-10-11 用户要求。此前是一列两个整宽卡片，
-        // 而它们的信息量完全一样（名称、端口、状态、两个按钮），并排一眼就能对比
-        // 「谁在跑、谁停了、谁占了显存」，比上下排开省一屏。
-        h('div', { className: 'sv-engine-grid' },
-          (state.engines || []).map((engine) => h('div', { key: engine.kind, className: 'sv-engine-row' },
-          h('div', { className: 'sv-engine-id' },
-            h('strong', null, engine.label || engine.kind),
-            h('span', { className: 'sv-meta' }, `端口 ${engine.port}`),
-            engine.lastError ? h('span', { className: 'sv-error' }, engine.lastError) : null),
-          h('span', {
-            className: `sv-tag ${engine.reachable ? 'sv-stage' : engine.starting ? '' : 'sv-status-error'}`,
-          }, engine.reachable ? '运行中' : engine.starting ? '启动中…' : '未运行'),
-          h('div', { className: 'sv-engine-buttons' },
-            // 释放显存只在跑着的时候有意义；模型没加载时那个按钮是噪声。
-            engine.reachable ? h('button', {
-              type: 'button', className: 'lwb-plain-button', disabled: Boolean(busy),
-              title: '卸载已加载的模型并归还显存，进程保留（下次会自动重新加载）',
-              onClick: () => { void act(engine.kind, 'free'); },
-            }, busy === `${engine.kind}:free` ? '释放中…' : '释放显存') : null,
-            engine.reachable ? h('button', {
-              type: 'button', className: 'lwb-plain-button', disabled: Boolean(busy),
-              title: '结束引擎进程，把内存还给系统（下次任务会自动重新拉起）',
-              onClick: () => { void act(engine.kind, 'stop'); },
-            }, busy === `${engine.kind}:stop` ? '停止中…' : '停止') : null,
-            !engine.reachable && !engine.starting ? h('button', {
-              type: 'button', className: 'lwb-primary-button', disabled: Boolean(busy) || engine.canLaunch === false,
-              title: engine.canLaunch === false ? '引擎路径校验未通过，请检查安装目录' : '拉起引擎并等待就绪（本地模型可能需要 30-180 秒）',
-              onClick: () => { void act(engine.kind, 'launch'); },
-            }, busy === `${engine.kind}:launch` ? '启动中，请稍候…' : '一键启动') : null)))),
-
-        error ? h('p', { className: 'sv-error' }, error) : null,
-
-        tasks ? h('div', { className: 'sv-engine-log' },
-          h('p', { className: 'sv-engine-log-head' }, `桥接近期任务（${tasks.tasks?.length || 0}）`),
-          tasks.available === false
-            ? h('p', { className: 'sv-meta' }, tasks.reason || '读取失败')
-            : (tasks.tasks || []).length === 0
-              ? h('p', { className: 'sv-meta' }, '暂无任务记录')
-              : h('ul', { className: 'sv-log-lines' }, (tasks.tasks || []).map((task) => h('li', { key: task.id },
-                `${task.kind} · ${task.status}${task.stage ? ` · ${task.stage}` : ''}${task.error_message ? ` · ${task.error_message}` : ''}`))),
-          h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setTasks(null) }, '收起')) : null,
-
-        logs ? h('div', { className: 'sv-engine-log' },
-          h('p', { className: 'sv-engine-log-head' }, '桥接日志尾部'),
-          logs.available === false
-            ? h('p', { className: 'sv-meta' }, logs.reason || '读取失败')
-            : h('ul', { className: 'sv-log-lines' }, (logs.lines || []).slice(-60).map((line, index) => h('li', { key: `${index}-${line.slice(0,12)}` }, line))),
-          h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setLogs(null) }, '收起')) : null,
-
-        h('p', { className: 'sv-meta' }, `桥接 ${state.baseUrl} · 配音方式：${state.ttsProvider === 'local' ? '本地模型' : '云端'}。引擎空闲时会自动释放显存，长时间空闲则停止进程。`));
-    }
 
     function NotifyToggle() {
       const [sound, setSound] = React.useState(() => notify.settings.sound !== false);
@@ -3779,8 +3307,55 @@ window.__ModuleLoader__.load({
     const AS_APPROVING = new Set(['video', 'packaging', 'publish']);
     const AS_STEPS = { topic: '选题', script: '写稿', approve: '确认稿件', voiceover: '配音', subtitles: '字幕', video: '成片质检', packaging: '发布资料', publish: '投递到平台' };
     const AS_TIERS = [{ id: 'short', label: '短（300-999 字）' }, { id: 'medium', label: '中（1000-2499 字）' }, { id: 'long', label: '长（2500 字以上）' }];
-    // 桥接（小米 MiMo 云端）的内置音色表；与桥接 /api/v1/tts/voiceover-info 的 builtin_voices 同源。
-    const SV_MIMO_BUILTIN_VOICES = ['冰糖', '茉莉', '苏打', '白桦', 'mimo_default'];
+    /**
+     * 配音渠道白名单：只显示小米 MiMo 一个。
+     *
+     * 这里是**唯一来源**——四处选择器（项目页连接抽屉、配音页渠道条、配音页
+     * 连接抽屉、历史任务标签）都从这里取。以前每处各写一份 `['bailian','scitiger']`，
+     * 改一次漏一处就会出现「UI 上没有这个渠道但代码还在往它传 id」。
+     *
+     * 代码里百炼 / SciTiger / 自定义 TTS 三条渠道**保留不删**（后端仍是多 provider），
+     * 只是不再出现在 UI 上。把「只有 mimo」写成常量而不是把其余分支删干净，是为了
+     * 以后要恢复某个渠道时不必从版本历史里捞代码。
+     */
+    const SV_VOICE_PROVIDER = 'mimo';
+    const SV_VOICE_PROVIDERS = [SV_VOICE_PROVIDER];
+    const SV_VOICE_PROVIDER_LABEL = { mimo: '小米 MiMo' };
+    // 历史任务仍可能带着已退役渠道的 provider 值；老数据照实回显，不静默改写。
+    const SV_RETIRED_PROVIDER_LABEL = { bailian: '百炼 BYOK', scitiger: '远端 · SciTiger', legacy: '兼容 TTS' };
+    function voiceProviderLabel(id, loopback = false) {
+      const value = String(id || '').trim();
+      if (!value) return null;
+      if (value === 'scitiger' && loopback) return '本机桥接';
+      return SV_VOICE_PROVIDER_LABEL[value] || SV_RETIRED_PROVIDER_LABEL[value] || value;
+    }
+    // MiMo 云端的内置音色表；随 mediaStatus 一并返回（service.mimoVoices），
+    // 取不到时退回这份实测值，保证下拉不是空的。
+    // 官方共 9 个。**顺序必须与后端 MIMO_VOICES 逐字一致**（后端会拿这张表做
+    // deepEqual 对齐），别为了好看重排。
+    // 另外**不要把 mimo_default 当默认音色**：它有集群差异（中国→冰糖，
+    // 其他→Mia），同一份配置换个集群就换一个声音且不报错。默认见 SV_MIMO_DEFAULT_VOICE。
+    const SV_MIMO_BUILTIN_VOICES = ['mimo_default', '冰糖', '茉莉', '苏打', '白桦', 'Mia', 'Chloe', 'Milo', 'Dean'];
+    /**
+     * 默认音色。
+     *
+     * 取运维配置的默认音色，**它配的是什么就用什么**——不能在前端硬编码
+     * 「永远是冰糖」把运维配的默认值整个忽略掉（后端已因为这个思路被打回过一次）。
+     * 唯一要拦的是 `mimo_default` 本身：它随集群变，当默认音色等于没定，
+     * 所以退到中国集群的实际音名「冰糖」。
+     *
+     * 注意 mediaStatus 里的 `defaultVoice` 是**音色档案对象**（{id,name}），
+     * 不是音名字符串，直接 String() 会得到 "[object Object]"；所以这里只认
+     * 字符串形态，读不到就回落冰糖，而不是把对象当音名传下去。
+     */
+    function svDefaultVoice(service) {
+      const raw = service?.providers?.mimo?.defaultVoice ?? service?.mimoDefaultVoice ?? SV_MIMO_DEFAULT_VOICE;
+      const configured = typeof raw === 'string' ? raw.trim() : '';
+      if (configured && configured !== 'mimo_default' && SV_MIMO_BUILTIN_VOICES.includes(configured)) return configured;
+      return SV_MIMO_DEFAULT_VOICE;
+    }
+    /** 冻结常量形式：没有 service 时（排期页初值、单测）用中国集群音名。 */
+    const SV_MIMO_DEFAULT_VOICE = '冰糖';
     /**
      * 内置音色的性格说明。
      *
@@ -3788,17 +3363,278 @@ window.__ModuleLoader__.load({
      * 语气，写稿时只能一个个试。这一栏把它变成下拉并附一句说明，选之前就知道
      * 这个声音大致是什么调子。
      *
-     * 只覆盖实测存在的五个（桥接 builtin_voices）；不在表里的音色（比如桥接
-     * 以后加了新的）照样进下拉，只是没有说明——不能因为说明表没更新就把新音色
-     * 挡在门外。
+     * 只覆盖实测存在的音名；不在表里的（比如后端以后加了新的）照样进下拉，
+     * 只是没有说明——不能因为说明表没更新就把新音色挡在门外。
      */
     const SV_MIMO_VOICE_HINTS = {
       '冰糖': '偏甜的年轻女声，适合生活方式、好物与轻松话题',
       '茉莉': '中性偏稳的女声，知识讲解与资讯播报都比较稳',
       '苏打': '清亮活泼，适合快节奏口播与开场引入',
       '白桦': '沉稳男声，适合观点表达、深度解读与结论段',
-      'mimo_default': '平台默认音色；不确定选哪个时用它',
+      'Mia': '英文音色，音色偏年轻明亮，适合英文口播与短内容',
+      'Chloe': '英文音色，中性自然，适合英文讲解与叙事',
+      'Milo': '英文音色，轻松活泼，适合英文种草与开场',
+      'Dean': '英文音色，沉稳成年男声，适合英文观点与结论段',
+      'mimo_default': '平台默认音色，有集群差异：中国集群是「冰糖」，其他集群是「Mia」。想要确定的声音请直接选音名。',
     };
+    /** 音色按语种分组显示，避免中英文混在一列里让人误以为英文音是中文音的变体。 */
+    const SV_MIMO_VOICE_GROUPS = [
+      { label: '中文音色', voices: ['冰糖', '茉莉', '苏打', '白桦'] },
+      { label: '英文音色', voices: ['Mia', 'Chloe', 'Milo', 'Dean'] },
+      { label: '平台默认（随集群不同）', voices: ['mimo_default'] },
+    ];
+
+    /**
+     * 三种合成模式，互斥不可混用（官方明确）：
+     *   preset 预置音色（唯一支持唱歌的模式）
+     *   design 用一句文字描述设计音色，描述必填
+     *   upload  上传参考音频复刻
+     * 值就是后端 `voiceSource` 的取值，不再另造一套 mode 字段。
+     */
+    const SV_VOICE_MODES = [
+      { id: 'preset', label: '预置音色', hint: '用小米官方预置音色，可选唱歌。' },
+      { id: 'design', label: '音色设计', hint: '用一段文字描述你想要的声音，每次生成一个新音色。' },
+      { id: 'upload', label: '声音克隆', hint: '上传一段参考音频，复刻说话人。只支持 wav / mp3。' },
+    ];
+    /** 唱歌只挂在预置音色模型上，另两个模型会直接 400，所以 UI 上先拦住。 */
+    const SV_SINGING_MODES = ['preset'];
+
+    /**
+     * 音频标签预设组。
+     *
+     * 官方是**两套语法**，而两套的**归属不同**（后端 buildTaggedText / countInlineAudioTags）：
+     *  · `(风格)` 放开头，是**整篇什么调子** —— 由后端 `buildTaggedText` 拼进正文，
+     *    前端只传 `audioTags` 数组，**绝不把它写进正文文本框**（写进去会被
+     *    countInlineAudioTags 当成用户内容，下次生成时还会跟着稿子累积）。
+     *  · `[音频标签]` 放句中，是**细粒度表演提示** —— 属于用户正文的一部分，
+     *    用户自己写在文本框里（所见即所得），由后端 `countInlineAudioTags` 清点。
+     *
+     * `bracket` 标出这一组走哪条路：`param` 只进数组、`square` 插进正文光标处。
+     * 「唱歌」组是 `param`（官方 `(唱歌)歌词`），且只在预置音色模式可用。
+     */
+    const SV_AUDIO_TAG_GROUPS = [
+      { label: '整体风格', tags: ['新闻播报', '知识博主', '情感电台', '相声捧哏', '广告配音', '纪录片旁白'], bracket: 'param' },
+      { label: '方言', tags: ['东北话', '四川话', '粤语', '上海话', '闽南话'], bracket: 'param' },
+      { label: '角色扮演', tags: ['角色扮演：老师', '角色扮演：客服', '角色扮演：旁白'], bracket: 'param' },
+      { label: '唱歌', tags: ['唱歌', '轻声哼唱', '高声歌唱'], bracket: 'param', presetOnly: true },
+      { label: '细粒度', tags: ['叹气', '哽咽', '深吸气', '轻声', '停顿', '提高音量', '压低音量'], bracket: 'square' },
+      { label: '情绪', tags: ['开心', '难过', '生气', '惊讶', '委屈', '激动'], bracket: 'square' },
+      { label: '语调', tags: ['温柔', '严肃', '活泼', '慵懒', '急促', '平静'], bracket: 'square' },
+      { label: '音色定位', tags: ['磁性', '清亮', '低沉', '沙哑', '少女音', '少年音'], bracket: 'square' },
+    ];
+    /** 两类标签合并计数：入参标签数 + 正文内插方括号标签数 ≤ 8。 */
+    const SV_AUDIO_TAG_MAX_COUNT = 8;
+    const SV_AUDIO_TAG_MAX_LENGTH = 40;
+    /**
+     * 标出正文里真正的内插标签槽位，并给出总数。
+     *
+     * 与后端 `countInlineAudioTags` **同口径**（2026-10-20 Chief 裁决收紧）：
+     * 形如 `[xxx]` / `［xxx］`，且**内容非空、长度 ≤40、内部不含任何括号**
+     * 才算一个标签。**不成对的（只有 `[` 没有 `]`）不算标签**，原样当普通
+     * 文本放行。
+     *
+     * 为什么收紧：口播稿里写 `[1]` 引用来源是真实场景。原先「数 `[` 起始符」
+     * 会让正常文案占配额，改稿时突然被拒而用户不知道为什么——这个失败模式
+     * 比漏算一个标签糟得多。
+     *
+     * 圆括号组这里**一个都不数**：开头 `(风格)` 由 `audioTags` 入参承载，不经正文。
+     *
+     * 返回 `{ used, spans }`：spans 带起止位置，插入时用来判断光标是否落在
+     * 某个标签内部（落进去再插标签会插出嵌套括号，模型解析歧义）。
+     */
+    function svAudioTagSlots(text) {
+      const body = String(text ?? '');
+      const spans = [];
+      const re = /[[［]([^\]］]{1,40})[\]］]/gu;
+      let match = re.exec(body);
+      while (match) {
+        // 内容为空、或内部还带括号，都不算标签（与后端同规则）。
+        if (!/[[\]［］()（）]/u.test(match[1])) {
+          spans.push({ start: match.index, end: match.index + match[0].length, tag: match[1].trim() });
+        }
+        re.lastIndex = match.index + match[0].length;
+        match = re.exec(body);
+      }
+      return { used: spans.length, spans };
+    }
+    /** 已在正文里出现的标签名（去掉括号后比对），用于「这一条已经用过了」。 */
+    function svAudioTagNames(text) {
+      const body = String(text || '');
+      const out = [];
+      const re = /[[［(（]([^()［］]*)[\]］)）]/gu;
+      let match = re.exec(body);
+      while (match) {
+        for (const piece of match[1].split(/[，,]/u)) {
+          const tag = piece.trim();
+          if (tag) out.push(tag);
+        }
+        match = re.exec(body);
+      }
+      return out;
+    }
+    /**
+     * 插入前的校验。返回 null 表示可以插入，否则返回该拦下时要说的话。
+     *
+     * 上限是**合并计数**：入参标签（`audioTags`，整体风格/方言/唱歌）加上正文里
+     * 内插的方括号标签，一起不超过 8 个——与后端
+     * `normalizeAudioTags(list, countInlineAudioTags(text))` 同口径。
+     * 只按其中一类算，都会让用户提交后才吃后端 400。
+     */
+    function svAudioTagError(text, tag, paramTags = []) {
+      // 与后端 normalizeAudioTags 同序：**只剥最外层的一对括号**，再判内层是否
+      // 还有括号。先全局去括号会把 `a[b]` 洗成 `ab` 放过去，与后端不一致。
+      const raw = String(tag || '').trim();
+      const clean = raw.replace(/^[[［(（](.*)[\]］)）]$/u, '$1').trim();
+      if (!clean) return '这个标签是空的，选一个下面的预设标签。';
+      if (clean.length > SV_AUDIO_TAG_MAX_LENGTH) return `标签「${clean.slice(0, 12)}…」超过 ${SV_AUDIO_TAG_MAX_LENGTH} 字，换个短一点的描述。`;
+      if (/[[\]［］()（）]/u.test(clean)) return `标签「${clean}」里带了括号，请去掉——括号只用来包住整组标签。`;
+      const { used } = svAudioTagSlots(text);
+      const paramList = Array.isArray(paramTags) ? paramTags : [];
+      const total = used + paramList.length;
+      if (total >= SV_AUDIO_TAG_MAX_COUNT) return `已经有 ${total} 个标签了（上限 ${SV_AUDIO_TAG_MAX_COUNT} 个，正文 ${used} 个 + 整体风格 ${paramList.length} 个）。先用掉几个，或从正文里删掉已有的标签再加。`;
+      if (paramList.includes(clean) || svAudioTagNames(text).includes(clean)) return `标签「${clean}」已经在正文里了，换一个或直接手写。`;
+      return null;
+    }
+
+    /**
+     * 参考音频格式校验。官方只认 wav/mp3，其余格式直接 400。
+     *
+     * 这条必须在**上传之前**拦：以前 m4a/aac 直接送上去只回一个笼统的「合成失败」，
+     * 用户分不清是自己文件格式不对还是别的问题；再密集重试几次还会 429，把真正的
+     * 原因盖掉。所以宁可在这里说清楚，也不要让它到后端才炸。
+     */
+    const SV_CLONE_EXTENSIONS = ['wav', 'mp3'];
+    const SV_CLONE_ACCEPT = '.wav,.mp3,audio/wav,audio/x-wav,audio/mpeg,audio/mp3';
+    function svVoiceReferenceError(file) {
+      if (!file) return '请先选择一段参考音频。';
+      const name = String(file.name || '');
+      const extension = (name.includes('.') ? name.split('.').pop() : '').toLowerCase();
+      const type = String(file.type || '').toLowerCase();
+      if (!name) return '这个文件没有名字，浏览器读不出格式——换个方式导入再试。';
+      // 双判：只看扩展名会被改了名的假文件骗过，只看 mediaType 会被部分系统
+      // 留空骗过。两个都不沾边的才放到后端去（后端还有一道 ffprobe 复核）。
+      const byExtension = SV_CLONE_EXTENSIONS.includes(extension);
+      const byMediaType = !type || /^audio\/(?:wav|x-wav|mpeg|mp3)$/iu.test(type);
+      if (!byExtension && !byMediaType) {
+        const shown = extension || type || '未知格式';
+        return `参考音频只支持 wav 和 mp3，你选的是 ${shown}。请先用音频工具转成 wav（或 mp3）再上传——直接传会在合成阶段失败，而且重试多次后可能变成限流错误，看不出真正原因。`;
+      }
+      if (byExtension && type && !byMediaType) return `文件名是 .${extension}，但浏览器把它识别成 ${type}——两者对不上，文件可能损坏了，请换一个。`;
+      if ((file.size || 0) === 0) return '这个音频文件是空的（0 字节），换一个。';
+      return null;
+    }
+
+    /**
+     * 把方括号标签插进正文的光标处，并重新聚焦回文本框。
+     *
+     * 追加到末尾会让「[叹气]放在这段前面」变成「放在全文最前面」，语气完全不是
+     * 用户点那一下的意思。所以读 selectionStart 插在光标后面，再把光标停在
+     * 标签之后，继续手写正文时不会把字打到标签里面。
+     *
+     * 只处理 `[标签]`——开头那对 `(风格)` 由后端 buildTaggedText 拼，前端**不写**
+     * 进正文（写进去会被算成用户内容，下次生成还跟着稿子累积）。
+     * 落在已有方括号标签内部时续写，不插出 `[叹气[哽咽]]` 这种嵌套。
+     */
+    function svInsertAudioTag(textarea, tag, onChange) {
+      const value = String(textarea?.value ?? '');
+      const at = typeof textarea?.selectionStart === 'number' ? textarea.selectionStart : value.length;
+      const before = value.slice(0, at);
+      const after = value.slice(at);
+      // 光标前面若还有一个没闭合的 `[`，说明正处在这个标签内部，续写即可。
+      // 用「最后一个 `[` 之后没有 `]`」判断，比拿 span 范围比大小可靠：
+      // 光标紧跟在 `[` 之后时 span 是未闭合的，范围比较会把它误判成外部。
+      // 两种括号各自比一次，任一未闭合即算在标签内部。
+      // 必须分别比再取或：写成 `a > b && c > d` 时，两边都没出现时是 -1 > -1，
+      // 整个条件会被这个 false 拖成 false，光标紧跟 '[' 时反而判成外部。
+      const halfOpen = before.lastIndexOf('[') > before.lastIndexOf(']');
+      const fullOpen = before.lastIndexOf('［') > before.lastIndexOf('］');
+      const openBefore = halfOpen || fullOpen;
+      const joined = openBefore ? `${before}${tag}${after}` : `${before}[${tag}]${after}`;
+      onChange(joined);
+      const caret = openBefore ? before.length + tag.length : before.length + tag.length + 2;
+      try { textarea.focus(); textarea.setSelectionRange(caret, caret); } catch {}
+    }
+
+    /**
+     * 三模式切换器。
+     *
+     * 三个模型互斥，所以这不是一个和音色并排的下拉，而是**先选模式、再按模式
+     * 填那一套专属字段**——把它们做成一个下拉会让人以为能混着填。
+     */
+    function svVoiceModePicker({ value, onChange, disabled, className = 'sv-voice-modes', labelClass = 'sv-voice-mode-label' }) {
+      return h('div', { className, role: 'radiogroup', 'aria-label': '配音模式' },
+        SV_VOICE_MODES.map((mode) => h('button', {
+          key: mode.id,
+          type: 'button',
+          role: 'radio',
+          'aria-checked': value === mode.id ? 'true' : 'false',
+          'data-active': value === mode.id ? 'true' : 'false',
+          className: 'sv-voice-mode',
+          disabled: Boolean(disabled),
+          onClick: () => onChange(mode.id),
+        }, h('span', { className: labelClass }, mode.label), h('span', { className: 'sv-voice-mode-hint' }, mode.hint))));
+    }
+
+    /**
+     * 预置音色下拉，按语种分组。
+     *
+     * 用 optgroup 是因为 9 个音名平铺一列时，中英文混在一起会让人以为英文音是
+     * 中文音的翻译版。mimo_default 单独一组，提示里写清它随集群变化。
+     */
+    function svVoiceSelect({ value, onChange, disabled, className = 'sv-select', options, include = null }) {
+      const extra = include && include !== value && !SV_MIMO_BUILTIN_VOICES.includes(include) ? [include] : [];
+      return h('select', { className, value, disabled: Boolean(disabled), onChange: (event) => onChange(event.target.value) },
+        SV_MIMO_VOICE_GROUPS.map((group) => {
+          const voices = group.voices.filter((voice) => options.includes(voice));
+          if (!voices.length) return null;
+          return h('optgroup', { key: group.label, label: group.label }, voices.map((voice) => h('option', { key: voice, value: voice }, SV_MIMO_VOICE_HINTS[voice] ? `${voice} — ${SV_MIMO_VOICE_HINTS[voice]}` : voice)));
+        }),
+        extra.map((voice) => h('option', { key: voice, value: voice }, voice)));
+    }
+
+    /**
+     * 音频标签按钮组。点击把标签插进**正文文本框的光标处**，不是追加到末尾——
+     * 用户得能看见自己插了什么、插在哪一段前面。
+     *
+     * 「唱歌」组只在预置音色模式渲染：唱歌只挂在 tts 模型上，另两个模型会直接 400。
+     * 括号形态按组给（`group.bracket`），细粒度那批方括号标签才是主力写法，
+     * 不能让用户手写——手写就不会被计数，超限也拦不住。
+     */
+    function svAudioTagPicker({ text, onInsert, onToggleParam, paramTags = [], disabled, mode = 'preset', className = 'sv-audio-tags' }) {
+      const groups = SV_AUDIO_TAG_GROUPS.filter((group) => !group.presetOnly || SV_SINGING_MODES.includes(mode));
+      const { used } = svAudioTagSlots(text);
+      const total = used + paramTags.length;
+      const inText = svAudioTagNames(text);
+      return h('div', { className },
+        h('div', { className: 'sv-audio-tags-head' },
+          h('span', { className: 'sv-meta' }, '音频标签'),
+          // 两类合并计数：正文内插 + 整体风格（入参），与后端同口径。
+          h('span', { className: 'sv-meta', 'data-tone': total >= SV_AUDIO_TAG_MAX_COUNT ? 'warn' : '' }, `已用 ${total}/${SV_AUDIO_TAG_MAX_COUNT}`),
+        ),
+        groups.map((group) => h('div', { key: group.label, className: 'sv-audio-tag-row' },
+          h('span', { className: 'sv-audio-tag-group' }, `${group.label} ${group.bracket === 'param' ? '（开头）' : '（句中）'}`),
+          group.tags.map((tag) => {
+            const on = group.bracket === 'param' ? paramTags.includes(tag) : inText.includes(tag);
+            const problem = svAudioTagError(text, tag, paramTags);
+            return h('button', {
+              key: tag,
+              type: 'button',
+              className: 'sv-filter-chip',
+              'data-on': on ? 'true' : 'false',
+              disabled: Boolean(disabled) || (on ? false : Boolean(problem)),
+              title: problem || (group.bracket === 'param' ? `作为整体风格随合成一起发送` : `插入「[${tag}]」到光标处`),
+              onClick: () => {
+                // 已选中的再点一次是取消，不是报错——整体风格可多选。
+                if (on) { if (group.bracket === 'param') onToggleParam(tag); return; }
+                if (problem) return;
+                if (group.bracket === 'param') onToggleParam(tag);
+                else onInsert(tag);
+              },
+            }, tag);
+          }),
+        )),
+      );
+    }
     // 常用且专业的语气提示词。桥接把它作为 user 角色指令传给小米 TTS 控制语气/节奏，
     // 不进合成文本，所以可以放心写风格描述；也允许在输入框里自己改。
     const SV_VOICE_STYLE_PRESETS = [
@@ -3835,7 +3671,7 @@ window.__ModuleLoader__.load({
     const AS_ITEM_STATUS = { running: '进行中', completed: '已完成', failed: '失败', cancelled: '已停止' };
     const AS_STAGE_TONE = { done: 'sv-stage', failed: 'sv-status-error', running: '', skipped: 'sv-status-disabled' };
     function emptyScheduleForm() {
-      return { name: '', days: new Set([1, 2, 3, 4, 5]), time: '21:00', angle: '', offSources: new Set(), offPlatforms: new Set(), excluded: new Set(), depth: 'packaging', perRunLimit: 1, orientation: 'landscape', scriptTier: 'medium', subtitleEnabled: true, visualBrief: '', voiceSource: 'system', voiceReference: null, voiceRate: '1', voiceVolume: '1', bridgeVoice: '冰糖', libraryVoice: '', bridgeChannel: '', bridgeStyle: '', publishAccountId: '', publishSubmitMode: 'confirm' };
+      return { name: '', days: new Set([1, 2, 3, 4, 5]), time: '21:00', angle: '', offSources: new Set(), offPlatforms: new Set(), excluded: new Set(), depth: 'packaging', perRunLimit: 1, orientation: 'landscape', scriptTier: 'medium', subtitleEnabled: true, visualBrief: '', voiceSource: 'preset', voiceDesignText: '', voiceReference: null, voiceId: SV_MIMO_DEFAULT_VOICE, voiceRate: '1', voiceVolume: '1', voiceStyle: '', publishAccountId: '', publishSubmitMode: 'confirm' };
     }
     /** Rehydrate a per-tab form from a stored task so editing reuses the create form. */
     function scheduleFormOf(schedule, board) {
@@ -3844,7 +3680,6 @@ window.__ModuleLoader__.load({
       const chosen = new Set(schedule.sources?.sourceIds || []);
       const chosenPlatforms = new Set(schedule.sources?.platforms || []);
       const voice = schedule.production?.voice || null;
-      const presetIsBuiltin = Boolean(voice?.voiceSource === 'preset' && SV_MIMO_BUILTIN_VOICES.includes(voice.voiceId));
       return {
         name: schedule.name || '',
         days: new Set(schedule.days?.length ? schedule.days : [1, 2, 3, 4, 5]),
@@ -3859,14 +3694,17 @@ window.__ModuleLoader__.load({
         scriptTier: schedule.production?.scriptTier || 'medium',
         subtitleEnabled: schedule.production?.subtitleEnabled !== false,
         visualBrief: schedule.production?.visualBrief || '',
-        voiceSource: voice?.voiceSource === 'upload' ? 'upload' : voice?.voiceSource === 'preset' ? (presetIsBuiltin ? 'builtin' : 'library') : 'system',
-        voiceReference: voice?.voiceSource === 'upload' && voice.referenceAudio ? voice.referenceAudio : null,
+        // 旧任务存的是 voiceSource/bridge.* 这套退役字段：读回来时只取音色名，
+        // 它现在统一是 MiMo 内置音色。写不出来的老配置照样能编辑，不丢内容。
+        // 三模式只有 preset 存了 voiceId；design/upload 各自有专属字段，
+        // 老配置没有它们，回落 preset 才不会把一条老任务读成空壳。
+        voiceSource: ['design', 'upload'].includes(schedule.voice?.voiceSource) ? schedule.voice.voiceSource : 'preset',
+        voiceDesignText: schedule.voice?.designText || '',
+        voiceReference: schedule.voice?.referenceAudio || null,
+        voiceId: voice?.voiceId && SV_MIMO_BUILTIN_VOICES.includes(voice.voiceId) ? voice.voiceId : SV_MIMO_DEFAULT_VOICE,
         voiceRate: String(voice?.rate ?? 1),
         voiceVolume: String(voice?.volume ?? 1),
-        bridgeVoice: presetIsBuiltin ? voice.voiceId : '冰糖',
-        libraryVoice: voice?.voiceSource === 'preset' && !presetIsBuiltin ? voice.voiceId : '',
-        bridgeChannel: voice?.bridge?.channel || '',
-        bridgeStyle: voice?.bridge?.style || '',
+        voiceStyle: voice?.style || voice?.bridge?.style || '',
         // A stored task keeps its first target selected; the rest stay in the
         // saved list and are reachable by editing the task again.
         publishAccountId: schedule.publish?.accountIds?.[0] || '',
@@ -4123,9 +3961,8 @@ window.__ModuleLoader__.load({
       const [historySchedule, setHistorySchedule] = React.useState(null);
       const [historyRefresh, setHistoryRefresh] = React.useState(0);
       const [confirmNode, ask] = useSvConfirm();
-      const [voiceUploading, setVoiceUploading] = React.useState(false);
-      const [bridgeInfo, setBridgeInfo] = React.useState(null);
-      const scheduleVoiceFileInputRef = React.useRef(null);
+      const [voiceRefBusy, setVoiceRefBusy] = React.useState(false);
+      const [voiceRefError, setVoiceRefError] = React.useState('');
       const fail = React.useCallback((message) => { setError(message); }, [setError]);
 
       // 上一次已知的轮次状态，用来发现「刚刚落到终态」这件事。放在 ref 而不是
@@ -4318,9 +4155,8 @@ window.__ModuleLoader__.load({
           remote(packId, 'sources'),
           remote(packId, 'listAccounts'),
           remoteStatic('scheduleRuntimeStatus').catch(() => null),
-          remote(packId, 'bridgeVoiceoverInfo').catch(() => null),
-        ]).then(([nextBoard, nextSources, nextAccounts, nextRuntime, nextBridgeInfo]) => {
-          setBoard(nextBoard); setSources(nextSources); setAccountLibrary(nextAccounts); setRuntime(nextRuntime); setBridgeInfo(nextBridgeInfo);
+        ]).then(([nextBoard, nextSources, nextAccounts, nextRuntime]) => {
+          setBoard(nextBoard); setSources(nextSources); setAccountLibrary(nextAccounts); setRuntime(nextRuntime);
           setActiveTab((current) => current !== GENERAL_TAB && nextAccounts.accounts.some((item) => item.id === current && item.status === 'active') ? current : nextAccounts.defaultAccountId || GENERAL_TAB);
         }).catch((cause) => fail(cause.message));
         void loadSchedules();
@@ -4351,6 +4187,25 @@ window.__ModuleLoader__.load({
       const form = formsByTab[activeTab] || emptyScheduleForm();
       const patchForm = (fn) => setFormsByTab((prev) => ({ ...prev, [activeTab]: fn(prev[activeTab] || emptyScheduleForm()) }));
       const editing = editingId ? schedules.find((item) => item.id === editingId) || null : null;
+      /** Same format gate as the audio page: reject before upload, not with a 400 after it. */
+      const pickScheduleVoiceReference = async (file) => {
+        const problem = svVoiceReferenceError(file);
+        if (problem) { setVoiceRefError(problem); patchForm((current) => ({ ...current, voiceReference: null })); return; }
+        setVoiceRefBusy(true); setVoiceRefError('');
+        try {
+          const data = await base64FromAudioFile(file);
+          const extension = String(file.name || '').split('.').pop().toLowerCase();
+          const uploaded = await remoteStatic('uploadVoiceReference', {
+            name: file.name,
+            mediaType: /^mp3$/iu.test(extension) ? 'audio/mpeg' : 'audio/wav',
+            data,
+          });
+          patchForm((current) => ({ ...current, voiceReference: uploaded }));
+        } catch (cause) {
+          setVoiceRefError(`上传失败：${cause.message}`);
+          patchForm((current) => ({ ...current, voiceReference: null }));
+        } finally { setVoiceRefBusy(false); }
+      };
 
       const publicCards = (board?.sources || []).filter((card) => card.id !== 'ai-daily-import');
       const platformCards = board?.aiDaily?.platforms || [];
@@ -4373,9 +4228,11 @@ window.__ModuleLoader__.load({
         const limit = AS_DEPTH_ORDER.indexOf(depth);
         return (runtime?.blockers || []).filter((item) => AS_DEPTH_ORDER.indexOf(item.depth) <= limit);
       };
-      const voiceReady = (form.voiceSource !== 'upload' || Boolean(form.voiceReference))
-        && (form.voiceSource !== 'library' || Boolean(form.libraryVoice))
-        && !(form.voiceSource === 'builtin' && form.bridgeChannel === 'local');
+      // 音色必填：MiMo 内置表之外的值会让合成直接失败，不给保存。
+      // design 模式没有音色名可校验，它唯一的输入是那段描述（必填）。
+      const voiceReady = form.voiceSource === 'design'
+        ? Boolean(form.voiceDesignText.trim())
+        : SV_MIMO_BUILTIN_VOICES.includes(form.voiceId);
       // A publish-depth task is unusable without a target, so require one before
       // letting it be saved rather than discovering it at the round's last step.
       const publishReady = form.depth !== 'publish' || Boolean(form.publishAccountId);
@@ -4415,15 +4272,13 @@ window.__ModuleLoader__.load({
         const label = activeAccount ? `账号「${activeAccount.name}」` : '通用（无账号定位）';
         const daysLabel = sortedDays.length === 7 ? '每天' : sortedDays.map((day) => AS_WEEKDAYS[day - 1].label).join('、');
         const depthLabel = AS_DEPTHS.find((item) => item.id === form.depth)?.label || form.depth;
-        const voiceLabel = form.voiceSource === 'upload' && form.voiceReference ? `音色「${form.voiceReference.name}」`
-          : form.voiceSource === 'builtin' ? `桥接内置音色「${form.bridgeVoice}」`
-          : form.voiceSource === 'library' ? `桥接音色库「${form.libraryVoice}」`
-          : '系统默认音色';
-        const bridgeChannelLabel = form.bridgeChannel === 'cloud' ? '，桥接配音方式固定为云端' : form.bridgeChannel === 'local' ? '，桥接配音方式固定为本地' : '';
+        const voiceLabel = form.voiceSource === 'design'
+          ? `音色设计「${form.voiceDesignText.trim().slice(0, 30)}${form.voiceDesignText.trim().length > 30 ? '…' : ''}」${form.voiceStyle.trim() ? `，语气「${form.voiceStyle.trim()}」` : ''}`
+          : `音色「${form.voiceId}」${form.voiceStyle.trim() ? `，语气「${form.voiceStyle.trim()}」` : ''}`;
         const publishLabel = form.depth === 'publish' && form.publishAccountId
           ? `；投递到「${publishAccounts.find((item) => item.id === form.publishAccountId)?.label || '所选账号'}」${form.publishSubmitMode === 'auto' ? '并自动提交' : '，停在发布前等你确认'}`
           : '';
-        const description = `${label}；${daysLabel} ${form.time}；深度「${depthLabel}」；每轮最多 ${form.perRunLimit} 条；${voiceLabel}${bridgeChannelLabel}；参与渠道 ${selectedCount} 个${publishLabel}`;
+        const description = `${label}；${daysLabel} ${form.time}；深度「${depthLabel}」；每轮最多 ${form.perRunLimit} 条；${voiceLabel}；参与渠道 ${selectedCount} 个${publishLabel}`;
         // The old copy promised publishing was never automated. That promise is
         // now a setting, so the confirmation states which one is in force
         // instead of repeating something that is no longer true.
@@ -4481,19 +4336,6 @@ window.__ModuleLoader__.load({
       const clearSources = () => { if (busy) return; patchForm((current) => ({ ...current, offSources: new Set(allPublicIds), offPlatforms: new Set(platformCards.map((card) => card.platform)) })); };
       const toggleExclude = (signalId) => patchForm((current) => { const excluded = new Set(current.excluded); if (excluded.has(signalId)) excluded.delete(signalId); else excluded.add(signalId); return { ...current, excluded }; });
       const clearExcluded = () => patchForm((current) => ({ ...current, excluded: new Set() }));
-      const uploadScheduleVoiceReference = async (event) => {
-        const file = event.target.files?.[0] || null;
-        event.target.value = '';
-        if (!file || voiceUploading || busy) return;
-        if (file.size < 1 || file.size > 20 * 1024 * 1024) { fail('参考音频必须小于 20 MiB。'); return; }
-        setVoiceUploading(true);
-        try {
-          const data = await base64FromAudioFile(file);
-          const uploaded = await remote(packId, 'uploadVoiceReference', { name: file.name, mediaType: file.type, data });
-          patchForm((current) => ({ ...current, voiceSource: 'upload', voiceReference: uploaded }));
-          setError(null);
-        } catch (cause) { fail(cause.message); } finally { setVoiceUploading(false); }
-      };
 
       const tabs = h(AccountTabs, { accountLibrary, activeTab, onChange: setActiveTab, label: '按账号定位选择任务归属', disabled: Boolean(editing) });
 
@@ -4524,27 +4366,17 @@ window.__ModuleLoader__.load({
       };
 
       const runtimeBlockers = blockersFor(form.depth);
-      const voiceReferenceMeta = form.voiceReference ? [form.voiceReference.bytes != null ? formatMediaBytes(form.voiceReference.bytes) : null, form.voiceReference.durationSeconds != null ? formatMediaDuration(form.voiceReference.durationSeconds) : null].filter(Boolean).join(' · ') : null;
-      const builtinVoiceOptions = Array.from(new Set([...(bridgeInfo?.available && Array.isArray(bridgeInfo.builtinVoices) && bridgeInfo.builtinVoices.length ? bridgeInfo.builtinVoices : SV_MIMO_BUILTIN_VOICES), form.bridgeVoice]));
-      const libraryVoiceOptions = bridgeInfo?.available && Array.isArray(bridgeInfo.voices) ? bridgeInfo.voices : [];
       const voicePayloadOf = () => {
         const numeric = (value, fallback) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : fallback; };
-        const rate = numeric(form.voiceRate, 1);
-        const volume = numeric(form.voiceVolume, 1);
-        const bridge = {};
-        if (form.bridgeChannel) bridge.channel = form.bridgeChannel;
-        if (form.bridgeStyle.trim()) bridge.style = form.bridgeStyle.trim();
-        const bridgeFields = Object.keys(bridge).length ? { bridge } : {};
-        if (form.voiceSource === 'upload') {
-          return form.voiceReference
-            ? { voiceSource: 'upload', referenceAudio: { id: form.voiceReference.id, file: form.voiceReference.file, name: form.voiceReference.name, mediaType: form.voiceReference.mediaType }, rate, volume, ...bridgeFields }
-            : null;
-        }
-        // 桥接两类音色都走 voiceSource 'preset'：内置音色名由桥接识别 MiMo 表，
-        // 音色库 ID 由桥接在 voices/ 目录查找。
-        if (form.voiceSource === 'builtin') return { voiceSource: 'preset', voiceId: form.bridgeVoice, voiceName: form.bridgeVoice, rate, volume, ...bridgeFields };
-        if (form.voiceSource === 'library') return form.libraryVoice ? { voiceSource: 'preset', voiceId: form.libraryVoice, voiceName: form.libraryVoice, rate, volume, ...bridgeFields } : null;
-        return { voiceSource: 'system', rate, volume, ...bridgeFields };
+        // 三模式互斥：只发当前模式那一套字段，不把另外两套传空值过去。
+        // 传空 voiceId 给 design 或传空 designText 给 preset 都会让对方模型 400。
+        // 这套字段必须**逐项都带上**——只搬 voiceId 会让排期任务在到点执行时
+        // 静默退回默认音色，用户在排期里选的声音根本没生效，且没有任何报错。
+        const base = { voiceSource: form.voiceSource, rate: numeric(form.voiceRate, 1), volume: numeric(form.voiceVolume, 1) };
+        const tone = form.voiceStyle.trim() ? { style: form.voiceStyle.trim() } : {};
+        if (form.voiceSource === 'design') return { ...base, ...tone, designText: form.voiceDesignText.trim() };
+        if (form.voiceSource === 'upload') return { ...base, ...tone, ...(form.voiceReference ? { referenceAudio: form.voiceReference } : {}) };
+        return { ...base, ...tone, voiceId: form.voiceId, voiceName: form.voiceId };
       };
       const configCard = h('section', { className: 'sv-form' },
         h('div', { className: 'sv-section-head' },
@@ -4634,40 +4466,29 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sv-as-grid2' },
             h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '语速'), h('input', { className: 'sv-input', type: 'number', min: '0.5', max: '2', step: '0.05', value: form.voiceRate, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceRate: event.target.value })) })),
             h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音量'), h('input', { className: 'sv-input', type: 'number', min: '0', max: '2', step: '0.05', value: form.voiceVolume, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceVolume: event.target.value })) })),
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音色'), h('select', { className: 'sv-select', value: form.voiceSource, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceSource: event.target.value })) },
-              h('option', { value: 'system' }, 'Tiffy - 自信（系统默认）'),
-              h('option', { value: 'upload' }, '上传参考音频'),
-              h('option', { value: 'builtin' }, '桥接内置音色（云端 · 小米 MiMo）'),
-              h('option', { value: 'library' }, '桥接音色库（本机参考音频）'),
-            )),
+            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '语气（选填）'), h('input', { className: 'sv-input', value: form.voiceStyle, maxLength: 200, disabled: Boolean(busy), placeholder: '留空则按音色默认语气合成', onChange: (event) => patchForm((current) => ({ ...current, voiceStyle: event.target.value })) })),
           ),
-          form.voiceSource === 'upload' ? h('div', { className: 'sv-voice-upload' },
-            h('input', { ref: scheduleVoiceFileInputRef, type: 'file', accept: 'audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/ogg,.mp3,.wav,.m4a,.ogg', tabIndex: -1, style: { display: 'none' }, onChange: (event) => { void uploadScheduleVoiceReference(event); } }),
-            h('div', { className: 'sv-voice-upload-row' },
-              h('p', { className: 'sv-voice-upload-file' }, form.voiceReference ? h(React.Fragment, null, form.voiceReference.name, voiceReferenceMeta ? h('span', null, ` · ${voiceReferenceMeta}`) : null) : '尚未选择参考音频'),
-              h('button', { type: 'button', className: 'lwb-plain-button', disabled: voiceUploading || Boolean(busy), onClick: () => scheduleVoiceFileInputRef.current?.click?.() }, voiceUploading ? '正在上传…' : form.voiceReference ? '更换音频' : '选择音频'),
-              form.voiceReference ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: voiceUploading || Boolean(busy), onClick: () => patchForm((current) => ({ ...current, voiceReference: null })) }, '移除') : null,
-            ),
-            h('p', { className: 'sv-note' }, '支持 MP3、WAV、M4A 和 OGG，最大 20 MiB。请上传只包含目标人声的清晰音频。'),
-          ) : null,
-          form.voiceSource === 'builtin' ? h('div', { className: 'sv-as-grid2' },
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '内置音色'), h('select', { className: 'sv-select', value: form.bridgeVoice, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, bridgeVoice: event.target.value })) }, builtinVoiceOptions.map((voice) => h('option', { key: voice, value: voice }, voice)))),
-          ) : null,
-          form.voiceSource === 'library' ? h('div', { className: 'sv-as-grid2' },
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音色库音色'), libraryVoiceOptions.length
-              ? h('select', { className: 'sv-select', value: form.libraryVoice, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, libraryVoice: event.target.value })) }, h('option', { value: '' }, '选择音色'), libraryVoiceOptions.map((voice) => h('option', { key: voice.id, value: voice.id }, `${voice.id}${voice.hasTxt ? '' : '（首次使用自动转写）'}`)))
-              : h('select', { className: 'sv-select', value: '', disabled: true }, h('option', { value: '' }, bridgeInfo?.available ? '音色库为空：到桥接配置中心上传音色' : '桥接未响应，无法读取音色库'))),
-          ) : null,
-          h('div', { className: 'sv-as-grid2' },
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '桥接配音方式（按任务覆盖）'), h('select', { className: 'sv-select', value: form.bridgeChannel, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, bridgeChannel: event.target.value })) }, h('option', { value: '' }, '跟随桥接配置'), h('option', { value: 'cloud' }, '云端（小米 MiMo）'), h('option', { value: 'local' }, '本地（LongCat）'))),
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '桥接预期风格（选填）'), h('input', { className: 'sv-input', value: form.bridgeStyle, maxLength: 200, disabled: Boolean(busy), placeholder: '留空则跟随桥接配置；仅云端合成时生效', onChange: (event) => patchForm((current) => ({ ...current, bridgeStyle: event.target.value })) })),
-          ),
-          bridgeInfo?.available ? h('p', { className: 'sv-as-task-note' }, `桥接当前：${bridgeInfo.ttsProvider === 'local' ? '本地合成（LongCat）' : '云端合成（小米 MiMo）'}${bridgeInfo.mimoKeyConfigured ? '' : ' · 未配置小米 API Key'}${bridgeInfo.mimoVoice ? ` · 内置音色「${bridgeInfo.mimoVoice}」` : ''}${bridgeInfo.mimoStyle ? ` · 风格「${bridgeInfo.mimoStyle}」` : ''}${bridgeInfo.defaultVoice ? ` · 默认音色映射「${bridgeInfo.defaultVoice}」` : ' · 未设置默认音色映射'}。系统默认音色经桥接时会自动替换为映射的音色库音色；桥接设置只在使用桥接渠道时生效。`) : null,
+          // 三模式互斥：这里换的是下面那一个字段，不是叠加。
+          svVoiceModePicker({ value: form.voiceSource, disabled: busy, className: 'sv-voice-modes sv-voice-modes-wide', onChange: (mode) => patchForm((current) => ({ ...current, voiceSource: mode })) }),
+          form.voiceSource === 'design'
+            // design 的唯一输入就是这段描述，后端也判空，所以空的时候直接拦在提交前。
+            ? h('label', { className: 'sv-as-field sv-as-field-wide' }, h('span', { className: 'sv-as-label' }, '音色描述（必填）'), h('input', { className: 'sv-input', value: form.voiceDesignText, maxLength: 200, disabled: Boolean(busy), placeholder: '例：一位三十岁上下、语速偏慢、带点沙哑的中年男声', onChange: (event) => patchForm((current) => ({ ...current, voiceDesignText: event.target.value })) }), form.voiceDesignText.trim() ? null : h('p', { className: 'sv-as-warn' }, '音色设计模式必须写一段声音描述，否则合成会失败——描述越具体（年龄、声线、语速、气质）出来的音色越接近你想的样子。'))
+            : form.voiceSource === 'upload'
+              ? h('div', { className: 'sv-as-field sv-as-field-wide' },
+                h('span', { className: 'sv-as-label' }, '参考音频（必填）'),
+                h('input', { className: 'sv-input', type: 'file', accept: SV_CLONE_ACCEPT, disabled: Boolean(voiceRefBusy || busy), onChange: (event) => { void pickScheduleVoiceReference(event.target.files?.[0] || null); event.target.value = ''; } }),
+                voiceRefBusy ? h('p', { className: 'sv-note' }, '正在读取并上传参考音频…')
+                  : form.voiceReference ? h('p', { className: 'sv-note' }, `已上传：${form.voiceReference.name}。换一个文件会重新上传。`)
+                    : h('p', { className: 'sv-note' }, '只支持 wav 和 mp3；m4a / aac 等格式需要先转成 wav，否则合成会失败。'),
+                voiceRefError ? h('p', { className: 'sv-error', role: 'alert' }, voiceRefError) : null)
+              : h('label', { className: 'sv-as-field sv-as-field-wide' }, h('span', { className: 'sv-as-label' }, '音色'), svVoiceSelect({ value: form.voiceId, disabled: busy, onChange: (voiceId) => patchForm((current) => ({ ...current, voiceId })), options: Array.isArray(runtime?.media?.mimoVoices) && runtime.media.mimoVoices.length ? runtime.media.mimoVoices : SV_MIMO_BUILTIN_VOICES, include: form.voiceId })),
+          form.voiceSource === 'preset' && SV_MIMO_VOICE_HINTS[form.voiceId] ? h('p', { className: 'sv-as-warn sv-as-warn-soft' }, `当前音色「${form.voiceId}」：${SV_MIMO_VOICE_HINTS[form.voiceId]}`) : null,
+          SV_VOICE_STYLE_PRESETS.length ? h('div', { className: 'sv-style-presets' }, h('span', { className: 'sv-meta' }, '常用语气'), SV_VOICE_STYLE_PRESETS.map((style) => h('button', { key: style, type: 'button', className: 'sv-filter-chip', 'data-on': form.voiceStyle === style ? 'true' : 'false', disabled: Boolean(busy), onClick: () => patchForm((current) => ({ ...current, voiceStyle: current.voiceStyle === style ? '' : style })) }, style.replace(/[，。]$/u, '')))) : null,
           h('label', { className: 'sv-as-field' },
             h('span', { className: 'sv-as-label' }, '画面制作说明（选填）'),
             h('textarea', { className: 'sv-textarea', style: { minHeight: '58px' }, value: form.visualBrief, maxLength: 6000, disabled: Boolean(busy), placeholder: '留空则交给 AI 视觉导演按稿件语义自由发挥', onChange: (event) => patchForm((current) => ({ ...current, visualBrief: event.target.value })) }),
           ),
-          h('p', { className: 'sv-as-task-note' }, '音色预设对本任务的每一轮生效；「桥接配音方式 / 预期风格」仅在使用桥接渠道时按任务覆盖桥接的全局配置，其他渠道忽略。配置好后建议先「立即执行」一轮试听效果。'),
+          h('p', { className: 'sv-as-task-note' }, '上面选的音色方式（预置音色 / 音色设计 / 声音克隆）对本任务的每一轮都生效。建议先「立即执行」一轮试听效果再交给定时。'),
         ),
         h('div', { className: 'sv-actions' },
           h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(busy) || !formValid, onClick: submit }, busy === 'save' ? '正在保存…' : editing ? '保存修改' : '创建任务'),
@@ -4675,9 +4496,7 @@ window.__ModuleLoader__.load({
           !form.name.trim() ? h('span', { className: 'sv-meta' }, '请填写任务名称')
             : !sortedDays.length ? h('span', { className: 'sv-meta' }, '请至少选择一个执行日')
               : selectedCount === 0 ? h('span', { className: 'sv-meta' }, '至少选择一个参与渠道')
-                : form.voiceSource === 'builtin' && form.bridgeChannel === 'local' ? h('span', { className: 'sv-meta' }, '桥接内置音色只能搭配云端（小米 MiMo）合成，请调整「桥接配音方式」')
-                  : form.voiceSource === 'library' && !form.libraryVoice ? h('span', { className: 'sv-meta' }, '请选择桥接音色库里的音色')
-                    : !voiceReady ? h('span', { className: 'sv-meta' }, '音色选了「上传参考音频」，请先上传音频文件') : null,
+                : !voiceReady ? h('span', { className: 'sv-meta' }, '请选择一个音色') : null,
         ),
       );
 
@@ -4772,10 +4591,12 @@ window.__ModuleLoader__.load({
     }
     function mediaRunLabel(type) { return ({ voiceover: '配音生成', subtitles: '字幕对齐', video: '视频渲染', qc: '技术质检' })[type] || type; }
     function mediaStatusLabel(status) { return ({ queued: '等待执行', running: '执行中', succeeded: '已完成', failed: '失败' })[status] || status; }
+    // 服务端原始错误文案必须原样透传（例如 Invalid API key、限流提示），
+    // 只剥掉传输层的 `Error [CODE]` 前缀，不做意译——把原文吞掉等于让用户无从下手。
     function mediaErrorText(error) {
       const value = String(error || '').replace(/^Error \[[A-Z0-9_]+\]\s*/u, '');
       return /(?:insufficient[ _-]*points|积分不足|余额不足)/iu.test(value)
-        ? 'SciTiger 账户积分不足，请充值后重试，或切换到百炼 BYOK。'
+        ? `${value}（账户额度不足：请在「连接配置」中检查该服务的余额或额度）`
         : value;
     }
     function videoPhaseLabel(phase) { return ({ preparing: '正在准备制作空间', directing: 'AI 视觉导演创作中', preflight: '正在检查 Remotion 工程', rendering: '正在渲染成片', 'technical-qc': '正在执行技术质检', 'editorial-review': '独立审片中', 'editorial-repair': '正在按审片意见修复', committing: '正在提交成片', completed: '已完成', failed: '失败' })[phase] || null; }
@@ -5100,6 +4921,23 @@ window.__ModuleLoader__.load({
         ? h('video', { controls: true, preload: 'metadata', src: mediaUrl })
         : h('p', null, '正在加载成片预览…'));
     }
+    /**
+     * 未注册的历史项目视图（配音/字幕的项目视图）。
+     *
+     * **不是当前在用的配音流程**：注册表里 'audio-captions' 挂的是
+     * `AudioCaptionsPageV2`，`LegacyAudioCaptionsPageV2` 从未注册，所以这里
+     * 的 `startVoiceover` 调用点在运行时走不到，新配音流程一律走
+     * `AudioCaptionsPageV2`（三模式：预置音色 / 音色设计 / 声音克隆也在那边）。
+     *
+     * **保留它的唯一原因是它被测试当切片锚点**：
+     * `spoken-video-client.test.mjs` 与 `voice-mimo-only.test.mjs` 都用
+     * `source.indexOf('\n    function LegacyAudioCaptionsPageV2(')` 作为
+     * 「项目页」范围的终点。删掉这个函数会让那几处 indexOf 返回 -1，从而
+     * 误圈整段文件，把大量无关源码纳入切片、让断言失去意义。
+     *
+     * 所以：不要删，也不要在这里接新功能（接了也不会被执行到，还会让三模式
+     * 的守卫出现两个来源）。改它之前先改那三处测试的切片锚点。
+     */
     function LegacyAudioCaptionsPageV2({ packId, openConversation }) {
       const { projects, refresh, error, setError } = useProjects(packId);
       // 写稿页只列「已确认稿件」的项目。刚在选题页生成的选题还没走完写稿那一步
@@ -5115,9 +4953,9 @@ window.__ModuleLoader__.load({
       const taskFeed = useMediaTasks(packId, setError);
       const [voiceover, setVoiceover] = React.useState('');
       const [subtitles, setSubtitles] = React.useState('');
-      const [provider, setProvider] = React.useState(null);
       const [apiKey, setApiKey] = React.useState('');
-      const [voiceSource, setVoiceSource] = React.useState('system');
+      const [voiceId, setVoiceId] = React.useState(SV_MIMO_DEFAULT_VOICE);
+      const [stylePrompt, setStylePrompt] = React.useState('');
       const [rate, setRate] = React.useState(1);
       const [volume, setVolume] = React.useState(1);
       const [configOpen, setConfigOpen] = React.useState(false);
@@ -5142,28 +4980,38 @@ window.__ModuleLoader__.load({
           pipelineHandoff = null;
         }
       }, [candidates, setSelectedId]);
-      React.useEffect(() => {
-        if (provider || !media.service?.connection?.provider) return;
-        setProvider(media.service.connection.provider);
-      }, [provider, media.service?.connection?.provider]);
-
       if (!packId) return h(NeedPack, { openConversation });
 
       const scriptBody = stageData(detail, 'script')?.body || '';
-      const providerId = provider || media.service?.connection?.provider || 'bailian';
+      // 渠道固定为白名单里的唯一 provider。不再从 media.service.connection.provider
+      // 兜底：那是后端记的「上次用过哪个」，退役渠道的旧值会顺着它渗回 UI。
+      const providerId = SV_VOICE_PROVIDER;
       const selectedProvider = media.service?.providers?.[providerId];
       const providerCredential = selectedProvider?.credential;
-      const providerLabel = providerId === 'bailian' ? '百炼 BYOK' : '远端 · SciTiger';
-      const referenceVoiceReady = selectedProvider?.referenceVoiceConfigured;
-      const credentialStatus = !selectedProvider?.configured ? '服务不可用' : !referenceVoiceReady ? '默认音色未配置' : providerCredential?.configured ? '连接已保存' : '需要 API Key';
-      const canGenerate = Boolean(selectedProvider?.configured && referenceVoiceReady && providerCredential?.configured);
+      const providerLabel = SV_VOICE_PROVIDER_LABEL[providerId] || providerId;
+      const mimoVoices = Array.isArray(media.service?.mimoVoices) && media.service.mimoVoices.length ? media.service.mimoVoices : SV_MIMO_BUILTIN_VOICES;
+      const referenceVoiceReady = Boolean(selectedProvider?.configured);
+      // credentialHint 把「没填」和「填了但被拒」分开：两者 configured 都是 true，
+      // 只看 configured 的话，填错 Key 的用户只会看到一句「合成失败」，不知道该换 Key
+      // 还是该等限流。missing / rejected / ok 三态直接给状态条，不让用户去猜。
+      const credentialHint = selectedProvider?.credentialHint || 'ok';
+      const credentialStatus = !selectedProvider?.configured
+        ? '服务不可用'
+        : !providerCredential?.configured
+          ? '需要 API Key'
+          : credentialHint === 'rejected'
+            ? 'Key 被拒绝，请重新填写'
+            : credentialHint === 'missing'
+              ? '需要 API Key'
+              : '连接已保存';
+      const canGenerate = Boolean(selectedProvider?.configured && providerCredential?.configured);
       const voiceReady = done(detail, 'voiceover');
       const subtitleReady = done(detail, 'subtitles');
       const voiceArtifact = stageData(detail, 'voiceover');
       const subtitleData = stageData(detail, 'subtitles');
       const startVoiceover = async () => {
         if (!detail) return;
-        const started = await media.start('startVoiceover', { projectId: detail.id, expectedRevision: detail.revision, provider: providerId, voiceSource, rate: Number(rate), volume: Number(volume) }, 'voiceover');
+        const started = await media.start('startVoiceover', { projectId: detail.id, expectedRevision: detail.revision, provider: providerId, voiceSource: 'preset', voiceId, voiceName: voiceId, ...(stylePrompt.trim() ? { style: stylePrompt.trim() } : {}), rate: Number(rate), volume: Number(volume) }, 'voiceover');
         if (started) void taskFeed.refresh();
       };
       const startSubtitles = async () => {
@@ -5176,7 +5024,6 @@ window.__ModuleLoader__.load({
         setConnectionBusy('save');
         try {
           const saved = await remoteStatic('configureMediaConnection', { provider: providerId, apiKey });
-          setProvider(saved.provider);
           setApiKey('');
           await media.refreshRuns();
           setError(null);
@@ -5186,7 +5033,6 @@ window.__ModuleLoader__.load({
         setConnectionBusy('clear');
         try {
           const saved = await remoteStatic('clearMediaConnectionCredential', { provider: providerId });
-          setProvider(saved.provider);
           setApiKey('');
           await media.refreshRuns();
           setError(null);
@@ -5215,7 +5061,7 @@ window.__ModuleLoader__.load({
       const providerConfigStrip = h('section', { className: 'sv-media-config-strip' },
         h('div', { className: 'sv-media-config-summary' },
           h('span', { className: 'sv-media-config-mark', 'aria-hidden': 'true' }, '♪'),
-          h('div', { className: 'sv-media-config-copy' }, h('strong', null, providerLabel), h('span', null, providerCredential?.configured ? '已保存连接' : '等待配置')),
+          h('div', { className: 'sv-media-config-copy' }, h('strong', null, providerLabel), h('span', null, !providerCredential?.configured ? '等待配置' : credentialHint === 'rejected' ? 'Key 被拒绝' : '已保存连接')),
         ),
         h('div', { className: 'sv-media-config-meta' },
           h('span', { className: `sv-tag ${canGenerate ? 'sv-stage' : selectedProvider?.configured ? 'sv-status-manual' : 'sv-status-disabled'}` }, credentialStatus),
@@ -5232,14 +5078,17 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sv-media-drawer-body' },
             h('section', { className: 'sv-media-settings-section', style: { paddingTop: 0, borderTop: 0 } },
               h('h4', null, '生成方式'),
-              h('div', { className: 'sv-media-provider-picker', role: 'tablist', 'aria-label': '生成方式' },
-                h('button', { type: 'button', className: 'sv-media-provider-choice', role: 'tab', 'aria-selected': providerId === 'bailian' ? 'true' : 'false', 'data-active': providerId === 'bailian' ? 'true' : 'false', disabled: Boolean(connectionBusy), onClick: () => { setProvider('bailian'); setApiKey(''); } }, '百炼 BYOK'),
-                h('button', { type: 'button', className: 'sv-media-provider-choice', role: 'tab', 'aria-selected': providerId === 'scitiger' ? 'true' : 'false', 'data-active': providerId === 'scitiger' ? 'true' : 'false', disabled: Boolean(connectionBusy), onClick: () => { setProvider('scitiger'); setApiKey(''); } }, '远端 · SciTiger'),
-              ),
+              h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '生成方式' },
+                SV_VOICE_PROVIDERS.map((id) => h('button', {
+                  key: id, type: 'button', className: 'sv-media-provider-choice',
+                  'data-active': providerId === id ? 'true' : 'false',
+                  onClick: () => setApiKey(''),
+                }, SV_VOICE_PROVIDER_LABEL[id] || id))),
+              h('p', { className: 'sv-note' }, '配音统一走小米 MiMo；其他渠道已在界面隐藏，如需切回请改代码里的 SV_VOICE_PROVIDERS。'),
             ),
             h('section', { className: 'sv-media-settings-section' },
               h('h4', null, '访问凭据'),
-              h('label', { className: 'sv-media-field' }, h('span', null, providerId === 'bailian' ? '百炼 API Key' : 'SciTiger API Key'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: providerCredential?.configured ? '已保存，输入新值可更新' : '输入后保存到私有凭据库', disabled: Boolean(connectionBusy), onChange: (event) => setApiKey(event.target.value) })),
+              h('label', { className: 'sv-media-field' }, h('span', null, `${providerLabel} API Key`), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: providerCredential?.configured ? '已保存，输入新值可更新' : '输入后保存到私有凭据库', disabled: Boolean(connectionBusy), onChange: (event) => setApiKey(event.target.value) })),
               h('p', { className: 'sv-note' }, providerCredential?.configured ? (providerCredential.writable ? '密钥已保存。输入新值后可更新，密钥不会回显。' : '密钥由启动环境管理，当前页面不能修改或清除。') : '尚未保存密钥。保存后，后续启动无需重复输入。'),
             ),
           ),
@@ -5256,8 +5105,10 @@ window.__ModuleLoader__.load({
         detail ? h('div', { className: 'sv-audio-project' }, h('strong', null, detail.title), h('span', null, `已确认 · ${charCount(scriptBody)} 字 · ${scriptDurationLabel(scriptBody)} 预计口播`)) : null,
         h('label', { className: 'sv-media-field' }, h('span', null, '文本内容'), h('textarea', { className: 'sv-textarea sv-audio-script', value: scriptBody, readOnly: true, placeholder: '选择已确认稿件后显示正文' })),
         h('p', { className: 'sv-note' }, '文本与已确认稿件绑定。需要改文案时，请返回写稿模块修改并重新确认。'),
-        h('label', { className: 'sv-media-field' }, h('span', null, '音色'), h('select', { className: 'sv-select', value: voiceSource, onChange: (event) => setVoiceSource(event.target.value) }, h('option', { value: 'system' }, 'Tiffy - 自信（系统默认）'))),
-        h('p', { className: 'sv-note' }, '首次使用时会将系统默认参考音频提交给当前配音服务，后续会自动复用。'),
+        h('label', { className: 'sv-media-field' }, h('span', null, '音色'), h('select', { className: 'sv-select', value: voiceId, onChange: (event) => setVoiceId(event.target.value) }, mimoVoices.map((voice) => h('option', { key: voice, value: voice }, SV_MIMO_VOICE_HINTS[voice] ? `${voice} — ${SV_MIMO_VOICE_HINTS[voice]}` : voice)))),
+        h('p', { className: 'sv-note' }, `由${providerLabel}合成。不确定选哪个音色时用「${SV_MIMO_DEFAULT_VOICE}」；「mimo_default」跟随平台集群，中国集群是「冰糖」、其他集群是「Mia」，想要确定的声音请选具体音名。`),
+        h('label', { className: 'sv-media-field' }, h('span', null, '语气（选填）'), h('input', { className: 'sv-input', value: stylePrompt, maxLength: 200, list: 'sv-style-preset-list', placeholder: '留空则按音色默认语气合成', onChange: (event) => setStylePrompt(event.target.value) }), h('datalist', { id: 'sv-style-preset-list' }, SV_VOICE_STYLE_PRESETS.map((style) => h('option', { key: style, value: style })))),
+        SV_VOICE_STYLE_PRESETS.length ? h('div', { className: 'sv-style-presets' }, h('span', { className: 'sv-meta' }, '常用语气'), SV_VOICE_STYLE_PRESETS.map((style) => h('button', { key: style, type: 'button', className: 'sv-filter-chip', 'data-on': stylePrompt === style ? 'true' : 'false', onClick: () => setStylePrompt((current) => current === style ? '' : style) }, style.replace(/[，。]$/u, '')))) : null,
         h('div', { className: 'sv-audio-parameters' },
           h('label', { className: 'sv-media-field' }, h('span', null, '语速'), h('input', { className: 'sv-input', type: 'number', min: '0.5', max: '2', step: '0.05', value: rate, onChange: (event) => setRate(event.target.value) })),
           h('label', { className: 'sv-media-field' }, h('span', null, '音量'), h('input', { className: 'sv-input', type: 'number', min: '0', max: '2', step: '0.05', value: volume, onChange: (event) => setVolume(event.target.value) })),
@@ -5282,7 +5133,7 @@ window.__ModuleLoader__.load({
         const isVoice = task.type === 'voiceover';
         const audio = task.result?.audio || null;
         const taskMeta = [
-          mediaRunLabel(task.type), formatTime(task.createdAt), task.input?.provider === 'bailian' ? '百炼 BYOK' : task.input?.provider === 'scitiger' ? '远端 · SciTiger' : null,
+          mediaRunLabel(task.type), formatTime(task.createdAt), voiceProviderLabel(task.input?.provider, service?.providers?.scitiger?.loopback),
           task.input?.voiceId ? `音色 ${task.input.voiceId}` : task.input?.voiceName || null,
           task.input?.rate ? `语速 ${task.input.rate}` : null,
         ].filter(Boolean).join(' · ');
@@ -5337,18 +5188,10 @@ window.__ModuleLoader__.load({
     function AudioCaptionsPageV2({ packId, openConversation }) {
       const { projects, refresh, error, setError } = useProjects(packId);
       const [service, setService] = React.useState(null);
-      const [provider, setProvider] = React.useState(null);
       const [text, setText] = React.useState('');
       const [source, setSource] = React.useState(null);
-      const [voiceSource, setVoiceSource] = React.useState('system');
-      const [voiceReference, setVoiceReference] = React.useState(null);
-      const [voiceUploading, setVoiceUploading] = React.useState(false);
-      const [bridgeInfo, setBridgeInfo] = React.useState(null);
-      const [bridgeVoice, setBridgeVoice] = React.useState('冰糖');
-      const [libraryVoice, setLibraryVoice] = React.useState('');
-      // 配音方式：'' = 跟随桥接全局配置；cloud/local 按任务覆盖。仅桥接渠道生效。
-      const [bridgeChannel, setBridgeChannel] = React.useState('');
-      const [bridgeStyle, setBridgeStyle] = React.useState('');
+      const [voiceId, setVoiceId] = React.useState(SV_MIMO_DEFAULT_VOICE);
+      const [stylePrompt, setStylePrompt] = React.useState('');
       const [rate, setRate] = React.useState(1);
       const [volume, setVolume] = React.useState(1);
       const [subtitleEnabled, setSubtitleEnabled] = React.useState(true);
@@ -5356,7 +5199,6 @@ window.__ModuleLoader__.load({
       // 删除等无错误但需要回话的操作：用一句 sv-note 告知结果，成功与失败都看得见。
       const [notice, setNotice] = React.useState('');
       const [connectionOpen, setConnectionOpen] = React.useState(false);
-      const [connectionProvider, setConnectionProvider] = React.useState('bailian');
       const [apiKey, setApiKey] = React.useState('');
       const [connectionBusy, setConnectionBusy] = React.useState(null);
       const [pickerOpen, setPickerOpen] = React.useState(false);
@@ -5376,7 +5218,50 @@ window.__ModuleLoader__.load({
       const [autoProjects, setAutoProjects] = React.useState([]);
       const [confirmNode, ask] = useSvConfirm();
       const textRef = React.useRef(null);
-      const voiceFileInputRef = React.useRef(null);
+      // 三模式互斥：preset 用音色表，design 用一段描述，upload 用上传的参考音频。
+      // 只有当前模式那一个 state 会被读，其余两个留着但绝不进 payload——
+      // 混着传会让后端的互斥校验直接报错。
+      const [voiceSource, setVoiceSource] = React.useState('preset');
+      /**
+       * 整体风格标签（官方开头 `(风格)` 那套）。
+       *
+       * 它**只进 audioTags 入参**，绝不写进正文文本框——写了会被后端
+       * countInlineAudioTags 当成用户内插标签一起计数（重复计数），而且下次
+       * 拿同一份稿件再生成时标签会跟着正文累积，一遍遍加下去。
+       */
+      const [audioTagParams, setAudioTagParams] = React.useState([]);
+      const [voiceDesignText, setVoiceDesignText] = React.useState('');
+      const [voiceReference, setVoiceReference] = React.useState(null);
+      const [voiceReferenceBusy, setVoiceReferenceBusy] = React.useState(false);
+      const [voiceReferenceError, setVoiceReferenceError] = React.useState('');
+      // 换模式时把上一个模式的专属输入清掉：留着 design 描述切回 preset，
+      // 用户会以为那段描述还在生效。
+      React.useEffect(() => {
+        setVoiceReferenceError('');
+        if (voiceSource !== 'preset') setVoiceReference(null);
+      }, [voiceSource]);
+      /** Upload a reference clip for clone mode; format is checked before it leaves the browser. */
+      const pickVoiceReference = async (file) => {
+        const problem = svVoiceReferenceError(file);
+        if (problem) { setVoiceReferenceError(problem); setVoiceReference(null); return; }
+        setVoiceReferenceBusy(true); setVoiceReferenceError('');
+        try {
+          const data = await base64FromAudioFile(file);
+          const extension = String(file.name || '').split('.').pop().toLowerCase();
+          const uploaded = await remoteStatic('uploadVoiceReference', {
+            name: file.name,
+            mediaType: /^mp3$/iu.test(extension) ? 'audio/mpeg' : 'audio/wav',
+            data,
+          });
+          setVoiceReference(uploaded);
+          setError(null);
+        } catch (cause) {
+          // 上传本身失败（过大、解码不了、磁盘满）要和「格式不支持」分开说，
+          // 前者用户换个文件就行，后者得先转码。
+          setVoiceReferenceError(`上传失败：${cause.message}`);
+          setVoiceReference(null);
+        } finally { setVoiceReferenceBusy(false); }
+      };
 
       const refreshService = React.useCallback(async () => {
         try { const next = await remoteStatic('mediaStatus'); setService(next); setError(null); return next; }
@@ -5390,15 +5275,19 @@ window.__ModuleLoader__.load({
         void remote(packId, 'list').then((list) => { if (!cancelled) setAutoProjects(Array.isArray(list) ? list : []); }).catch(() => {});
         return () => { cancelled = true; };
       }, [packId, source?.projectId]);
-      // 桥接快照只用于填充音色/风格下拉；桥接不在线时表单照常可用（保持旧行为）。
+      // 音色表随 mediaStatus 返回；取不到就用实测内置表兜底，保证下拉不是空的。
+      // 回落目标是运维配置的默认音色（再退「冰糖」），**不是数组最后一项**——
+      // 之前取末项，改成 9 个音色后末项变成了 Dean，用户一进来就默认英文男声。
+      const voiceTouched = React.useRef(false);
       React.useEffect(() => {
-        if (!packId) return;
-        void remote(packId, 'bridgeVoiceoverInfo').then((next) => {
-          setBridgeInfo(next);
-          if (next?.available && next.mimoVoice) setBridgeVoice((current) => current === '冰糖' ? next.mimoVoice : current);
-          if (next?.available && next.mimoStyle) setBridgeStyle((current) => current || next.mimoStyle);
-        }).catch(() => setBridgeInfo(null));
-      }, [packId]);
+        const list = Array.isArray(service?.mimoVoices) && service.mimoVoices.length ? service.mimoVoices : null;
+        if (!list || voiceTouched.current) return;
+        setVoiceId((current) => {
+          if (list.includes(current)) return current;
+          const preferred = svDefaultVoice(service);
+          return list.includes(preferred) ? preferred : SV_MIMO_DEFAULT_VOICE;
+        });
+      }, [service?.mimoVoices]);
       React.useEffect(() => {
         if (!packId) return;
         void remote(packId, 'listAccounts').then((next) => {
@@ -5413,13 +5302,8 @@ window.__ModuleLoader__.load({
         if (!node) return;
         node.style.height = 'auto'; node.style.height = `${Math.max(node.scrollHeight, 136)}px`;
       }, [text]);
-      const providerEntries = ['bailian', 'scitiger'].filter((id) => service?.providers?.[id]?.configured && service.providers[id].credential?.configured);
-      React.useEffect(() => {
-        if (!providerEntries.length) { setProvider(null); return; }
-        // 默认选本机桥接（scitiger + loopback）：它不依赖外部 Key、永远本机可达；
-        // 百炼 Key 过期时用户没动过渠道选择就会撞 "Invalid API-key"（2026-10-02 实测）。
-        setProvider((current) => providerEntries.includes(current) ? current : (providerEntries.includes('scitiger') && service?.providers?.scitiger?.loopback ? 'scitiger' : providerEntries[0]));
-      }, [providerEntries.join('|')]);
+      // 渠道固定为白名单里的唯一 provider；「已连接」只看它自己的凭据。
+      const providerEntries = SV_VOICE_PROVIDERS.filter((id) => service?.providers?.[id]?.configured && service.providers[id].credential?.configured);
       React.useEffect(() => {
         if (!pickerOpen || !packId) return undefined;
         let cancelled = false;
@@ -5446,20 +5330,11 @@ window.__ModuleLoader__.load({
 
       if (!packId) return h(NeedPack, { openConversation });
 
-      const providerId = provider || null;
-      const selectedProvider = providerId ? service?.providers?.[providerId] : null;
-      const providerName = providerId === 'bailian' ? '百炼' : providerId === 'scitiger' ? (selectedProvider?.loopback ? '本机桥接' : '远端 · SciTiger') : '尚未配置';
-      // 桥接专属控件只在渠道真的打到桥接时才有意义；其他渠道原样忽略。
-      const bridgeActive = providerId === 'scitiger';
-      const builtinVoiceOptions = Array.from(new Set([...(bridgeInfo?.available && Array.isArray(bridgeInfo.builtinVoices) && bridgeInfo.builtinVoices.length ? bridgeInfo.builtinVoices : SV_MIMO_BUILTIN_VOICES), bridgeVoice]));
-      const libraryVoiceOptions = bridgeInfo?.available && Array.isArray(bridgeInfo.voices) ? bridgeInfo.voices : [];
-      const bridgeVoiceReady = voiceSource !== 'builtin' || Boolean(bridgeVoice)
-        ? voiceSource !== 'library' || Boolean(libraryVoice)
-        : false;
-      const referenceVoiceReady = voiceSource === 'upload' ? Boolean(voiceReference) : selectedProvider?.referenceVoiceConfigured;
-      const canGenerate = Boolean(providerId && selectedProvider?.credential?.configured && selectedProvider?.configured && referenceVoiceReady && bridgeVoiceReady);
-      // 桥接内置音色由小米云端模型合成，本地 LongCat 分支没有这张表，提前拦住。
-      const bridgeConflict = bridgeActive && voiceSource === 'builtin' && bridgeChannel === 'local';
+      const providerId = SV_VOICE_PROVIDER;
+      const selectedProvider = service?.providers?.[providerId] || null;
+      const providerName = SV_VOICE_PROVIDER_LABEL[providerId] || providerId;
+      const voiceOptions = Array.from(new Set([...(Array.isArray(service?.mimoVoices) && service.mimoVoices.length ? service.mimoVoices : SV_MIMO_BUILTIN_VOICES), voiceId]));
+      const canGenerate = Boolean(selectedProvider?.credential?.configured && selectedProvider?.configured);
       const inActiveTab = (project) => activeTab === GENERAL_TAB ? !project.account : project.account?.id === activeTab;
       const tabProjects = projects.filter(inActiveTab);
       const visibleTasks = taskFeed.items;
@@ -5475,26 +5350,30 @@ window.__ModuleLoader__.load({
           setSource({ projectId: detail.id, title: detail.title }); setText(body); setPickerOpen(false); setError(null);
         } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
       };
-      /** Bridge overrides ride along only for the bridge channel; other channels ignore them. */
-      const bridgeFieldsOf = () => {
-        if (!bridgeActive) return {};
-        const bridge = {};
-        if (bridgeChannel) bridge.channel = bridgeChannel;
-        if (bridgeStyle.trim()) bridge.style = bridgeStyle.trim();
-        return Object.keys(bridge).length ? { bridge } : {};
-      };
-      /** Voice payload shared by create and retry, so both stay in step. */
+      /**
+       * Voice payload shared by create and retry, so both stay in step.
+       *
+       * 三个模型互斥，所以只发当前模式那一套：design 不带 voiceId（带了后端会
+       * 当成混用报错），upload 不带 voiceId 也不带 designText，只带参考音频。
+       */
       const voiceFieldsOf = () => {
-        const bridgeFields = bridgeFieldsOf();
-        if (voiceSource === 'upload') return { voiceSource: 'upload', ...(voiceReference ? { referenceAudio: voiceReference, voiceName: voiceReference.name } : {}), ...bridgeFields };
-        // 桥接两类音色都走 voiceSource 'preset'：内置音色名由桥接识别 MiMo 表，
-        // 音色库 ID 由桥接在 voices/ 目录查找。
-        if (voiceSource === 'builtin') return { voiceSource: 'preset', voiceId: bridgeVoice, voiceName: bridgeVoice, ...bridgeFields };
-        if (voiceSource === 'library') return libraryVoice ? { voiceSource: 'preset', voiceId: libraryVoice, voiceName: libraryVoice, ...bridgeFields } : {};
-        return { voiceSource: 'system', ...bridgeFields };
+        const tone = stylePrompt.trim() ? { style: stylePrompt.trim() } : {};
+        // 开头风格由后端 buildTaggedText 拼，这里只传数组。
+        const tags = audioTagParams.length ? { audioTags: audioTagParams } : {};
+        if (voiceSource === 'design') return { voiceSource: 'design', ...tone, ...tags, designText: voiceDesignText.trim() };
+        if (voiceSource === 'upload') return { voiceSource: 'upload', ...tone, ...tags, referenceAudio: voiceReference };
+        return { voiceSource: 'preset', voiceId, voiceName: voiceId, ...tone, ...tags };
+      };
+      /** 每个模式自己那条「还差什么才能生成」，说清下一步去哪填。 */
+      const voiceMissingOf = () => {
+        if (voiceSource === 'design' && !voiceDesignText.trim()) return '音色设计模式要先写一段声音描述才能生成——年龄、声线、语速、气质写得越具体，出来的音色越接近。';
+        if (voiceSource === 'upload' && !voiceReference) return voiceReferenceError || '声音克隆模式要先上传一段参考音频（只支持 wav / mp3），才能生成。';
+        return '';
       };
       const createAudioTask = async () => {
         if (!canGenerate || !text.trim()) return;
+        const missing = voiceMissingOf();
+        if (missing) { setError(missing); return; }
         setSubmitting('voiceover');
         try {
           // 未选稿件的纯手动任务可以携带目标项目：配音（和字幕）生成成功后由
@@ -5502,19 +5381,6 @@ window.__ModuleLoader__.load({
           await remote(packId, 'startAudioTask', { text, subtitleEnabled, ...(source?.projectId ? { sourceProjectId: source.projectId } : { title: source?.title || '手动输入文稿', ...(autoProjectId ? { autoAdoptProjectId: autoProjectId } : {}) }), provider: providerId, ...voiceFieldsOf(), rate: Number(rate), volume: Number(volume) });
           await taskFeed.refresh(); setError(null);
         } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
-      };
-      const uploadVoiceReference = async (event) => {
-        const file = event.target.files?.[0] || null;
-        event.target.value = '';
-        if (!file || voiceUploading) return;
-        const limit = service?.voiceReferenceMaxBytes || 20 * 1024 * 1024;
-        if (file.size < 1 || file.size > limit) { setError(`参考音频必须小于 ${formatMediaBytes(limit)}。`); return; }
-        setVoiceUploading(true);
-        try {
-          const data = await base64FromAudioFile(file);
-          const uploaded = await remote(packId, 'uploadVoiceReference', { name: file.name, mediaType: file.type, data });
-          setVoiceReference(uploaded); setVoiceSource('upload'); setError(null);
-        } catch (cause) { setError(cause.message); } finally { setVoiceUploading(false); }
       };
       const startSubtitles = async (task) => {
         if (!canGenerate) return;
@@ -5531,11 +5397,17 @@ window.__ModuleLoader__.load({
             text: task.source?.text || '',
             ...(task.source?.projectId ? { sourceProjectId: task.source.projectId } : { title: task.source?.title || '手动输入文稿' }),
             provider: providerId,
-            voiceSource: task.input?.voiceSource || 'system',
-            ...(task.input?.voiceId ? { voiceId: task.input.voiceId } : {}),
+            // 重试重放这条任务**当初冻结**的音色与语气，而不是当前表单值——
+            // 否则中途改了表单再点重试，同一条任务会换一个声音。
+            // 三模式同理：design 的任务重试还是 design，不能按当前表单变成 preset。
+            // 老的 preset 任务没有 voiceSource 字段，回落 preset（默认分支即 preset）。
+            voiceSource: ['design', 'upload'].includes(task.input?.voiceSource) ? task.input.voiceSource : 'preset',
+            ...(task.input?.voiceId ? { voiceId: task.input.voiceId } : { voiceId, voiceName: voiceId }),
             ...(task.input?.voiceName ? { voiceName: task.input.voiceName } : {}),
-            // 冻结的桥接覆盖也要一起重放，否则重试会悄悄回落到桥接全局配置。
-            ...(task.input?.bridge ? { bridge: task.input.bridge } : {}),
+            ...(task.input?.designText ? { designText: task.input.designText } : {}),
+            ...(task.input?.referenceAudio ? { referenceAudio: task.input.referenceAudio } : {}),
+            ...(task.input?.style ? { style: task.input.style } : {}),
+            ...(Array.isArray(task.input?.audioTags) && task.input.audioTags.length ? { audioTags: task.input.audioTags } : {}),
             rate: Number(task.input?.rate ?? 1),
             volume: Number(task.input?.volume ?? 1),
             subtitleEnabled: task.input?.subtitleEnabled === true,
@@ -5592,12 +5464,12 @@ window.__ModuleLoader__.load({
       const saveConnection = async () => {
         if (!apiKey.trim()) return;
         setConnectionBusy('save');
-        try { await remoteStatic('configureMediaConnection', { provider: connectionProvider, apiKey }); setApiKey(''); await refreshService(); setError(null); }
+        try { await remoteStatic('configureMediaConnection', { provider: providerId, apiKey }); setApiKey(''); await refreshService(); setError(null); }
         catch (cause) { setError(cause.message); } finally { setConnectionBusy(null); }
       };
       const clearConnection = async () => {
         setConnectionBusy('clear');
-        try { await remoteStatic('clearMediaConnectionCredential', { provider: connectionProvider }); await refreshService(); setError(null); }
+        try { await remoteStatic('clearMediaConnectionCredential', { provider: providerId }); await refreshService(); setError(null); }
         catch (cause) { setError(cause.message); } finally { setConnectionBusy(null); }
       };
       const filterOptions = [{ id: 'all', label: '全部' }, { id: 'succeeded', label: '已完成' }, { id: 'failed', label: '失败' }];
@@ -5606,19 +5478,19 @@ window.__ModuleLoader__.load({
         { label: '音频任务', value: String(taskFeed.counts?.all || 0), tone: 'pink' },
         { label: '生成状态', value: taskFeed.anyRunning ? '进行中' : '空闲', tone: taskFeed.anyRunning ? 'orange' : 'green' },
       ] });
-      const providerControl = !service
+      // 只剩一个渠道时不做选择器——一个不可点的按钮只会让人反复点它。
+      // Key 被服务端拒绝是独立于「没填」的一种状态：凭据已保存，但上次请求被 401/403 拒了，
+      // 必须单独提示去重填，否则用户只会看到后续的「合成失败」而不知道该换 Key。
+      const providerRejected = Boolean(selectedProvider?.configured && selectedProvider?.credential?.configured && selectedProvider.credentialHint === 'rejected');
+      const providerControl = providerRejected
+        ? h('p', { className: 'sv-error', role: 'alert' }, `${providerName} 拒绝了当前 API Key，请在右上角「连接配置」中重新填写。`)
+        : !service
         ? h('p', { className: 'sv-note' }, '正在读取连接状态…')
-        : providerEntries.length === 2
-          ? h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '配音服务' }, providerEntries.map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': providerId === id ? 'true' : 'false', onClick: () => setProvider(id) }, id === 'bailian' ? '百炼' : service?.providers?.scitiger?.loopback ? '本机桥接' : '远端 · SciTiger')))
-          : providerEntries.length === 1
-            ? h('p', { className: 'sv-note' }, `当前使用：${providerName}。仅此服务已完成 API Key 配置。`)
-            : h('p', { className: 'sv-error' }, '尚未配置百炼或远端 API Key。请在右上角「连接配置」中完成设置。');
-      // 渠道指向哪里必须看得见：本机桥接与远端云端用的是完全不同的 Key。
-      const providerEndpointNote = !service ? null : providerId === 'scitiger' && service.providers?.scitiger?.endpoint
-        ? h('p', { className: service.providers.scitiger.loopback ? 'sv-note' : 'sv-warn' }, service.providers.scitiger.loopback
-          ? `渠道指向本机桥接 ${service.providers.scitiger.endpoint}；云端/本地合成与音色都在桥接配置中心管理。`
-          : `渠道指向远端 ${service.providers.scitiger.endpoint}。本机部署应走本机桥接：请用「启动工作台.cmd」启动，否则云端 Key 不匹配会报「Invalid API key」。`)
-        : null;
+        : providerEntries.length
+          ? h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '配音服务' },
+            SV_VOICE_PROVIDERS.map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': providerId === id ? 'true' : 'false' }, SV_VOICE_PROVIDER_LABEL[id] || id)))
+          : h('p', { className: 'sv-error' }, `尚未配置${providerName}的 API Key。请在右上角「连接配置」中完成设置。`);
+      const providerEndpointNote = null;
       const scriptPickerDrawer = pickerOpen && h(React.Fragment, null,
         h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭稿件选择', onClick: () => setPickerOpen(false) }),
         h('aside', { className: 'sv-drawer sv-audio-picker', role: 'dialog', 'aria-modal': 'true', 'aria-label': '选择稿件' },
@@ -5631,7 +5503,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sv-audio-pagebar' }, h('span', { className: 'sv-meta' }, `共 ${picker.total || 0} 篇 · 第 ${pickerPage + 1}/${Math.max(1, Math.ceil((picker.total || 0) / 8))} 页`), h('span', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', disabled: pickerPage === 0, onClick: () => setPickerPage((current) => Math.max(0, current - 1)) }, '上一页'), h('button', { type: 'button', className: 'lwb-plain-button', disabled: pickerPage + 1 >= Math.max(1, Math.ceil((picker.total || 0) / 8)), onClick: () => setPickerPage((current) => current + 1) }, '下一页'))),
         ),
       );
-      const connectionCredential = service?.providers?.[connectionProvider]?.credential;
+      const connectionCredential = selectedProvider?.credential;
       const syncPickerDrawer = syncPicker && h(React.Fragment, null,
         h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭项目选择', onClick: () => setSyncPicker(null) }),
         h('aside', { className: 'sv-drawer sv-audio-picker', role: 'dialog', 'aria-modal': 'true', 'aria-label': '选择要采纳配音的项目' },
@@ -5654,8 +5526,8 @@ window.__ModuleLoader__.load({
         h('aside', { className: 'sv-drawer sv-media-config-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '连接配置' },
           h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { className: 'sv-media-drawer-title' }, '连接配置'), h('p', { className: 'sv-media-drawer-copy' }, 'API Key 保存到 DSH 私有凭据库，不会写入稿件、任务或浏览器存储。')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setConnectionOpen(false) }, '关闭')),
           h('div', { className: 'sv-media-drawer-body' },
-            h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '连接提供方' }, ['bailian', 'scitiger'].map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': connectionProvider === id ? 'true' : 'false', disabled: Boolean(connectionBusy), onClick: () => { setConnectionProvider(id); setApiKey(''); } }, id === 'bailian' ? '百炼' : '远端 · SciTiger'))),
-            h('label', { className: 'sv-media-field' }, h('span', null, connectionProvider === 'bailian' ? '百炼 API Key' : 'SciTiger API Key'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: connectionCredential?.configured ? '已保存；输入新值可更新' : '输入 API Key', onChange: (event) => setApiKey(event.target.value) })),
+            h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '连接提供方' }, SV_VOICE_PROVIDERS.map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': providerId === id ? 'true' : 'false' }, SV_VOICE_PROVIDER_LABEL[id] || id))),
+            h('label', { className: 'sv-media-field' }, h('span', null, `${providerName} API Key`), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: connectionCredential?.configured ? '已保存；输入新值可更新' : '输入 API Key', onChange: (event) => setApiKey(event.target.value) })),
             h('p', { className: 'sv-note' }, connectionCredential?.configured ? '已保存连接；密钥不会回显。' : '保存后，可在新建任务中使用该服务。'),
           ),
           h('div', { className: 'sv-media-drawer-foot' }, h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(connectionBusy) || !connectionCredential?.configured || !connectionCredential?.writable, onClick: () => { void clearConnection(); } }, connectionBusy === 'clear' ? '正在清除…' : '清除密钥'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(connectionBusy) || !apiKey.trim(), onClick: () => { void saveConnection(); } }, connectionBusy === 'save' ? '正在保存…' : '保存连接')),
@@ -5665,6 +5537,16 @@ window.__ModuleLoader__.load({
         h('div', { className: 'sv-section-head' }, h('h3', null, '新建配音任务'), h('span', null, source ? '已载入稿件' : '可直接输入文稿')),
         h('div', { className: 'sv-audio-source-row' }, source ? h('div', { className: 'sv-audio-project' }, h('strong', null, source.title), h('span', null, `当前稿件 · ${charCount(text)} 字 · 可继续修改`)) : h('p', { className: 'sv-note' }, '稿件为可选项。也可以直接输入自己的口播内容。'), h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => { setPickerPage(0); setPickerOpen(true); } }, source ? '更换稿件' : '选择稿件'), source ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSource(null) }, '改为手动输入') : null)),
         h('label', { className: 'sv-media-field' }, h('span', null, '文本内容'), h('textarea', { ref: textRef, className: 'sv-textarea sv-audio-script', value: text, maxLength: 60000, placeholder: '输入或粘贴需要配音的口播文稿', onChange: (event) => setText(event.target.value), onInput: (event) => { event.currentTarget.style.height = 'auto'; event.currentTarget.style.height = `${Math.max(event.currentTarget.scrollHeight, 136)}px`; } })),
+        // 标签是写进正文里的，所以这一组紧贴着文本框，并且把计数摆在旁边——
+        // 上限 8 个是后端的硬校验，超了直接在这里拦住，别让用户提交完才吃 400。
+        svAudioTagPicker({
+          text,
+          mode: voiceSource,
+          disabled: submitting,
+          paramTags: audioTagParams,
+          onToggleParam: (tag) => setAudioTagParams((current) => current.includes(tag) ? current.filter((item) => item !== tag) : [...current, tag]),
+          onInsert: (tag) => svInsertAudioTag(textRef.current, tag, setText),
+        }),
         h('p', { className: 'sv-meta' }, `${charCount(text)} 字 · 预计口播 ${scriptDurationLabel(text)}`),
         !source?.projectId && autoProjects.length ? h('label', { className: 'sv-media-field' }, h('span', null, '生成后放进项目（可选）'), h('select', { className: 'sv-select', value: autoProjectId, onChange: (event) => setAutoProjectId(event.target.value) },
           h('option', { value: '' }, '不放进项目（留在配音列表，稍后手动放）'),
@@ -5672,45 +5554,30 @@ window.__ModuleLoader__.load({
           h('small', { className: 'sv-meta' }, '选中后，配音（含字幕）生成成功会自动挂到该项目名下，视频页立即可见，无需再手动同步。')) : null,
         h('label', { className: 'sv-media-field' }, h('span', null, '配音服务'), providerControl),
         providerEndpointNote,
-        h('label', { className: 'sv-media-field' }, h('span', null, '音色'), h('select', { className: 'sv-select', value: voiceSource, onChange: (event) => setVoiceSource(event.target.value) },
-          h('option', { value: 'system' }, 'Tiffy - 自信（系统默认）'),
-          h('option', { value: 'upload' }, '上传自己的参考音频'),
-          bridgeActive ? h('option', { value: 'builtin' }, '桥接内置音色（云端 · 小米 MiMo）') : null,
-          bridgeActive ? h('option', { value: 'library' }, '桥接音色库（本机参考音频）') : null,
-        )),
-        voiceSource === 'upload' ? h('div', { className: 'sv-voice-upload' },
-          h('input', { ref: voiceFileInputRef, type: 'file', accept: 'audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/ogg,.mp3,.wav,.m4a,.ogg', tabIndex: -1, style: { display: 'none' }, onChange: (event) => { void uploadVoiceReference(event); } }),
-          h('div', { className: 'sv-voice-upload-row' },
-            h('p', { className: 'sv-voice-upload-file' }, voiceReference ? h(React.Fragment, null, voiceReference.name, h('span', null, ` · ${formatMediaBytes(voiceReference.bytes)} · ${formatMediaDuration(voiceReference.durationSeconds)}`)) : '尚未选择参考音频'),
-            h('button', { type: 'button', className: 'lwb-plain-button', disabled: voiceUploading || Boolean(submitting), onClick: () => voiceFileInputRef.current?.click?.() }, voiceUploading ? '正在上传…' : voiceReference ? '更换音频' : '选择音频'),
-            voiceReference ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: voiceUploading || Boolean(submitting), onClick: () => setVoiceReference(null) }, '移除') : null,
-          ),
-          h('p', { className: 'sv-note' }, '支持 MP3、WAV、M4A 和 OGG，最大 20 MiB。请上传只包含目标人声的清晰音频。'),
-        ) : null,
-        bridgeActive && voiceSource === 'builtin' ? h('label', { className: 'sv-media-field' }, h('span', null, '内置音色'), h('select', { className: 'sv-select', value: bridgeVoice, onChange: (event) => setBridgeVoice(event.target.value) }, builtinVoiceOptions.map((voice) => h('option', { key: voice, value: voice }, voice)))) : null,
-        bridgeActive && voiceSource === 'library' ? h('label', { className: 'sv-media-field' }, h('span', null, '音色库音色'), libraryVoiceOptions.length
-          ? h('select', { className: 'sv-select', value: libraryVoice, onChange: (event) => setLibraryVoice(event.target.value) }, h('option', { value: '' }, '选择音色'), libraryVoiceOptions.map((voice) => h('option', { key: voice.id, value: voice.id }, `${voice.id}${voice.hasTxt ? '' : '（首次使用自动转写）'}`)))
-          : h('select', { className: 'sv-select', value: '', disabled: true }, h('option', { value: '' }, bridgeInfo?.available ? '音色库为空：到桥接配置中心上传音色' : '桥接未响应，无法读取音色库'))) : null,
-        bridgeActive ? h('div', { className: 'sv-audio-parameters' },
-          h('label', { className: 'sv-media-field' }, h('span', null, '合成方式'), h('select', { className: 'sv-select', value: bridgeChannel, onChange: (event) => setBridgeChannel(event.target.value) },
-            h('option', { value: '' }, '跟随桥接配置'),
-            h('option', { value: 'cloud' }, '云端（小米 MiMo）'),
-            h('option', { value: 'local' }, '本地（LongCat）'),
-          )),
-        ) : null,
-        bridgeActive ? h('label', { className: 'sv-media-field' }, h('span', null, '语气风格（选填）'), h('input', { className: 'sv-input', value: bridgeStyle, maxLength: 200, list: 'sv-voice-style-presets', placeholder: '留空则跟随桥接配置；仅云端合成时生效', onChange: (event) => setBridgeStyle(event.target.value) }), h('datalist', { id: 'sv-voice-style-presets' }, SV_VOICE_STYLE_PRESETS.map((style) => h('option', { key: style, value: style })))) : null,
-        bridgeActive && SV_VOICE_STYLE_PRESETS.length ? h('div', { className: 'sv-style-presets' }, h('span', { className: 'sv-meta' }, '常用语气'), SV_VOICE_STYLE_PRESETS.map((style) => h('button', { key: style, type: 'button', className: 'sv-filter-chip', 'data-on': bridgeStyle === style ? 'true' : 'false', onClick: () => setBridgeStyle((current) => current === style ? '' : style) }, style.replace(/[，。]$/u, '')))) : null,
-        bridgeActive && bridgeInfo?.available ? h('p', { className: 'sv-note' }, `桥接当前：${bridgeInfo.ttsProvider === 'local' ? '本地合成（LongCat）' : '云端合成（小米 MiMo）'}${bridgeInfo.mimoKeyConfigured ? '' : ' · 未配置小米 API Key'}${bridgeInfo.mimoVoice ? ` · 内置音色「${bridgeInfo.mimoVoice}」` : ''}${bridgeInfo.mimoStyle ? ` · 风格「${bridgeInfo.mimoStyle}」` : ''}${bridgeInfo.defaultVoice ? ` · 默认音色映射「${bridgeInfo.defaultVoice}」` : ' · 未设置默认音色映射'}。系统默认音色经桥接时会自动替换为映射的音色库音色。`) : null,
+        svVoiceModePicker({ value: voiceSource, disabled: submitting, onChange: setVoiceSource }),
+        voiceSource === 'design'
+          ? h('label', { className: 'sv-media-field sv-media-field-wide' }, h('span', null, '音色描述（必填）'), h('input', { className: 'sv-input', value: voiceDesignText, maxLength: 200, disabled: Boolean(submitting), placeholder: '例：一位三十岁上下、语速偏慢、带点沙哑的中年男声', onChange: (event) => setVoiceDesignText(event.target.value) }))
+          : voiceSource === 'upload'
+            ? h('div', { className: 'sv-media-field sv-media-field-wide' },
+              h('span', null, '参考音频（必填）'),
+              h('input', { className: 'sv-input', type: 'file', accept: SV_CLONE_ACCEPT, disabled: Boolean(voiceReferenceBusy || submitting), onChange: (event) => { void pickVoiceReference(event.target.files?.[0] || null); event.target.value = ''; } }),
+              voiceReferenceBusy ? h('p', { className: 'sv-note' }, '正在读取并上传参考音频…')
+                : voiceReference ? h('p', { className: 'sv-note' }, `已上传：${voiceReference.name}（${formatMediaBytes(voiceReference.bytes)}${voiceReference.durationSeconds ? ` · ${formatMediaDuration(voiceReference.durationSeconds)}` : ''}）。换一个文件会重新上传。`)
+                  : h('p', { className: 'sv-note' }, '只支持 wav 和 mp3；m4a / aac 等格式需要先转成 wav，否则合成会失败。'),
+              voiceReferenceError ? h('p', { className: 'sv-error', role: 'alert' }, voiceReferenceError) : null)
+            : h(React.Fragment, null,
+              h('label', { className: 'sv-media-field' }, h('span', null, '音色'), svVoiceSelect({ value: voiceId, onChange: (next) => { voiceTouched.current = true; setVoiceId(next); }, disabled: submitting, options: voiceOptions, include: voiceId })),
+              SV_MIMO_VOICE_HINTS[voiceId] ? h('p', { className: 'sv-note' }, `当前音色「${voiceId}」：${SV_MIMO_VOICE_HINTS[voiceId]}`) : null),
+        h('label', { className: 'sv-media-field' }, h('span', null, '语气（选填）'), h('input', { className: 'sv-input', value: stylePrompt, maxLength: 200, list: 'sv-voice-style-presets', placeholder: voiceSource === 'design' ? '这段描述是必填的音色来源；这里填的是语气（选填）' : '留空则按音色默认语气合成', onChange: (event) => setStylePrompt(event.target.value) }), h('datalist', { id: 'sv-voice-style-presets' }, SV_VOICE_STYLE_PRESETS.map((style) => h('option', { key: style, value: style })))),
+        SV_VOICE_STYLE_PRESETS.length ? h('div', { className: 'sv-style-presets' }, h('span', { className: 'sv-meta' }, '常用语气'), SV_VOICE_STYLE_PRESETS.map((style) => h('button', { key: style, type: 'button', className: 'sv-filter-chip', 'data-on': stylePrompt === style ? 'true' : 'false', onClick: () => setStylePrompt((current) => current === style ? '' : style) }, style.replace(/[，。]$/u, '')))) : null,
         h('div', { className: 'sv-audio-parameters' }, h('label', { className: 'sv-media-field' }, h('span', null, '语速'), h('input', { className: 'sv-input', type: 'number', min: '0.5', max: '2', step: '0.05', value: rate, onChange: (event) => setRate(event.target.value) })), h('label', { className: 'sv-media-field' }, h('span', null, '音量'), h('input', { className: 'sv-input', type: 'number', min: '0', max: '2', step: '0.05', value: volume, onChange: (event) => setVolume(event.target.value) }))),
         h('label', { className: 'sv-audio-subtitle-option' }, h('input', { type: 'checkbox', checked: subtitleEnabled, onChange: (event) => setSubtitleEnabled(event.target.checked) }), h('span', null, h('strong', null, '同时生成字幕'), h('small', null, '配音完成后自动对齐字幕；字幕失败不影响音频，可单独重试。'))),
         h('div', { className: 'sv-actions' },
-          h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(submitting) || voiceUploading || !canGenerate || !text.trim() || bridgeConflict, onClick: () => ask({ title: '生成配音', copy: `将使用${providerName}和${voiceSource === 'upload' ? `参考音频「${voiceReference?.name || ''}」` : voiceSource === 'builtin' ? `桥接内置音色「${bridgeVoice}」` : voiceSource === 'library' ? `桥接音色库「${libraryVoice}」` : '系统默认音色'}为「${source?.title || '手动输入文稿'}」创建新的配音任务${subtitleEnabled ? '，并在配音完成后自动生成字幕' : ''}，提交后会调用${bridgeActive ? '本机桥接' : '远端服务'}。`, confirm: '确认生成', onConfirm: () => { void createAudioTask(); } }) }, submitting === 'voiceover' ? '正在提交…' : subtitleEnabled ? '生成配音和字幕' : '生成配音'),
-          bridgeConflict ? h('span', { className: 'sv-meta' }, '桥接内置音色只能搭配云端（小米 MiMo）合成，请调整「合成方式」')
-            : voiceSource === 'library' && !libraryVoice ? h('span', { className: 'sv-meta' }, '请选择桥接音色库里的音色')
-              : voiceSource === 'upload' && !voiceReference ? h('span', { className: 'sv-meta' }, '请先上传参考音频')
-                : text.trim().length > 600 ? h('span', { className: 'sv-meta' }, `文稿约 ${text.trim().length} 字，长文案会分段合成，预计约 ${Math.max(2, Math.round(text.trim().length / 700))} 分钟，进度会显示在任务记录里`) : null,
-        ),
-      );
+          h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(submitting) || !canGenerate || !text.trim() || Boolean(voiceMissingOf()), onClick: () => ask({ title: '生成配音', copy: `将使用${providerName}、${voiceSource === 'design' ? `音色设计「${voiceDesignText.trim()}」` : voiceSource === 'upload' ? `克隆参考音频「${voiceReference?.name || ''}」` : `音色「${voiceId}」`}${stylePrompt.trim() ? `、语气「${stylePrompt.trim()}」` : ''}为「${source?.title || '手动输入文稿'}」创建新的配音任务${subtitleEnabled ? '，并在配音完成后自动生成字幕' : ''}。`, confirm: '确认生成', onConfirm: () => { void createAudioTask(); } }) }, submitting === 'voiceover' ? '正在提交…' : subtitleEnabled ? '生成配音和字幕' : '生成配音'),
+          !canGenerate ? h('span', { className: 'sv-meta' }, `请先在右上角「连接配置」里填写${providerName}的 API Key`)
+            : voiceMissingOf() ? h('span', { className: 'sv-meta' }, voiceMissingOf())
+              : text.trim().length > 600 ? h('span', { className: 'sv-meta' }, `文稿约 ${text.trim().length} 字，长文案会分段合成，预计约 ${Math.max(2, Math.round(text.trim().length / 700))} 分钟，进度会显示在任务记录里`) : null,
+        ));
       const taskCard = (task) => {
         const subtitle = task.subtitle || { status: 'idle' };
         const audio = task.result?.audio;
@@ -5721,7 +5588,7 @@ window.__ModuleLoader__.load({
           ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: true }, subtitleProgress?.button || '字幕生成中…')
           : h('button', { type: 'button', className: subtitle.status === 'succeeded' ? 'lwb-plain-button' : 'lwb-primary-button', disabled: !canGenerate || Boolean(submitting), onClick: () => ask({ title: subtitle.status === 'succeeded' ? '重新生成字幕' : '生成字幕', copy: subtitle.status === 'succeeded' ? '将基于这条音频重新生成字幕，现有字幕版本会保留为历史结果。' : '将基于这条音频的真实时间轴生成字幕。', confirm: subtitle.status === 'succeeded' ? '重新生成' : '生成字幕', onConfirm: () => { void startSubtitles(task); } }) }, submitting === `subtitle:${task.id}` ? '正在提交…' : subtitle.status === 'succeeded' ? '重新生成字幕' : '生成字幕');
         return h('article', { key: task.id, className: 'sv-audio-task', 'data-status': task.status },
-          h('div', { className: 'sv-audio-task-head' }, h('div', null, h('p', { className: 'sv-audio-task-title' }, task.source?.title || '手动输入文稿'), h('p', { className: 'sv-audio-task-meta' }, [formatTime(task.createdAt), task.input?.provider === 'bailian' ? '百炼' : task.input?.provider === 'scitiger' ? (service?.providers?.scitiger?.loopback ? '本机桥接' : '远端 · SciTiger') : task.input?.provider, task.input?.bridge?.channel === 'cloud' ? '云端合成' : task.input?.bridge?.channel === 'local' ? '本地合成' : null, liveProgress, task.source?.kind === 'manual-text' ? '手动文稿' : task.source?.kind === 'edited-script-copy' ? '已保存稿件副本' : task.source?.kind === 'adopted-by-project' ? '已采纳进项目' : '已保存稿件'].filter(Boolean).join(' · '))), h('span', { className: `sv-tag ${task.status === 'failed' ? 'sv-status-error' : task.status === 'succeeded' ? 'sv-stage' : 'sv-status-manual'}` }, mediaStatusLabel(task.status))),
+          h('div', { className: 'sv-audio-task-head' }, h('div', null, h('p', { className: 'sv-audio-task-title' }, task.source?.title || '手动输入文稿'), h('p', { className: 'sv-audio-task-meta' }, [formatTime(task.createdAt), voiceProviderLabel(task.input?.provider, service?.providers?.scitiger?.loopback), task.input?.bridge?.channel === 'cloud' ? '云端合成' : task.input?.bridge?.channel === 'local' ? '本地合成' : null, liveProgress, task.source?.kind === 'manual-text' ? '手动文稿' : task.source?.kind === 'edited-script-copy' ? '已保存稿件副本' : task.source?.kind === 'adopted-by-project' ? '已采纳进项目' : '已保存稿件'].filter(Boolean).join(' · '))), h('span', { className: `sv-tag ${task.status === 'failed' ? 'sv-status-error' : task.status === 'succeeded' ? 'sv-stage' : 'sv-status-manual'}` }, mediaStatusLabel(task.status))),
           task.source?.text && task.source?.kind !== 'saved-script' ? h('p', { className: 'sv-audio-task-excerpt' }, [...task.source.text.replace(/\s+/gu, ' ').trim()].slice(0, 42).join('') + ([...task.source.text.replace(/\s+/gu, '').trim()].length > 42 ? '…' : '')) : null,
           audio ? h('div', { className: 'sv-audio-task-detail' }, h('span', null, `时长 ${formatMediaDuration(audio.durationSeconds)}`), h('span', null, formatMediaBytes(audio.bytes)), h('span', null, subtitle.status === 'succeeded' ? `字幕 ${subtitle.cueCount || 0} 条` : subtitle.status === 'failed' ? '字幕失败 · 配音可用' : activeSubtitle ? '字幕实时处理中' : '未生成字幕')) : null,
           subtitleProgress ? h('div', { className: 'sv-audio-subtitle-progress', role: 'status', 'aria-live': 'polite' },
@@ -5751,7 +5618,7 @@ window.__ModuleLoader__.load({
       const sourceDrawerNode = sourceDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭稿件内容', onClick: () => setSourceDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '稿件内容' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, sourceDrawer.source?.title || '稿件内容'), h('p', { className: 'sv-meta' }, sourceDrawer.source?.kind === 'manual-text' ? '手动输入文稿快照' : '任务创建时冻结的稿件快照')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSourceDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll' }, h('article', { className: 'sv-sc-manuscript' }, sourceDrawer.source?.text || ''))));
       const subtitleDrawerNode = subtitleDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭字幕内容', onClick: () => setSubtitleDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '编辑字幕' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, `字幕 · ${subtitleDrawer.task.source?.title || '手动文稿'}`), h('p', { className: 'sv-meta' }, `${subtitleDrawer.cues.length} 条字幕，可直接校对错别字并保存。`)), h('button', { type: 'button', className: 'lwb-plain-button', disabled: subtitleDrawer.saving, onClick: () => setSubtitleDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll sv-audio-subtitle-editor' }, h('div', { className: 'sv-subtitle-cues' }, subtitleDrawer.cues.map((cue, index) => h('article', { key: cue.id, className: 'sv-subtitle-cue' }, h('time', null, cue.time), h('textarea', { className: 'sv-textarea sv-subtitle-text', value: cue.text, maxLength: 30000, 'aria-label': `第 ${index + 1} 条字幕文本`, onChange: (event) => setSubtitleDrawer((current) => ({ ...current, cues: current.cues.map((currentCue, currentIndex) => currentIndex === index ? { ...currentCue, text: event.target.value } : currentCue) })) }))))), h('div', { className: 'sv-media-drawer-foot' }, h('span', { className: 'sv-meta' }, '时间码来自音频对齐结果，保存将更新字幕文本。'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: subtitleDrawer.saving || !subtitleDrawer.cues.length || subtitleDrawer.cues.some((cue) => !cue.text.trim()), onClick: () => ask({ title: '保存字幕', copy: `将保存这 ${subtitleDrawer.cues.length} 条字幕的文本修改，时间码保持不变。`, confirm: '确认保存', onConfirm: () => { void saveSubtitles(); } }) }, subtitleDrawer.saving ? '正在保存…' : '保存字幕'))));
       const accountTabs = h(AccountTabs, { accountLibrary, activeTab, onChange: setActiveTab, label: '按账号查看配音任务' });
-      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, h('div', { className: 'sv-setup-grid' }, h(LocalEnginePanel, { packId }), h(BridgeConfigPanel), h(VoiceLibraryPanel)), accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
+      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
     }
     /**
      * 视频制作任务的实时进度：步骤条 + 当前阶段用时 + 总耗时 + 阶段明细。
@@ -6723,6 +6590,17 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
       }] });
       await ctx.plugin({ name: 'spoken-video-execution-client', inject: ['remote.spokenVideo'], apply(scope) { executionRemote = scope.get('remote.spokenVideo'); scope.effect(() => () => { executionRemote = null; }); } });
       installStyle(); ctx.effect(() => ctx.lwbPackClient.register({ packId: 'spoken-video', pages: { positioning: AccountPositioningPage, signals: SignalsPage, topics: TopicsPage, scripts: ScriptPage, 'audio-captions': AudioCaptionsPageV2, 'video-preview': VideoPreviewPageV2, publish: PublishPageV4, 'content-schedule': ContentSchedulePage, pipeline: PipelineBoardPage } }), 'spoken-video: register capability pages'); }
+    // 测试用的纯常量出口。带 hook 的页面没法在 SSR 里跑（useEffect 不执行），
+    // 但渠道白名单、音色表这类**决定 UI 形状的常量**可以纯静态断言，
+    // 不必为了可测就把整个页面拆出来重写。
+    exports.__voice = {
+      SV_VOICE_PROVIDER, SV_VOICE_PROVIDERS, SV_VOICE_PROVIDER_LABEL, SV_RETIRED_PROVIDER_LABEL,
+      voiceProviderLabel, SV_MIMO_BUILTIN_VOICES, SV_MIMO_VOICE_HINTS, SV_MIMO_VOICE_GROUPS,
+      SV_MIMO_DEFAULT_VOICE, svDefaultVoice, SV_VOICE_MODES, SV_SINGING_MODES,
+      SV_AUDIO_TAG_GROUPS, SV_AUDIO_TAG_MAX_COUNT, SV_AUDIO_TAG_MAX_LENGTH,
+      svAudioTagSlots, svAudioTagNames, svAudioTagError, svInsertAudioTag, SV_VOICE_STYLE_PRESETS,
+      SV_CLONE_EXTENSIONS, SV_CLONE_ACCEPT, svVoiceReferenceError,
+    };
     exports.inject = ['connection', 'lwbPackClient', 'remote']; exports.apply = apply; return module.exports;
   },
 });
