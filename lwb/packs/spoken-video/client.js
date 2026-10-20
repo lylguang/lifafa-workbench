@@ -3435,7 +3435,7 @@ window.__ModuleLoader__.load({
      *
      * 为什么收紧：口播稿里写 `[1]` 引用来源是真实场景。原先「数 `[` 起始符」
      * 会让正常文案占配额，改稿时突然被拒而用户不知道为什么——这个失败模式
-     * 比漏算一个标签糟得多。
+     * 比漏算一个标签糟得多。纯数字同理：`[1]` 按引用处理，不占配额。
      *
      * 圆括号组这里**一个都不数**：开头 `(风格)` 由 `audioTags` 入参承载，不经正文。
      *
@@ -3445,11 +3445,16 @@ window.__ModuleLoader__.load({
     function svAudioTagSlots(text) {
       const body = String(text ?? '');
       const spans = [];
+      // 成对 + 内容非空 + ≤40 字 + 内部不含任何括号，才算一个内插标签。
       const re = /[[［]([^\]］]{1,40})[\]］]/gu;
       let match = re.exec(body);
       while (match) {
-        // 内容为空、或内部还带括号，都不算标签（与后端同规则）。
-        if (!/[[\]［］()（）]/u.test(match[1])) {
+        // 纯数字**不算**标签（2026-10-20 Chief 裁决 A，与后端 countInlineAudioTags 同口径）：
+        // 口播稿里写 `[1]` 引用来源是真实场景。若把它算进配额，用户写够 9 处参考文献
+        // 就会被拒，而错误文案指向「音频标签」——他看着自己的引用完全不知道被拒在哪，
+        // 而且这是必然发生的，不是概率问题。反过来「用户真想写纯数字标签」在官方标签表里
+        // 不存在，用一个不会发生的场景去换一个必然发生的误伤，不划算。
+        if (!/^\d+$/u.test(match[1].trim()) && !/[[\]［］()（）]/u.test(match[1])) {
           spans.push({ start: match.index, end: match.index + match[0].length, tag: match[1].trim() });
         }
         re.lastIndex = match.index + match[0].length;

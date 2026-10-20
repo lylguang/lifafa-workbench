@@ -190,12 +190,20 @@ test('音频标签两套语法分工：开头风格走入参，句中方括号�
   // 改稿时突然被拒而用户不知道为什么，比漏算一个标签糟得多。
   assert.equal(svAudioTagSlots('见[参考文献] 说明').used, 1, '成对且内容合法，算标签')
   assert.equal(svAudioTagSlots('见[1 参考文献]说明').used, 1, '成对且内容合法，算标签')
-  assert.equal(svAudioTagSlots('见 [1] 与 [2] 的说法').used, 2)
+  assert.equal(svAudioTagSlots('见 [1] 与 [2] 的说法').used, 0, '纯数字引用不算标签（Chief 裁决 A）')
   assert.equal(svAudioTagSlots('只有左括号[').used, 0)
   assert.equal(svAudioTagSlots('只有全角［').used, 0)
   assert.equal(svAudioTagSlots('缺右括号 [叹气').used, 0, '不成对的不算标签')
-  // [1] 这类短引用：成对、内容短、无括号 —— 它仍然算一个标签（后端规则如此）。
-  assert.equal(svAudioTagSlots('见[1]。').used, 1, '成对的短引用仍算标签')
+  // 纯数字引用按文献编号处理，不占配额（2026-10-20 Chief 裁决 A，与后端
+  // countInlineAudioTags 同口径）。钉这一条的同时钉住已否决的方案不会复活：
+  // 「[1] 算标签」曾以「形状相同、无法区分」为由被实现过。
+  assert.equal(svAudioTagSlots('见[1]。').used, 0, '纯数字引用不占配额')
+  assert.equal(svAudioTagSlots('见 ［12］。').used, 0, '全角纯数字同样不算')
+  // 写够 9 处参考文献不再被拒——这正是裁决 A 要消灭的那个必然发生的误伤。
+  assert.equal(svAudioTagSlots('[1][2][3][4][5][6][7][8][9][10]').used, 0, '9 处以上文献引用不得占满配额')
+  assert.equal(svAudioTagSlots('[1][叹气]').used, 1, '引用与真标签混排时只数真标签')
+  // 超限提示不再教用户删参考文献——引用本来就不占名额，这句话会误导。
+  assert.doesNotMatch(svAudioTagError('[a][b][c][d][e][f][g]', '新标签', ['风格']), /文献编号/u)
   // 成对但内容超 40 字：不算标签（原样放行，不占配额）。
   assert.equal(svAudioTagSlots(`[${'长'.repeat(41)}]`).used, 0, '超 40 字不算标签')
   assert.equal(svAudioTagSlots(`[${'长'.repeat(40)}]`).used, 1, '恰好 40 字仍算标签')
