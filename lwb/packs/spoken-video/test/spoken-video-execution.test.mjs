@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdtemp, mkdir, writeFile, readFile, rm, symlink } from 'node:fs/promises'
+import { canSymlinkFiles } from './fs-link-helper.mjs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { executionDetail, executionList, executionAsset, executionAddress, executionFrame, executionTransition, displayValue } from '../spoken-video-execution.mjs'
@@ -43,6 +44,13 @@ test('assets are task-bound, contained through symlinks, and include project sub
   assert.match((await executionAsset(ctx, { ...request, id: 'render', assetId: log.id })).text, /Rendered/)
   const external = join(ctx.workspacePath, 'secret.txt'); await writeFile(external, 'private')
   await rm(join(ctx.workspacePath, 'data', prefix, 'media/captions.srt'))
+  // 这一处要把 captions.srt 换成**指向文件的符号链接**。
+  // Junction 只能指向目录，所以非管理员 Windows 上这个场景构造不出来——
+  // 明确跳过并说明原因，不要假通过（假通过会让「越界读取被拦住」这条守卫形同虚设）。
+  if (!await canSymlinkFiles(ctx.workspacePath)) {
+    t.skip('本机无符号链接权限，且 Junction 只能指向目录，无法构造「文件被换成链接」的场景')
+    return
+  }
   await symlink(external, join(ctx.workspacePath, 'data', prefix, 'media/captions.srt'))
   await assert.rejects(executionAsset(ctx, { ...request, assetId: detail.assets[0].id }), /不属于/u)
 })

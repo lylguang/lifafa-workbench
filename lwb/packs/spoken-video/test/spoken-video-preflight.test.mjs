@@ -9,6 +9,7 @@ import { inspectContentSafety } from '../spoken-video-content-safety.mjs'
 import { inspectSceneCueCoverage, parseSceneCueMap } from '../spoken-video-scene-cues.mjs'
 import { parseSceneSpans } from '../spoken-video-scene-table.mjs'
 import { APP_NODE_MODULES, ensureAgentDependencies, inspectSpokenVideoAgentProject, isBrowserLaunchFailure, parseRemotionEvalFailure, prepareSpokenVideoAgentProject, sampleFrameCoverage, sampleFrameNumbers, RENDER_BROWSER_ATTEMPTS } from '../spoken-video-remotion.mjs'
+import { linkDirectoryForTest } from './fs-link-helper.mjs'
 
 const source = (style, extra = '') => `import React from 'react'; import {useCurrentFrame} from 'remotion';
 export const CreativeVideo=()=>{const frame=useCurrentFrame();return <div style={${style}}>Hello</div>};
@@ -66,12 +67,75 @@ test('migrates a legacy dependency symlink without touching the shared cache', a
   t.after(() => rm(dir, { recursive: true, force: true }))
   // 指向 ensureAgentDependencies 认可的共享依赖目录；包内 node_modules 在运行时
   // 环境里也存在（被运行时链接填充），用它会触发「未知目录」拒绝，测不到迁移路径。
-  await symlink(APP_NODE_MODULES, join(dir, 'node_modules'))
+  await linkDirectoryForTest(APP_NODE_MODULES, join(dir, 'node_modules'))
   await ensureAgentDependencies(dir)
   await writeFile(join(dir, 'node_modules/.cache/task-only'), 'local')
   await ensureAgentDependencies(dir)
   assert.equal(await readFile(join(dir, 'node_modules/.cache/task-only'), 'utf8'), 'local')
-  assert.equal((await lstat(join(dir, 'node_modules'))).isDirectory(), true)
+  // 迁移后 node_modules 必须是真的目录（不是链接）——这条不变。
+  // 注意不能用 .isDirectory() 判断「是不是链接」：Junction 的 isDirectory() 为 false，
+  // 但 .isSymbolicLink() 对 Junction 也返回 true。
+  const info = await lstat(join(dir, 'node_modules'))
+  assert.equal(info.isDirectory(), true)
+  assert.equal(info.isSymbolicLink(), false)
+})
+
+test('依赖链接在非管理员 Windows 上走得通：symlink 被 EPERM 拒绝时仍能建出可用链接', async (t) => {
+  // 2026-10-21 用户真实故障：视频制作报 `EPERM: operation not permitted, symlink`。
+  // 根因是 fs.symlink(..., 'dir') 在非管理员且未开开发者模式的 Windows 上必然失败，
+  // 而工作台正是以普通用户身份运行的。这条用例防的是「改了 Windows 分支、
+  // 但 Linux CI 上永远绿、Windows 上照旧炸」——那种测试等于没测。
+  const dir = await mkdtemp(join(tmpdir(), 'video-deps-eperm-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+
+  // 真实验证：让 Node 自己报一次 symlink 能力，如果这台机器能建符号链接，
+  // 说明当前环境不具代表性，但用例仍然应该通过（走了 symlink 分支也一样对）。
+  let symlinkWorks = true
+  try {
+    await symlink(APP_NODE_MODULES, join(dir, 'probe-link'), 'dir')
+    await rm(join(dir, 'probe-link'), { recursive: true, force: true })
+  } catch {
+    symlinkWorks = false
+  }
+
+  await ensureAgentDependencies(dir)
+  const target = join(dir, 'node_modules')
+
+  // 无论走哪条分支，结果都必须可用：能真的读到共享依赖里的内容。
+  const { readdirSync } = await import('node:fs')
+  assert.ok(readdirSync(join(target, '.bin')).length > 0, '.bin 应能读到内容（链接真的可用，不是空壳）')
+  assert.ok(readdirSync(join(target, 'react')).length > 0, 'react 模块应可读')
+  // 链接必须指向共享依赖目录，而不是别处。
+  assert.equal(await realpath(join(target, '.bin')), await realpath(join(APP_NODE_MODULES, '.bin')))
+  // .cache 必须是任务本地真目录，不能被链到共享目录。
+  const cacheInfo = await lstat(join(target, '.cache'))
+  assert.equal(cacheInfo.isDirectory(), true)
+  assert.equal(cacheInfo.isSymbolicLink(), false)
+
+  if (process.platform === 'win32' && !symlinkWorks) {
+    // 这是关键分支：本机 symlink 不可用时，链接仍然建出来了，说明走的是 Junction。
+    const binInfo = await lstat(join(target, '.bin'))
+    assert.equal(binInfo.isSymbolicLink(), true, 'Junction 在 lstat 里也应表现为链接')
+    assert.equal(binInfo.isDirectory(), false, 'Junction 的 isDirectory 为 false，调用方不得依赖它识别链接')
+  }
+})
+
+test('目录链接失败时给出可读文案，而不是裸 EPERM', async (t) => {
+  // 把 APPDATA 之类改成不可写不可行的路径不现实，这里直接断言文案模板本身：
+  // 失败文案必须包含「怎么做」，并且指明是哪个条目失败。
+  const source = await readFile(new URL('../spoken-video-remotion.mjs', import.meta.url), 'utf8')
+  assert.match(source, /开发者选项/u, '文案要告诉用户去开开发者模式')
+  assert.match(source, /管理员身份运行/u, '文案要告诉用户可以用管理员身份运行')
+  assert.match(source, /为「\$\{entry\}」建立依赖链接时/u, '文案要指明是哪个条目失败')
+  assert.match(source, /错误码：\$\{error\.code\}/u, '文案要带错误码便于排查')
+  // 平台分支：Windows 用 'junction' 类型（不需要提权），其他平台保持 'dir'，不能一刀切。
+  // 用 fs.symlink 的类型参数而不是 cmd /c mklink：不依赖外部命令，
+  // 也不存在 mklink「先链接后目标」与 fs.symlink「先源后目标」顺序写反的风险。
+  assert.match(source, /process\.platform === 'win32' \? 'junction' : 'dir'/u,
+    'Windows 走 junction、其他平台走 dir')
+  assert.match(source, /await symlink\(source, target, /u, '两侧统一经 fs.symlink')
+  // 不得再退回到调用 cmd 内建命令（注释里提它是为了解释为什么不用，不算违规）。
+  assert.doesNotMatch(source, /execFile\w*\(\s*['"]cmd['"]/u, '不应依赖 cmd 内建命令建链接')
 })
 
 test('never passes an OpenGL flag the bundled Chrome rejects', async (t) => {

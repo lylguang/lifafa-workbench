@@ -45,6 +45,63 @@ async function exists(path) {
   return Boolean(await lstat(path).catch(() => null))
 }
 
+/**
+ * 目录链接失败时给人看得懂的话。
+ *
+ * 原来用户看到的是裸 `EPERM: operation not permitted, symlink 'D:\...\.bin'`，
+ * 路径长得没法看，也不知道该做什么。这里把「哪一步失败」和「怎么办」都说出来。
+ */
+function directoryLinkFailure(error, { source, target, entry }) {
+  const where = entry ? `为「${entry}」建立依赖链接时` : '建立依赖链接时'
+  const hint = process.platform === 'win32'
+    ? '当前系统限制无法创建依赖链接（Windows 未开启开发者模式，且工作台不是以管理员身份运行）。请以管理员身份运行工作台，或在「设置 → 隐私和安全性 → 开发者选项」中开启开发者模式后重试。'
+    : '当前系统无法创建符号链接，请检查所在文件系统是否支持符号链接，或是否有权限。'
+  return new Error(`${where}失败：${hint}（源：${source}，目标：${target}${error?.code ? `，错误码：${error.code}` : ''}）`, { cause: error })
+}
+
+/**
+ * 建一个指向 source 的目录链接。
+ *
+ * Windows 上 `fs.symlink(..., 'dir')` 在**非管理员、未开开发者模式**的机器上必然 EPERM
+ * （2026-10-21 用户真实撞上：视频制作报 `EPERM: operation not permitted, symlink`）。
+ * 目录联接（Junction）不需要管理员权限，是这种场景下的正解，所以 Windows 走 `mklink /J`。
+ *
+ * 其他平台保持 `symlink(..., 'dir')` 不变——不要一刀切，否则 macOS/Linux 反而退化成
+ * 依赖外部 cmd 命令。
+ *
+ * 实测确认的 Junction 语义（Windows，非管理员）：
+ *   lstat().isSymbolicLink() → true    ← 所以「已是指向同一目标的链接就复用」逻辑仍成立
+ *   lstat().isDirectory()    → false   ← 注意：不能被判成目录，调用方别依赖 isDirectory 识别链接
+ *   readlink / realpath      → 正常返回真实路径
+ *   unlink                   → 只删链接，源目录及其内容完好
+ *   在链接内 mkdir           → 成功，源目录同步可见
+ */
+async function linkDirectory(source, target, { entry = null } = {}) {
+  // Windows 用 'junction' 类型：fs.symlink 的这个类型在非管理员、未开开发者模式的
+  // 机器上不需要提权，直接成功（实测确认，2026-10-21）。
+  // 比调 `cmd /c mklink /J` 干净：不依赖 cmd 内建命令、不必担心参数顺序写反
+  // （mklink 是「先链接后目标」，与 fs.symlink 相反）、中文/空格路径也不会被拼坏。
+  // 其他平台保持 'dir' 不变——不要一刀切。
+  try {
+    await symlink(source, target, process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    throw directoryLinkFailure(error, { source, target, entry })
+  }
+}
+
+/**
+ * 目标路径是否已经是一个「指向 source 的目录链接」。
+ *
+ * 两种形态都算：符号链接（各平台）与目录联接（Windows Junction）。
+ * Junction 的 lstat().isDirectory() 为 false，所以这里**不能**用 isDirectory 判断，
+ * 只能看 isSymbolicLink()（对 Junction 也返回 true）并比对 realpath。
+ */
+async function isLinkedTo(path, source) {
+  const info = await lstat(path).catch(() => null)
+  if (!info?.isSymbolicLink()) return false
+  return (await realpath(path).catch(() => null)) === (await realpath(source).catch(() => null))
+}
+
 async function ensureLinkedNodeModules(projectDir) {
   const target = join(projectDir, 'node_modules')
   const [sourceInfo, targetInfo] = await Promise.all([lstat(APP_NODE_MODULES).catch(() => null), lstat(target).catch(() => null)])
@@ -53,7 +110,7 @@ async function ensureLinkedNodeModules(projectDir) {
     if (!targetInfo.isSymbolicLink()) return false
     return (await realpath(target).catch(() => null)) === (await realpath(APP_NODE_MODULES).catch(() => null))
   }
-  await symlink(APP_NODE_MODULES, target, 'dir')
+  await linkDirectory(APP_NODE_MODULES, target)
   return true
 }
 
@@ -64,12 +121,20 @@ export async function ensureAgentDependencies(projectDir) {
   if (info?.isSymbolicLink()) {
     if (await realpath(target) !== await realpath(APP_NODE_MODULES)) throw new Error('任务依赖链接指向未知目录。')
     await unlink(target)
-  } else if (info && !info.isDirectory()) throw new Error('任务依赖目录无效。')
+  } else if (info && !info.isDirectory()) {
+    // 放宽：Junction 的 lstat().isDirectory() 为 false 但 isSymbolicLink() 为 true，
+    // 已在上面那个分支处理。走到这里且不是目录的，才是真的无效残留（如普通文件）。
+    // 不依赖「反正上一个分支会先命中」——别的 Windows 版本或将来改动都可能让判断顺序变化。
+    throw new Error('任务依赖目录无效。')
+  }
   await mkdir(target, { recursive: true, mode: 0o700 })
   const entries = await readdir(APP_NODE_MODULES)
   for (const name of entries.filter((name) => !name.startsWith('.') || ['.bin', '.remotion'].includes(name))) {
     const link = join(target, name)
-    if (!await exists(link)) await symlink(join(APP_NODE_MODULES, name), link)
+    // 已存在且确实指向共享目录就复用（Junction 同样满足 isSymbolicLink）。
+    if (await isLinkedTo(link, join(APP_NODE_MODULES, name))) continue
+    if (await exists(link)) await rm(link, { recursive: true, force: true })
+    await linkDirectory(join(APP_NODE_MODULES, name), link, { entry: name })
   }
   const cache = join(target, '.cache')
   const cacheInfo = await lstat(cache).catch(() => null)

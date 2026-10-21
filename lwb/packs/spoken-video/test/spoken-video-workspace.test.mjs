@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdtemp, realpath, rm, readdir, readFile, symlink } from 'node:fs/promises'
+import { linkDirectoryForTest } from './fs-link-helper.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SpokenVideoGateway } from '../gateway.mjs'
@@ -37,7 +38,9 @@ test('business stores reject a data directory redirected outside the owned works
   const manager = new LwbPackWorkspaces({ root })
   const first = await manager.activate({ id: 'spoken-video', packageName: '@test/spoken-video' })
   const other = await manager.activate({ id: 'other-pack', packageName: '@test/other-pack' })
-  await symlink(other.workspacePath, join(first.workspacePath, 'data'))
+  // 造「数据目录被重定向到别的 workspace」：非管理员 Windows 上 fs.symlink(dir) 会 EPERM，
+  // 用平台正确的辅助函数（Windows 走 junction，不需要提权）。
+  await linkDirectoryForTest(other.workspacePath, join(first.workspacePath, 'data'))
   const content = new SpokenVideoContentStore({ workspacePath: first.workspacePath })
   await assert.rejects(content.listAccounts(first), /数据目录无效/u)
   await assert.rejects(new SpokenVideoProjectStore().create(first, { title: 'must not escape' }), /项目目录无效/u)

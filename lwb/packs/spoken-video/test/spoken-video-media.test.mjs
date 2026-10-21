@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { linkDirectoryForTest } from './fs-link-helper.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -1492,7 +1493,8 @@ test('refuses preview media reached through a symlinked project directory', asyn
   await mkdir(join(root, 'media'), { recursive: true })
   await mkdir(external)
   await writeFile(join(external, 'run-1.wav'), 'fake')
-  await symlink(external, join(root, 'media', 'voiceovers'))
+  // 非管理员 Windows 上 fs.symlink(..., 'dir') 必然 EPERM，用平台正确的辅助函数。
+  await linkDirectoryForTest(external, join(root, 'media', 'voiceovers'))
   const host = new SpokenVideoMediaHost({ projectsStore: store })
   await assert.rejects(host.readMedia(currentAgent, { projectId: project.id, stage: 'voiceover' }), /路径无效/u)
 })
