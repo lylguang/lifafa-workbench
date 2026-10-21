@@ -16,6 +16,7 @@ import {
   MIMO_CLONE_MIME,
   MIMO_CLONE_TRANSCODE,
   MIMO_DEFAULT_VOICE,
+  MIMO_INLINE_TAG_INNER,
   MIMO_MODEL_BY_MODE,
   MIMO_MODES,
   MimoClient,
@@ -441,23 +442,58 @@ test('两类标签同口径计数：入参 + 正文内插共用一个上限（�
   assert.equal(assertTotalAudioTags('[a][b]', []), 2)
 })
 
-test('内插标签只认成对且形态合法的：短引用/不成对放行，成对超 40 字不算', () => {
-  // 口播稿里 [1] 这类中括号引用是真实场景。数起始符会误判成标签、白占配额，
-  // 用户改稿时莫名被拒且不知道为什么——比漏算一个标签糟糕得多，故放行。
-  assert.equal(countInlineAudioTags('据[1]研究显示[2]'), 0)
+test('内插标签逐条对齐前端 voice-mimo-only.test.mjs 的同一批字符串', () => {
+  // 这批与前端那条用例断言的一一对应：两边跑同一批才叫口径一致。
+  assert.equal(countInlineAudioTags('正文'), 0)
+  assert.equal(countInlineAudioTags('[叹气]正文'), 1)
+  assert.equal(countInlineAudioTags('[叹气][哽咽]正文'), 2)
+  assert.equal(countInlineAudioTags('［叹气］正文'), 1, '全角方括号也要计数')
+  assert.equal(countInlineAudioTags('(唱歌)歌词'), 0, '圆括号风格不占正文配额')
   // 不成对：官方语法里标签本就成对，更可能是笔误或正文标点，不替他拦
   assert.equal(countInlineAudioTags('这是[叹气一句'), 0)
   assert.equal(countInlineAudioTags('这是叹气]一句'), 0)
-  // 成对但超 40 字：形态不合法，放行
-  assert.equal(countInlineAudioTags(`[${'长'.repeat(41)}]`), 0)
-  // 恰好 40 字：合法，计入
-  assert.equal(countInlineAudioTags(`[${'长'.repeat(40)}]`), 1)
-  // 标签内含括号（嵌套）：形态不合法，放行
-  assert.equal(countInlineAudioTags('[叹(气)]'), 0)
-  // 成对的短引用与真标签混排：只数形态合法的那个
-  assert.equal(countInlineAudioTags('据[1]说[叹气]'), 1)
-  // 端到端：短引用再多也不占配额，不该被拒
-  assert.equal(assertTotalAudioTags('[1][2][3][4][5][6][7][8][9][10]', []), 0)
+  assert.equal(countInlineAudioTags('只有左括号['), 0)
+  assert.equal(countInlineAudioTags('只有全角［'), 0)
+  assert.equal(countInlineAudioTags('缺右括号 [叹气'), 0, '不成对的不算标签')
+  assert.equal(countInlineAudioTags(`[${'长'.repeat(41)}]`), 0, '超 40 字不算标签')
+  assert.equal(countInlineAudioTags(`[${'长'.repeat(40)}]`), 1, '恰好 40 字仍算标签')
+  assert.equal(countInlineAudioTags('[]'), 0)
+  // 纯数字引用不占配额（Chief 裁决 A，与 HEAD 844eb86 同口径）。
+  // 理由：口播稿里写 [1] 引用来源是真实场景，算成标签的话用户写够 9 处就被拒，
+  // 而错误文案指向「音频标签」，他看着自己的引用不知道为什么被拒——必然发生；
+  // 反过来「用户真想用 [5] 当标签」在官方标签表里不存在。代价方向不对称。
+  assert.equal(countInlineAudioTags('见[1]。'), 0, '纯数字引用不算标签')
+  assert.equal(countInlineAudioTags('见 [1] 与 [2] 的说法'), 0)
+  assert.equal(countInlineAudioTags('［１］'), 0, '全角数字同样豁免')
+  assert.equal(assertTotalAudioTags('[1][2][3][4][5][6][7][8][9][10]', []), 0,
+    '连引 10 处文献不该占配额')
+  // 引用与真标签混排：只数后者
+  assert.equal(assertTotalAudioTags('据[1]说[叹气]又[2]', []), 1)
+})
+
+test('字符类回归：候选正则取到的内容若含任何括号，一律不算标签', () => {
+  // 旧正则把 `［【】()（）` 写进了排除类，真正该挡的 `]` 反而漏掉——
+  // `[a]b]` 会被当成标签、内容读成 `a]b`。两道判定缺一不可。
+  // 修好后只取第一个成对标签 `[a]`，后面的 `b]` 是正文，不并进去。
+  assert.equal(countInlineAudioTags('[a]b]'), 1, '只取 [a]，b] 是正文')
+  assert.equal(countInlineAudioTags('[a[b]]'), 0, '内层再带方括号不算标签')
+  assert.equal(countInlineAudioTags('[叹(气)]'), 0, '内层圆括号不算标签')
+  assert.equal(countInlineAudioTags('[叹（气）]'), 0)
+  assert.equal(countInlineAudioTags('[叹［气］]'), 0)
+  // 【】也算括号（2026-10-21 裁决）：它在中文正文里同样是括号、同样会出现嵌套。
+  // 此前后端漏了它、前端有它，`[叹【气】]` 一直是前端 0 / 后端 1 的静默分叉，
+  // 靠联调用例才暴露。字符集唯一真源在 MIMO_INLINE_TAG_INNER。
+  assert.equal(countInlineAudioTags('[叹【气】]'), 0, '内层【】同样不算标签')
+  // 边界：正文后面跟着裸右方括号，不应被并进上一个标签
+  assert.equal(countInlineAudioTags('[叹气]是]'), 1, '只取第一个成对标签')
+  // 候选被判废后，正则仍推进到 match 末尾，继续找下一对——
+  // 与前端 svAudioTagSlots 的 re.lastIndex 同一语义，故跨文件同形。
+  // 这条曾被我误判为「两处实现不同」，实测证明等价，钉住它免得再被推翻一次。
+  assert.equal(countInlineAudioTags('这是[叹气一句[哽咽]'), 0, '候选内含左方括号，整体不算标签')
+  assert.equal(countInlineAudioTags('[a[b] [叹气]'), 1, '无效候选跳过后继续找下一对')
+  assert.equal(countInlineAudioTags('[叹(气)] [叹气]'), 1, '内层不合格的候选不影响后续')
+  // 端到端：这些形态都不占配额，不该被超限拒
+  assert.equal(assertTotalAudioTags('[a[b] [叹(气)] [叹［气］]', []), 0)
 })
 
 test('标签形态校验：三种括号都接受，但标签内不得再带括号', () => {
@@ -554,6 +590,103 @@ test('时间轴：任何缺少实测时长的输入都返回 null，绝不按字
   assert.equal(buildMimoTimeline({ segments: ['一。'], durations: [1, 2] }), null)
   assert.equal(buildMimoTimeline({ segments: ['一。'], durations: [0] }), null)
   assert.equal(buildMimoTimeline({ segments: ['一。'], durations: ['abc'] }), null)
+})
+
+/**
+ * 跨文件同形：后端 countInlineAudioTags 与前端 svAudioTagSlots 跑同一批字符串。
+ *
+ * 为什么要这条：2026-10-20 今晚两次事故的根子都是「只读源码就推断对方行为」——
+ * 我读前端代码后断言它与后端「实现细节不同」，实测 14/14 全部同形，判断错了。
+ * 光靠两边各自钉期望值挡不住：期望值写死，就变成各自钉住「自己以为的行为」。
+ *
+ * 这里改为**逐条比对两函数的实际返回值**，不写死期望值。
+ *
+ * 为什么不直接 import 前端包：client.js 有 6600 行且依赖整个前端运行时，
+ * 拖进后端单测会又慢又脆。改为**从源码里把函数原样抽出来执行**——
+ * 执行的是前端真实代码，不是复述它的逻辑。前端零感知，也不碰它的文件。
+ */
+test('跨文件同形：countInlineAudioTags 与前端 svAudioTagSlots 逐条返回一致', () => {
+  const clientPath = new URL('../client.js', import.meta.url)
+  const src = readFileSync(clientPath, 'utf8')
+
+  // 抽取失败必须显式报错，绝不静默跳过——一次 SKIP 伪装成通过，
+  // 恰好是今晚已经吃过一次的亏（那批 flaky 就是这么藏起来的）。
+  const start = src.indexOf('function svAudioTagSlots')
+  assert.ok(start > 0, 'client.js 里找不到 svAudioTagSlots，抽取失败——不许静默跳过')
+  const end = src.indexOf('\n    }', start)
+  assert.ok(end > start, 'svAudioTagSlots 函数体没有正常收尾，抽取失败')
+  const body = src.slice(start, end + 6)
+
+  let frontSlots
+  assert.doesNotThrow(() => {
+    frontSlots = new Function(`${body}; return svAudioTagSlots`)()
+  }, '抽出的 svAudioTagSlots 无法执行——前端实现可能已改动')
+  assert.equal(typeof frontSlots, 'function', '抽出的不是函数')
+
+  const long41 = `[${'长'.repeat(41)}]`
+  const long40 = `[${'长'.repeat(40)}]`
+  const cases = [
+    // —— 边界形态（Chief 点名要求全覆盖）——
+    '[叹【气】]',          // 内层含【】：2026-10-21 漂移就靠这一条暴露
+    '[叹［气］]',          // 内层含全角方括号
+    '[叹(气)]',            // 内层含半角圆括号
+    '[叹[气]]',            // 内层含半角方括号
+    '［１］',               // 全角纯数字：曾是 0/1 分叉点
+    '[1]',
+    '见 [1] 与 [2] 的说法',
+    '见[1]。',
+    long40,                // 恰好 40 字：算标签
+    long41,                // 41 字：不算标签（上限按码点算，不是 UTF-16 单元）
+    '[]',
+    '[叹气]',
+    '[叹气][哽咽]正文',
+    '［叹气］正文',         // 全角外层括号
+    // —— 不成对放行 ——
+    '这是[叹气一句',
+    '这是叹气]一句',
+    '只有左括号[',
+    '只有全角［',
+    // —— 匹配推进语义 ——
+    '[a[b] [叹气]',       // 无效候选跳过后继续找下一对
+    '这是[叹气一句[哽咽]', // 候选内含左方括号，整体不算
+    '[a[b] 叹气]',
+    '[叹(气)] [叹气]',     // 内层不合格的候选不影响后续
+    '[叹气]是]',           // 裸收括号是正文，不并进上一个标签
+    // —— 圆括号风格不占正文配额 ——
+    '(唱歌)歌词',
+    '正文',
+  ]
+  for (const text of cases) {
+    assert.equal(countInlineAudioTags(text), frontSlots(text).used,
+      `前后端口径分叉于 ${JSON.stringify(text)}`)
+  }
+})
+
+/*
+ * 内层字符集的**字面量**必须两边一致。
+ *
+ * 只比计数结果不够硬：计数相等有偶然性——2026-10-21 的 `【】` 漂移，就是靠
+ * `[叹【气】]` 这一个输入才偶然暴露的，手挑的几个用例恰好没覆盖到的话它会一直潜伏。
+ * 这条直接从两边源码里抠出字符集字面量逐字比较，与输入无关，漂一个字符就红。
+ */
+test('内层括号字符集：前后端源码里的字面量逐字相同（唯一真源在后端）', () => {
+  const expected = MIMO_INLINE_TAG_INNER.source
+  assert.equal(expected, '[[\\]［］()（）【】]',
+    '后端字符集本身变了——请同步更新本断言，并确认前端也跟着改')
+
+  const src = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const start = src.indexOf('function svAudioTagSlots')
+  assert.ok(start > 0, 'client.js 里找不到 svAudioTagSlots，抽取失败——不许静默跳过')
+  const end = src.indexOf('\n    }', start)
+  const body = src.slice(start, end + 6)
+
+  // 前端写法是 `!/正则/.test(...)`，从函数体里抠出「含括号」那条正则的字符集。
+  const found = body.match(/!\/\[(\[.*?)\]\//u)
+  assert.ok(found, '前端 svAudioTagSlots 里找不到内层字符集正则，抽取失败')
+  const frontSource = `[${found[1]}]`
+
+  assert.equal(frontSource, expected,
+    `前后端内层字符集漂移了：后端 ${expected} / 前端 ${frontSource}`)
 })
 /*
  * 回归：音频任务的 MiMo 分段进度事件必须写进 audio-tasks.json。

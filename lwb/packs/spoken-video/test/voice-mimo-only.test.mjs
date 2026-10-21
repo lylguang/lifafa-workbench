@@ -121,12 +121,12 @@ test('三种合成模式互斥：只发当前模式那一套字段，不混传',
   // 都必须按模式分叉：design 不带 voiceId，upload 只带参考音频。
   const payloadBranches = [...source.matchAll(/voiceSource === 'design'/gu)].length
   assert.ok(payloadBranches >= 2, '配音页与排期页各一处按模式分叉')
-  assert.match(source, /if \(voiceSource === 'design'\) return \{ voiceSource: 'design', \.\.\.tone, \.\.\.tags, designText: voiceDesignText\.trim\(\) \}/u)
+  assert.match(source, /if \(voiceSource === 'design'\) return \{ voiceSource: 'design', \.\.\.tone, \.\.\.tags, voiceDesign: voiceDesignText\.trim\(\) \}/u)
   assert.match(source, /if \(voiceSource === 'upload'\) return \{ voiceSource: 'upload', \.\.\.tone, \.\.\.tags, referenceAudio: voiceReference \}/u)
   // 重试必须重放这条任务**当初冻结**的模式，不能拿当前表单的模式：
   // 中途把表单从 preset 改成 design 再点重试，同一条任务会换一个声音。
   assert.match(source, /voiceSource: \['design', 'upload'\]\.includes\(task\.input\?\.voiceSource\) \? task\.input\.voiceSource : 'preset'/u)
-  assert.match(source, /\.\.\.\(task\.input\?\.designText \? \{ designText: task\.input\.designText \} : \{\}\)/u)
+  assert.match(source, /\.\.\.\(task\.input\?\.voiceDesign \? \{ voiceDesign: task\.input\.voiceDesign \} : \{\}\)/u)
   assert.match(source, /\.\.\.\(task\.input\?\.referenceAudio \? \{ referenceAudio: task\.input\.referenceAudio \} : \{\}\)/u)
   assert.doesNotMatch(source, /voiceSource: 'preset', voiceId: task\.input/u, '重试不该把模式钉死成 preset')
   // design 分支不得夹带音色名：带了后端会判成混用并报错。
@@ -190,7 +190,9 @@ test('音频标签两套语法分工：开头风格走入参，句中方括号�
   // 改稿时突然被拒而用户不知道为什么，比漏算一个标签糟得多。
   assert.equal(svAudioTagSlots('见[参考文献] 说明').used, 1, '成对且内容合法，算标签')
   assert.equal(svAudioTagSlots('见[1 参考文献]说明').used, 1, '成对且内容合法，算标签')
-  assert.equal(svAudioTagSlots('见 [1] 与 [2] 的说法').used, 0, '纯数字引用不算标签（Chief 裁决 A）')
+  // 第 193 行原为「纯数字引用仍算标签（used 2）」——那是已被裁决 A 否决的 B 口径，
+  // 与下面 :200 的 A 断言自相矛盾，是同一次口径回退留下的残留。已按 A 改正。
+  assert.equal(svAudioTagSlots('见 [1] 与 [2] 的说法').used, 0, '纯数字引用不占配额（裁决 A）')
   assert.equal(svAudioTagSlots('只有左括号[').used, 0)
   assert.equal(svAudioTagSlots('只有全角［').used, 0)
   assert.equal(svAudioTagSlots('缺右括号 [叹气').used, 0, '不成对的不算标签')
@@ -240,6 +242,102 @@ test('音频标签两套语法分工：开头风格走入参，句中方括号�
   assert.equal(next, 'a[叹气][哽咽]b', '光标在标签之后时应新开一个标签')
 })
 
+/*
+ * 跨文件联调：前端 svAudioTagSlots 与后端 countInlineAudioTags 必须逐条相等。
+ *
+ * 这条用例是**这次漏掉 `［１］` 之后补的**。此前的覆盖方式是手挑几条字符串分别断言
+ * 前端值，后端从来不参与比较——于是「前端 `/^\d+$/u`、后端 `/^[0-9０-９]+$/u`」
+ * 这种同一条裁决两边字符集不同的漂移，一条断言都拦不住：手挑的用例恰好全是半角。
+ *
+ * 所以这里不是再挑几条，而是**拿一张覆盖各类形态的表逐条比两边返回值**，
+ * 只要两边对同一段正文的计数不一致就红。新增标签规则时，把新形态加进 CASES。
+ */
+test('前后端内插标签计数逐条相等（跨文件联调）', async () => {
+  const { svAudioTagSlots } = await loadVoiceConstants()
+  const { countInlineAudioTags } = await import('../spoken-video-media-mimo.mjs')
+
+  const CASES = [
+    // 常规
+    '正文', '[叹气]', '前[叹气]后', '[叹气][哽咽]',
+    // 文献引用（裁决 A：不占配额）。半角与**全角数字**都要在表里——
+    // 全角正是这次漏掉的那个：前端写 \d 不匹配 `１`，两边会漂。
+    '[1]', '见 [1] 与 [2] 的说法', '见[1]。', '见 ［12］。', '［１］', '［１］［２］',
+    '[1][2][3][4][5][6][7][8][9][10]', '[1][叹气]',
+    // 全角方括号
+    '［叹气］', '前面［叹气］后面',
+    // 内层含括号：都不算标签
+    '[叹［气］]', '[叹(气)]', '[叹[气]]', '[叹【气】]', '[]', '[ ]',
+    // 不成对：当普通文本
+    '只有左括号[', '只有全角［', '缺右括号 [叹气', '[叹气',
+    // 长度边界：40 算、41 不算（真实重复 40/41 次，不是字面量 `长×41`）
+    `[${'长'.repeat(40)}]`, `[${'长'.repeat(41)}]`,
+    // 混合
+    '[叹气]正文[哽咽]',
+  ]
+
+  const drift = []
+  for (const text of CASES) {
+    const frontend = svAudioTagSlots(text).used
+    const backend = countInlineAudioTags(text)
+    if (frontend !== backend) drift.push({ text, frontend, backend })
+  }
+  assert.deepEqual(drift, [], `前后端计数不一致：${JSON.stringify(drift, null, 2)}`)
+
+  // 顺带钉住「豁免只认纯数字」：带任何非数字字符就不是引用。
+  assert.equal(countInlineAudioTags('[1a]'), svAudioTagSlots('[1a]').used, '半数字串两边也要一致')
+  assert.equal(countInlineAudioTags('[1a]'), 1, '[1a] 不是纯数字，算一个标签')
+})
+
+/*
+ * 内层括号字符集：前后端字面量必须**内容相等**。
+ *
+ * 为什么单独钉这个而不只靠上面的计数相等：同一条规则在两个文件里各写了一份字面量，
+ * 差一个字符谁也没发现（`【】` 就是这么漏的：后端重构时从正则排除类搬进
+ * MIMO_INLINE_TAG_INNER，少搬了 `【】`）。计数相等有偶然性——上一次只靠
+ * `[叹【气】]` 一个输入才暴露，换一批输入就可能漏过去。字面量相等才是硬约束。
+ *
+ * 两个文件都要抠出来比：只断言「前端含【】」挡不住后端又漂回去。
+ */
+test('内层括号字符集与后端 MIMO_INLINE_TAG_INNER 内容相等', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const clientSource = await loadSource()
+  const backendSource = await readFile(new URL('../spoken-video-media-mimo.mjs', import.meta.url), 'utf8')
+
+  // 从字符类字面量里取出"字符集合"，排序后比对——顺序无关，少一个字符就红。
+  // 字符串形如 `[[\]［］()（）【】]`：去掉首尾的 `[` `]`，再去掉转义反斜杠，
+  // 剩下的就是这一组字符（`]` 是靠 `\]` 写进来的）。
+  const charsOf = (classSource, label) => {
+    const open = classSource.indexOf('[')
+    const close = classSource.lastIndexOf(']')
+    assert.ok(open >= 0 && close > open, `${label} 不是合法的字符类字面量：${classSource}`)
+    const inner = classSource.slice(open + 1, close)
+    const chars = [...new Set(inner.replace(/\\(.)/gu, '$1'))]
+    assert.ok(chars.length >= 2, `${label} 解析出的字符太少：${classSource}`)
+    return chars.sort().join('')
+  }
+
+  // 前端：svAudioTagSlots 里那行「纯数字豁免 + 内层括号检查」的判定。
+  const frontLine = clientSource.split('\n').find((line) => line.includes('test(match[1].trim())') && line.includes('/[[\\]'))
+  assert.ok(frontLine, '没找到前端 svAudioTagSlots 的内层判定行')
+  assert.match(frontLine, /【】/u, '前端内层字符集必须含 【】')
+  // 取第二个字符类：从 `/[[` 起，到 `/u.test` 前的那个 `]` 结束
+  // （字符类内部含 `\]`，不能用 lastIndexOf(']') 截）。
+  const startAt = frontLine.lastIndexOf('/[[')
+  const endAt = frontLine.indexOf('/u.test', startAt)
+  assert.ok(startAt >= 0 && endAt > startAt, '没截出前端内层字符类')
+  const frontChars = charsOf(frontLine.slice(startAt, endAt), '前端内层字符集')
+
+  // 后端：MIMO_INLINE_TAG_INNER 常量。
+  const backLine = backendSource.split('\n').find((line) => line.includes('const MIMO_INLINE_TAG_INNER'))
+  assert.ok(backLine, '没找到后端 MIMO_INLINE_TAG_INNER')
+  const backChars = charsOf(backLine, '后端 MIMO_INLINE_TAG_INNER')
+
+  assert.equal(frontChars, backChars, `内层括号字符集漂移：前端 [${frontChars}] vs 后端 [${backChars}]`)
+  // 期望的完整集合，防止两边"一致地少一个"（`【】` 就是这么丢的）。
+  const expected = [...new Set([...'[]］［()（）【】'])].sort().join('')
+  assert.equal(frontChars, expected, `内层括号字符集必须恰好是这些：${expected}`)
+})
+
 test('整体风格标签只进 audioTags 入参，不被拼进正文', async () => {
   const source = await loadSource()
   // 入参分支：三个模式都带上 audioTags。
@@ -275,6 +373,94 @@ test('语气预设仍是一组完整的可选语气词（与三模式正交）',
   const { SV_VOICE_STYLE_PRESETS } = await loadVoiceConstants()
   assert.ok(SV_VOICE_STYLE_PRESETS.length >= 4)
   assert.match(SV_VOICE_STYLE_PRESETS[0], /。$/u, '语气预设是完整句子，去掉尾句号后作为 chip 显示')
+})
+
+test('音色设计给出一组优质预设，且描述能直接当值提交', async () => {
+  const { SV_DESIGN_VOICE_PRESETS, SV_DESIGN_TEXT_MAX, svVoiceDesignPresetLabel } = await loadVoiceConstants()
+  const source = await loadSource()
+
+  // 数量要够挑：预设的全部意义就是省掉「对着空输入框不知道写什么」。
+  assert.ok(SV_DESIGN_VOICE_PRESETS.length >= 10, '预设太少，等于没解决写不出描述的问题')
+
+  const ids = new Set()
+  const texts = new Set()
+  for (const preset of SV_DESIGN_VOICE_PRESETS) {
+    assert.ok(preset.id && preset.label && preset.text, `${preset.id || '?'} 三件套不齐`)
+    assert.ok(!ids.has(preset.id), `预设 id 重复：${preset.id}`)
+    assert.ok(!texts.has(preset.text), `预设描述重复：${preset.label}`)
+    ids.add(preset.id)
+    texts.add(preset.text)
+    // 描述会被整段塞进输入框，超了 maxLength 会被静默截断，提交上去就是个断句。
+    assert.ok(preset.text.length <= SV_DESIGN_TEXT_MAX, `${preset.id} 描述 ${preset.text.length} 字，超过上限 ${SV_DESIGN_TEXT_MAX}`)
+    // 预设值本身要够具体才有意义：只写「好听的男声」跟 placeholder 没区别。
+    assert.ok(preset.text.length >= 30, `${preset.id} 描述太笼统，够不上「优质预设」`)
+    // 不能写成指令句——这段文字是被当成音色定义读的，不是提示词包装。
+    assert.doesNotMatch(preset.text, /请生成|请设计|帮我|你需要/iu, `${preset.id} 写成了指令句`)
+    assert.ok(preset.label.length <= 12, `${preset.id} 的标签过长，chip 会换行`)
+  }
+
+  // 中英文都要有：只有中文预设时英文口播只能手写。
+  assert.ok(SV_DESIGN_VOICE_PRESETS.some((preset) => /[a-z]{4}/u.test(preset.text)), '缺一个英文音色预设')
+
+  // 选中态靠文本反查，因此必须能按描述找回标签；手改一个字就要查不到。
+  assert.equal(svVoiceDesignPresetLabel(SV_DESIGN_VOICE_PRESETS[0].text), SV_DESIGN_VOICE_PRESETS[0].label)
+  assert.equal(svVoiceDesignPresetLabel(` ${SV_DESIGN_VOICE_PRESETS[0].text} `), SV_DESIGN_VOICE_PRESETS[0].label, '前后空格不该让选中态丢失')
+  assert.equal(svVoiceDesignPresetLabel(`${SV_DESIGN_VOICE_PRESETS[0].text}再快一点`), null)
+  assert.equal(svVoiceDesignPresetLabel('自己手写的一段描述'), null)
+  assert.equal(svVoiceDesignPresetLabel(''), null)
+
+  // 两处页面都要挂上选择器，且必须走同一个组件，否则两边行为会分叉。
+  const pickerCalls = [...source.matchAll(/[^n] svVoiceDesignPresets\(\{/gu)].length
+  assert.equal(pickerCalls, 2, '配音页与排期页各挂一处预设选择器')
+  assert.match(source, /function svVoiceDesignPresets\(\{/u)
+  // 输入框的 maxLength 必须走常量，别在两处各写一个字面量。
+  const designInputs = [...source.matchAll(/value: (?:\w+\.)?voiceDesignText, maxLength: ([^,]+)/gu)]
+  assert.equal(designInputs.length, 2, '两处音色描述输入框都要在')
+  for (const [, maxLength] of designInputs) assert.equal(maxLength.trim(), 'SV_DESIGN_TEXT_MAX')
+})
+
+/*
+ * 回归：出网字段名必须与后端一字不差。
+ *
+ * 曾经的线上故障：前端内部把描述叫 voiceDesignText，出网时直接写成 `designText`，
+ * 而后端 normalizeVoiceoverRequest 只认 `voiceDesign`。结果是音色设计模式下
+ * 描述怎么填都到不了后端，提交必报「音色设计模式需要填写音色描述」，重试同理。
+ *
+ * 这类错只用正则断言源码写法是防不住的（两边的名字看起来都很合理），所以这里
+ * **把前端 payload 真正喂给后端 normalizer**：前端改了字段名，这组断言立刻红。
+ */
+test('音色设计 payload 必须能被后端 normalizer 原样接受', async () => {
+  const { normalizeVoiceoverRequest } = await import('../spoken-video-media.mjs')
+  const source = await loadSource()
+
+  // 前端 design 分支发出的对象形状（含 tone/tags 两个可选项），逐字对齐源码。
+  const designPayload = { voiceSource: 'design', style: '清晰沉稳。', audioTags: ['新闻播报'], voiceDesign: '三十五岁左右男声，中低音区，语速偏慢。' }
+  const parsed = normalizeVoiceoverRequest(designPayload)
+  assert.equal(parsed.voiceSource, 'design')
+  assert.equal(parsed.voiceDesign, designPayload.voiceDesign, '描述必须原样落到 voiceDesign')
+
+  // 反向断言：前端现在**不再**发 designText，且后端也确实不认它。
+  assert.equal(parsed.designText, undefined)
+  assert.throws(
+    () => normalizeVoiceoverRequest({ voiceSource: 'design', designText: designPayload.voiceDesign }),
+    /音色设计模式需要填写音色描述/u,
+    'designText 不是后端字段，发了等于没发',
+  )
+
+  // 源码里 design 分支的出网键必须叫 voiceDesign；designText 只允许出现在
+  // 注释或内部 state 名 voiceDesignText 里。
+  const wireKeys = [...source.matchAll(/\b(\w*[dD]esignText)\.trim\(\),?\s*\}/gu)]
+  assert.ok(wireKeys.length >= 2, '配音页与排期页的 design 分支都要发描述')
+  for (const match of wireKeys) assert.doesNotMatch(match[0], /(?:^|\s|[^n])designText: /u, '出网键必须叫 voiceDesign')
+  assert.equal([...source.matchAll(/voiceDesign: (?:\w+\.)?voiceDesignText\.trim\(\)/gu)].length, 2, '两处 design 分支都以 voiceDesign 发出网')
+
+  // 重试与排期回填读的也必须是 voiceDesign，否则 design 任务一重试就丢描述。
+  assert.match(source, /task\.input\?\.voiceDesign \? \{ voiceDesign: task\.input\.voiceDesign \}/u)
+  assert.match(source, /voiceDesignText: schedule\.voice\?\.voiceDesign \|\| ''/u)
+
+  // 预置/克隆两条分支不能被这次改动带偏：各自的必填字段仍能过 normalizer。
+  assert.equal(normalizeVoiceoverRequest({ voiceSource: 'preset', voiceId: '冰糖' }).voiceId, '冰糖')
+  assert.equal(normalizeVoiceoverRequest({ voiceSource: 'upload', referenceAudio: { id: 'a', file: 'voice-references/a.wav', name: 'a.wav', mediaType: 'audio/wav' } }).voiceSource, 'upload')
 })
 
 test('历史任务的旧渠道名文案保留原样，老记录如实显示', async () => {

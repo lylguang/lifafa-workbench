@@ -184,8 +184,30 @@ export function buildTaggedText(text, tags = []) {
   return `(${usable.join('，')})${body}`
 }
 
-/** 标签内不得再含任何括号（含【】），否则嵌套会让剥离与计数都失去意义。 */
-const MIMO_INLINE_TAG_SHELL = /[[［]([^\]］［【】()（）]{1,40})[\]］]/gu;
+/**
+ * 内插标签的候选匹配：成对 + 非空 + ≤40 字。
+ *
+ * 与前端 svAudioTagSlots **逐字同形**（2026-10-20）。正则只管取候选，
+ * 含不含括号交给下面那道后置检查——两道都不可省：
+ *  · 排除类里若写进 `［【】()（）`，真正该挡的 `]` 反而漏掉，`[a]b]` 会当成
+ *    标签、内容读成 `a]b`；
+ *  · 光靠正则排除也不够：`[a[b]` 这类在别处可能匹配成功，而前端是匹配后再判内层，
+ *    两边只差一道就会分叉。故按前端同序：先取候选，再判内层。
+ */
+const MIMO_INLINE_TAG_SHELL = /[[［]([^\]］]{1,40})[\]］]/gu;
+
+/**
+ * 标签内层不得出现的字符集——出现即判为普通文本、不占配额。
+ *
+ * **这是全项目唯一真源。** 前端 `client.js` 的 `svAudioTagSlots` 由于拿不到
+ * ESM import，只能手抄一份字面量；因此联调用例里有一条断言**逐字比对两边
+ * 这个字符集的字面量相等**，而不只是比对计数结果——计数相等有偶然性。
+ *
+ * 含 `【】`：它在中文正文里同样是括号、同样会出现嵌套，与 `()`/`［］` 同判。
+ * 2026-10-21 的漂移就出在这里：前端写进了 `【】`、后端漏了，靠 `[叹【气】]`
+ * 这一个输入才把计数差异暴露出来。
+ */
+export const MIMO_INLINE_TAG_INNER = /[[\]［］()（）【】]/u;
 
 /** 纯数字内容是引用编号（`[1]`、`[12]`），不是标签。官方标签也没有纯数字形态。 */
 const MIMO_INLINE_TAG_DIGITS_ONLY = /^[0-9０-９]+$/u;
@@ -196,8 +218,8 @@ const MIMO_INLINE_TAG_DIGITS_ONLY = /^[0-9０-９]+$/u;
  * 这些标签用户直接写在文本里，不会经过 audioTags 入参，若不单独清点就能无限贴，
  * 把整篇正文变成一串标签、也会打爆请求。所以和 audioTags 共用同一个上限。
  *
- * 判定规则（前后端必须一致，见 Frontend 的 svAudioTagSlots）：
- * **成对 + 内容非空 + ≤40 字 + 内部不含任何括号**才算一个内插标签。
+ * 判定规则（前后端必须逐字一致，见前端 svAudioTagSlots）：
+ * **成对 + 内容非空 + ≤40 字 + 内层不含任何括号**才算一个内插标签。
  *
  * 为什么只认成对的、不数孤立起始符：
  *  · 口播稿里`[1]`、`[2]` 这类中括号引用是**真实场景**（引用来源、括号补充说明）。
@@ -210,10 +232,12 @@ const MIMO_INLINE_TAG_DIGITS_ONLY = /^[0-9０-９]+$/u;
  */
 export function countInlineAudioTags(text) {
   const body = String(text ?? '')
-  // 半角/全角方括号都算；只有成对且形态合法才计数，孤立起始符放行。
   let count = 0
-  for (const m of body.matchAll(MIMO_INLINE_TAG_SHELL)) {
-    if (MIMO_INLINE_TAG_DIGITS_ONLY.test(m[1])) continue
+  for (const match of body.matchAll(MIMO_INLINE_TAG_SHELL)) {
+    // 第二道：正则取到的候选，内层仍含括号就不是标签。
+    if (MIMO_INLINE_TAG_INNER.test(match[1])) continue
+    // 第三道：纯数字是文献引用编号，不占配额。
+    if (MIMO_INLINE_TAG_DIGITS_ONLY.test(match[1])) continue
     count += 1
   }
   return count
