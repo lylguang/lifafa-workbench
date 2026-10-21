@@ -578,7 +578,58 @@ function sharedHeadlessShellPath() {
   } catch { /* 浏览器未安装时退回自选路径 */ }
   return null
 }
-function browserExecutableArgs() {
+/**
+ * 探测系统里可用的 Chromium 内核浏览器（Chrome / Edge）。
+ *
+ * 为什么必须做这一步：`browserExecutableArgs()` 以前探测不到 headless-shell 时
+ * 直接返回空数组，Remotion 就会**自己去下载** chrome-headless-shell——用户点
+ * 「制作视频」只看到一直卡着、没有任何进度提示，实测在本机卡了 390 秒并持有
+ * 到 142.250.73.123:443 的连接。而代码上方那句注释「退回系统 Chrome：慢，但一定
+ * 能启动」当时并没有对应的实现，是典型「注释承诺了、代码没做」。
+ *
+ * 注意 Chrome 的安装位置不止标准路径：这台机器就是**用户级安装**
+ * （%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe），Program Files 下没有。
+ * Edge 在 Windows 上几乎必然存在，作为最后的候选。
+ *
+ * 返回真正的可执行文件路径，找不到返回 null。
+ */
+function systemChromiumPath() {
+  const candidates = []
+  if (process.platform === 'win32') {
+    const local = process.env.LOCALAPPDATA
+    const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
+    const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'
+    if (local) candidates.push(join(local, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+    candidates.push(
+      join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    )
+    // Edge：Windows 上基本必有，放在 Chrome 之后（Chrome 与 Remotion 版本更接近）。
+    if (local) candidates.push(join(local, 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
+    candidates.push(
+      join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    )
+  } else if (process.platform === 'darwin') {
+    candidates.push(
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    )
+  } else {
+    candidates.push('/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/microsoft-edge')
+  }
+  for (const candidate of candidates) {
+    try {
+      // 与 sharedHeadlessShellPath 同一套规则：先 realpath 化（symlink 路径 spawn 会
+      // 报 ENOENT），再检查长度安全，超长宁可不返回也不要 spawn 失败。
+      const real = realpathSync(candidate)
+      if (real.length <= MAX_EXECUTABLE_PATH) return real
+    } catch { /* 该候选不存在，继续找下一个 */ }
+  }
+  return null
+}
+
+export function browserExecutableArgs() {
   // 优先用配套 headless-shell（实测快 5.6 倍）：环境变量显式指定 > 共享目录自动探测。
   // 自动探测是必须的：Remotion 自选浏览器时把缓存目录解析到渲染 cwd 的
   // node_modules/.remotion，任务工作区经 symlink spawn 必 ENOENT（同上）。
@@ -586,10 +637,22 @@ function browserExecutableArgs() {
   if (headlessShell && headlessShell.length <= MAX_EXECUTABLE_PATH) return ['--browser-executable', headlessShell]
   const shared = sharedHeadlessShellPath()
   if (shared) return ['--browser-executable', shared]
-  // 退回系统 Chrome：慢，但一定能启动。
+  // 退回系统 Chrome / Edge：比 headless-shell 慢（旧版无头模式已被移除，走更重的
+  // 合成路径），但一定有、能启动。这台机器就是**用户级安装**，不在 Program Files。
   const override = process.env.LWB_REMOTION_BROWSER_EXECUTABLE?.trim()
   if (override) return ['--browser-executable', override]
-  return []
+  const system = systemChromiumPath()
+  if (system) return ['--browser-executable', system]
+  // 一个都没有：**绝不返回空数组**。返回空数组等于把决定权交给 Remotion，
+  // 它会静默联网下载 chrome-headless-shell（实测本机卡 390 秒、持到
+  // 142.250.73.123:443 的连接，界面无任何进度提示，用户以为死机）。
+  // 明确报错比静默下载好：用户至少知道要做什么。
+  throw new Error(
+    '未找到可用的浏览器（Chrome / Edge / chrome-headless-shell 都没有找到），无法渲染视频。'
+    + '请安装 Google Chrome 或 Microsoft Edge 后重试；'
+    + '也可以安装配套的 chrome-headless-shell，'
+    + '或用环境变量 LWB_REMOTION_BROWSER_EXECUTABLE 指定浏览器可执行文件的完整路径。',
+  )
 }
 
 // Remotion 连接浏览器是固定 25 秒预算，与本次渲染内容无关：浏览器进程偶尔启动后

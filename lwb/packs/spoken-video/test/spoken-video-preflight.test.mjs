@@ -138,6 +138,52 @@ test('目录链接失败时给出可读文案，而不是裸 EPERM', async (t) =
   assert.doesNotMatch(source, /execFile\w*\(\s*['"]cmd['"]/u, '不应依赖 cmd 内建命令建链接')
 })
 
+test('浏览器探测：headless-shell 与 override 都没有时，必须找出系统 Chrome/Edge 而不是返回空', async (t) => {
+  // 2026-10-21 用户真实体验：点「制作视频」后卡 390 秒，界面毫无提示。
+  // 根因是 browserExecutableArgs() 探测不到 headless-shell 就返回空数组，
+  // Remotion 于是静默联网下载浏览器（实测进程持到 142.250.73.123:443 的连接）。
+  // 而代码上方注释当年写着「退回系统 Chrome：慢，但一定能启动」——那句话一直没实现。
+  //
+  // 这条断言就是那件缺失之事的守门人：只要本机装着 Chrome 或 Edge，
+  // 就必须返回一个 --browser-executable，绝不能返回空、更不能抛错。
+  const { browserExecutableArgs } = await import('../spoken-video-remotion.mjs')
+  const { statSync, existsSync } = await import('node:fs')
+
+  // 确保不会命中前两个分支：显式清空环境变量。
+  const savedShell = process.env.LWB_REMOTION_HEADLESS_SHELL
+  const savedOverride = process.env.LWB_REMOTION_BROWSER_EXECUTABLE
+  delete process.env.LWB_REMOTION_HEADLESS_SHELL
+  delete process.env.LWB_REMOTION_BROWSER_EXECUTABLE
+  t.after(() => {
+    if (savedShell !== undefined) process.env.LWB_REMOTION_HEADLESS_SHELL = savedShell
+    if (savedOverride !== undefined) process.env.LWB_REMOTION_BROWSER_EXECUTABLE = savedOverride
+  })
+
+  // 本机是否真的装着浏览器？没有则这条断言的场景不成立，明确跳过而不是假装通过。
+  const candidates = [
+    process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    process.env.ProgramFiles && join(process.env.ProgramFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    process.env.ProgramFiles && join(process.env.ProgramFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ].filter(Boolean)
+  const hasBrowser = candidates.some((path) => {
+    try { return statSync(path).isFile() } catch { return false }
+  })
+  if (!hasBrowser) {
+    t.skip('本机没有安装 Chrome/Edge，无法验证「找到系统浏览器」这条分支')
+    return
+  }
+
+  const args = browserExecutableArgs()
+  assert.ok(args.length > 0, '本机装着浏览器时不得返回空数组——空数组会让 Remotion 静默下载')
+  assert.equal(args[0], '--browser-executable')
+  assert.ok(args[1] && existsSync(args[1]), `返回的浏览器路径必须真实存在：${args[1]}`)
+  assert.ok(args[1].length <= 200, '可执行文件路径必须长度安全（Windows MAX_PATH 限制）')
+})
+
 test('never passes an OpenGL flag the bundled Chrome rejects', async (t) => {
   // Chrome 149 的 headless-shell 只允许 [(gl=egl-angle,angle=default)]，
   // --gl=swiftshader 会让 GPU 进程每次初始化即退出并不断重启。真正的契约有两个：

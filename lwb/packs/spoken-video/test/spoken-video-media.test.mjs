@@ -1612,6 +1612,15 @@ test('renders a whiteboard video with voiceover audio and passes technical qc', 
   const missingLineArt = await host.startVideoRender(currentAgent, { projectId: project.id, expectedRevision: project.revision, visualBrief: '白板测试。', renderer: 'whiteboard' })
   const missingRun = await waitForOperation(host, currentAgent, project.id, missingLineArt.id)
   assert.equal(missingRun.status, 'failed')
+
+  // 没有 OpenCV/NumPy/Pillow 的 Python 时，这里会先报环境错误（判定顺序真实如此：
+  // 分幕由 parse_srt.py 决定，线稿数量要按分幕数匹配，所以引擎必须先能跑）。
+  // 上面「任务必须失败」的断言仍然成立；下面那条要求具体到线稿约定的断言，
+  // 只有在引擎可用时才谈得上——本机没有 Python 就明确跳过，不假通过。
+  if (/白板渲染需要具备/u.test(String(missingRun.error || ''))) {
+    t.skip(`本机没有具备 OpenCV/NumPy/Pillow 的 Python，白板引擎跑不起来，无法验证线稿约定提示（实际错误：${String(missingRun.error).slice(0, 80)}）`)
+    return
+  }
   assert.match(missingRun.error, /media\/whiteboard/u)
 
   // 放一张带墨迹的 16:9 纸底线稿：自动骨架标注 → 渲染 → 合成音轨

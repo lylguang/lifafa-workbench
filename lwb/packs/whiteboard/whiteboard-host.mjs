@@ -104,6 +104,24 @@ export class WhiteboardHost {
   }
 
   /**
+   * 取出可用的解释器路径；没有就抛出人能看懂的错误。
+   *
+   * 以前这两处写的是 `env.python || (win32 ? 'python' : 'python3')`——探测不到时
+   * 回退到裸命令名。Windows 上 `python.exe` 常常是 **Microsoft Store 的占位程序**
+   * （%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe），执行任何脚本都返回退出码
+   * 9009，且 stderr 为空。于是 #runPython 拿到的就是 `引擎退出码 9009。` 加一段
+   * 空日志，用户完全不知道是自己没装 Python、还是引擎坏了。
+   *
+   * 探测（#resolvePython）要求解释器 `code === 0` 且能 import cv2/numpy/PIL，
+   * 占位程序过不了这一关，所以 env.python 为 null —— 此时应当说清楚要做什么，
+   * 而不是换个名字再试一次。
+   */
+  #requirePython(env) {
+    if (env.python) return env.python
+    throw fail('WHITEBOARD_ENV_MISSING', '找不到具备 OpenCV/NumPy/Pillow 的 Python 解释器，请先在「白板手绘动画」包里执行一次「准备环境」。')
+  }
+
+  /**
    * 运行一个 Python 脚本并收集输出。
    * 引擎约定：末行输出 `OUTPUT=<路径>` 表示产物位置，`ENV_PY=<路径>` 表示解释器位置。
    */
@@ -163,10 +181,27 @@ export class WhiteboardHost {
   }
 
   async prepareEnvironment({ signal, onLog } = {}) {
+    // 「准备环境」这一步确实需要系统 Python 来建 venv，所以这里必须用裸命令名。
+    // 但它是**唯一**合理的回退点：探测不到解释器时用户本来就该来这里。
+    // 失败时要说明「系统没有 Python」这层含义，而不是把 9009 原样抛出去。
     const python = process.platform === 'win32' ? 'python' : 'python3'
     const script = join(this.#engineRoot, 'scripts', 'prepare_env.py')
     if (!(await exists(script))) throw fail('WHITEBOARD_ENGINE_MISSING', `找不到引擎脚本：${script}`)
-    const result = await this.#runPython(python, script, [], { signal, onLog })
+    let result
+    try {
+      result = await this.#runPython(python, script, [], { signal, onLog })
+    } catch (error) {
+      // 退出码 9009（Windows「找不到命令」）或 ENOENT：本机就没有可用的 Python。
+      const text = String(error?.message || '')
+      if (/9009/u.test(text) || /ENOENT/u.test(text)) {
+        throw fail('WHITEBOARD_ENGINE_MISSING',
+          '系统里找不到可用的 Python（退出码 9009）。请先安装 Python 3，'
+          + '安装时勾选「Add python.exe to PATH」；'
+          + '如果你装的是 Microsoft Store 版的 python 占位程序，它不能运行脚本，请改用 python.org 的正式安装包。'
+          + `原始输出：${text.slice(0, 300)}`)
+      }
+      throw error
+    }
     return { envPython: result.envPython, log: result.lines }
   }
 
@@ -188,7 +223,10 @@ export class WhiteboardHost {
       throw fail('WHITEBOARD_INVALID_INPUT', '需要原图像素宽高（整数）。')
     }
     const env = await this.#detectEnvironment()
-    const python = env.python || (process.platform === 'win32' ? 'python' : 'python3')
+    // 不能在这里回退到裸 'python'：Windows 上它常是 Microsoft Store 的占位程序，
+    // 执行即返回 9009（实测 stderr 还是空的），用户只会看到「引擎退出码 9009」
+    // 完全不知道什么意思。探测不到可用解释器就给出人能看懂的提示。
+    const python = this.#requirePython(env)
     const args = [
       srtPath,
       '--scene', String(Number.isSafeInteger(source.scene) ? source.scene : 1),
@@ -210,7 +248,8 @@ export class WhiteboardHost {
     if (typeof srtPath !== 'string' || !srtPath.trim()) throw fail('WHITEBOARD_INVALID_INPUT', '缺少字幕文件路径。')
     if (!(await exists(srtPath))) throw fail('WHITEBOARD_NOT_FOUND', `字幕文件不存在：${srtPath}`)
     const env = await this.#detectEnvironment()
-    const python = env.python || (process.platform === 'win32' ? 'python' : 'python3')
+    // 同 parseSrt：不得回退到裸 'python'（Windows 上是 Store 占位程序，报 9009）。
+    const python = this.#requirePython(env)
     const args = [srtPath]
     if (Number.isFinite(source.targetSec)) args.push('--target-sec', String(source.targetSec))
     if (Number.isFinite(source.minSec)) args.push('--min-sec', String(source.minSec))
