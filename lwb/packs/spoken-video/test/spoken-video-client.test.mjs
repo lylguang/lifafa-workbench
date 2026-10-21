@@ -152,7 +152,7 @@ test('audio workbench pins the MiMo provider and exposes voice and style on the 
   // 起配音与重试共用同一份音色入参，不会各写一遍而走偏。
   // 这份入参按三模式分叉（互斥），所以不再是单行对象字面量。
   assert.match(page, /const voiceFieldsOf = \(\) => \{\s*const tone = stylePrompt\.trim\(\)/u)
-  assert.match(page, /if \(voiceSource === 'design'\) return \{ voiceSource: 'design', \.\.\.tone, \.\.\.tags, designText: voiceDesignText\.trim\(\) \}/u)
+  assert.match(page, /if \(voiceSource === 'design'\) return \{ voiceSource: 'design', \.\.\.tone, \.\.\.tags, voiceDesign: voiceDesignText\.trim\(\) \}/u)
   assert.match(page, /\.\.\.voiceFieldsOf\(\)/u)
 })
 
@@ -544,14 +544,14 @@ test('schedule form exposes a per-task voice preset that rides create, edit and 
   // 语气预设与配音页同源，一键可选也可手输。
   assert.match(page, /SV_VOICE_STYLE_PRESETS\.map\(\(style\) => h\('button'/u)
   // 声音复刻已回到排期页（克隆模式）；桥接面板仍然撤着，那条路不回来。
-  // 排期页必须把 designText / referenceAudio 一并带进 payload——只搬 voiceId 会让
+  // 排期页必须把 voiceDesign / referenceAudio 一并带进 payload——只搬 voiceId 会让
   // 定时生成的配音静默退回默认音色，用户选的声音根本没生效且无报错。
   assert.match(page, /remoteStatic\('uploadVoiceReference', \{/u, '排期页也要能上传参考音频')
-  assert.match(page, /if \(form\.voiceSource === 'design'\) return \{ \.\.\.base, \.\.\.tone, designText: form\.voiceDesignText\.trim\(\) \}/u)
+  assert.match(page, /if \(form\.voiceSource === 'design'\) return \{ \.\.\.base, \.\.\.tone, voiceDesign: form\.voiceDesignText\.trim\(\) \}/u)
   assert.match(page, /referenceAudio: form\.voiceReference/u)
-  // 旧任务读回也要带回 designText / referenceAudio，否则编辑一条 design 任务
+  // 旧任务读回也要带回 voiceDesign / referenceAudio，否则编辑一条 design 任务
   // 会把它悄悄变回预置音色。回填助手住在页面组件之外，所以断言整份源码。
-  assert.match(source, /voiceDesignText: schedule\.voice\?\.designText \|\| ''/u)
+  assert.match(source, /voiceDesignText: schedule\.voice\?\.voiceDesign \|\| ''/u)
   assert.match(source, /voiceReference: schedule\.voice\?\.referenceAudio \|\| null/u)
   assert.doesNotMatch(page, /bridgeVoiceoverInfo/u)
   assert.doesNotMatch(page, /桥接内置音色只能搭配云端/u)

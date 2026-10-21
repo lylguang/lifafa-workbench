@@ -655,6 +655,10 @@ window.__ModuleLoader__.load({
       .sv-media-field-wide { grid-column:1/-1; }
       .sv-style-presets { display:flex; flex-wrap:wrap; align-items:center; gap:5px; }
       .sv-style-presets > .sv-meta { margin:0 2px 0 0; }
+      /* 音色设计预设：12 个卡片要能一眼扫完，所以标签行整体缩进对齐描述框、
+         并给一点上边距和它贴住；窄窗下自然换行，不设固定列数。 */
+      .sv-design-presets { margin:2px 0 0; padding:8px 10px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-page); }
+      .sv-design-presets-wide { grid-column:1/-1; }
       /* 三模式切换：三个模型互斥，所以做成并列的 radio 卡而不是一个下拉——
          下拉会让人以为可以混着填，radio 卡把「互斥」这件事说在明面上。 */
       .sv-voice-modes { display:grid; grid-template-columns:repeat(auto-fit,minmax(0,1fr)); gap:8px; margin:2px 0 4px; }
@@ -3396,6 +3400,68 @@ window.__ModuleLoader__.load({
       { id: 'design', label: '音色设计', hint: '用一段文字描述你想要的声音，每次生成一个新音色。' },
       { id: 'upload', label: '声音克隆', hint: '上传一段参考音频，复刻说话人。只支持 wav / mp3。' },
     ];
+    /**
+     * 音色设计的优质预设。
+     *
+     * 设计模式的唯一输入就是一句描述，而「描述越具体出来的声音越接近」——
+     * 可大多数人对着空白输入框写不出「三十五岁、中低频、气声少、尾音收得住」
+     * 这种话，最后只能写「好听的男声」，出来的结果自然随机。这一组把实测好用
+     * 的写法固化成可点的卡片：点一下即填满描述框，再按需微调。
+     *
+     * 三条硬约束，改表时别破：
+     *  · `text` 是**直接提交给模型的描述本身**，不是提示词包装。别写「请生成一位…」
+     *    这种指令句，那段文字是要被当成音色定义读的。
+     *  · 长度 ≤200，且 ≤ SV_DESIGN_TEXT_MAX：输入框与后端校验都是这个上限，
+     *    预设超了会当场被截断或提交失败。
+     *  · 只写**声音本身的客观属性**（年龄 / 性别 / 音区 / 音色 / 语速 / 咬字 / 气质），
+     *    不写文案主题或情绪剧情——那是「语气」栏的活，两栏混写会互相打架。
+     *
+     * 顺序按使用频率排：口播最常用的解说、播报、种草放前面。
+     */
+    const SV_DESIGN_VOICE_PRESETS = [
+      { id: 'male-narrator', label: '磁性男声解说', text: '三十五岁左右的男声，中低音区，音色厚实带轻微沙哑，语速偏慢，咬字清晰沉稳，尾音收得住，像做了多年纪录片的解说员。' },
+      { id: 'female-news', label: '标准女声播报', text: '三十岁左右的女声，中高音区，音色干净明亮，语速中等偏快，吐字利落有顿挫，气息稳，像电视台的新闻播报员。' },
+      { id: 'female-seeding', label: '闺蜜种草女声', text: '二十五岁上下的女声，音色甜美柔和，语速偏快，说话带笑意和轻微的气声，像好朋友面对面安利东西。' },
+      { id: 'male-knowledge', label: '知识博主男声', text: '三十岁出头的男声，中音区，音色清爽不厚重，语速中等，讲解时条理清楚、句间留有停顿，像在镜头前讲干货的科普博主。' },
+      { id: 'radio-night', label: '深夜电台', text: '四十岁左右的男声，中低音区，音色温润微哑，语速很慢，气声明显，句尾自然下沉，像深夜电台节目里贴着话筒说话。' },
+      { id: 'female-warm', label: '温柔故事女声', text: '三十岁左右的女声，中低音区，音色柔和不甜腻，语速缓慢平稳，语调轻柔有起伏，适合安静地讲一个故事。' },
+      { id: 'male-strong', label: '沉稳评论男声', text: '四十岁上下的男声，低音区，音色浑厚有力，语速中等偏慢，重音明确、不拖泥带水，像严肃节目的评论员。' },
+      { id: 'female-lively', label: '元气少女', text: '二十岁出头的女声，高音区偏亮，音色活泼有弹性，语速快，语气跳跃带笑意，句尾微微上扬。' },
+      { id: 'male-enthusiastic', label: '热情带货男声', text: '三十岁左右的男声，中高音区，音色明亮有冲劲，语速快，重音密集，情绪饱满上扬，像直播间里带节奏的主播。' },
+      { id: 'female-tech', label: '干练职场女声', text: '三十五岁左右的女声，中音区，音色干练中性，语速中等，表达简洁直接、少语气词，像职场汇报或产品介绍。' },
+      { id: 'teen-male', label: '清爽少年音', text: '十八岁上下的男声，中高音区，音色干净清瘦，语速中等偏快，语气自然松弛，带一点少年的往上扬的尾音。' },
+      { id: 'en-anchor', label: '英文新闻主播', text: 'A male English narrator in his forties, warm mid-low register, steady medium-slow pace, crisp articulation, neutral American accent, like a broadcast news anchor.' },
+    ];
+    /** 音色描述的长度上限。输入框 maxLength 与后端 optionalText(...,500) 都以此为准。 */
+    const SV_DESIGN_TEXT_MAX = 200;
+    /** 描述按 id 查预设，用于回显「当前用的是哪个预设」。 */
+    const SV_DESIGN_PRESET_BY_TEXT = new Map(SV_DESIGN_VOICE_PRESETS.map((preset) => [preset.text, preset.id]));
+    function svVoiceDesignPresetLabel(text) {
+      const id = SV_DESIGN_PRESET_BY_TEXT.get(String(text || '').trim());
+      if (!id) return null;
+      const preset = SV_DESIGN_VOICE_PRESETS.find((item) => item.id === id);
+      return preset ? preset.label : null;
+    }
+    /**
+     * 音色设计描述预设选择器。
+     *
+     * 点一下填满描述框，再点一下同一个预设就清空——和「常用语气」的 chip 同手感。
+     * 一页两处（配音页、排期页）共用，免得两边各写一份后行为分叉。
+     */
+    function svVoiceDesignPresets({ value, disabled, onChange, className }) {
+      return h('div', { className: `sv-style-presets sv-design-presets${className ? ` ${className}` : ''}` },
+        h('span', { className: 'sv-meta' }, '优质预设'),
+        SV_DESIGN_VOICE_PRESETS.map((preset) => h('button', {
+          key: preset.id,
+          type: 'button',
+          className: 'sv-filter-chip',
+          title: preset.text,
+          'data-on': value === preset.text ? 'true' : 'false',
+          disabled: Boolean(disabled),
+          onClick: () => onChange(value === preset.text ? '' : preset.text),
+        }, preset.label)),
+      );
+    }
     /** 唱歌只挂在预置音色模型上，另两个模型会直接 400，所以 UI 上先拦住。 */
     const SV_SINGING_MODES = ['preset'];
 
@@ -3449,12 +3515,28 @@ window.__ModuleLoader__.load({
       const re = /[[［]([^\]］]{1,40})[\]］]/gu;
       let match = re.exec(body);
       while (match) {
+        // 成对 + ≤40 字已由 SHELL 正则保证；这里补第二道：内层仍含任何括号就不是标签。
+        // 判定顺序必须与后端 countInlineAudioTags 逐字同形（先取候选、再判内层），
+        // 否则同一段正文前端算 0、后端算 1，配额口径当场分叉。
+        //
         // 纯数字**不算**标签（2026-10-20 Chief 裁决 A，与后端 countInlineAudioTags 同口径）：
         // 口播稿里写 `[1]` 引用来源是真实场景。若把它算进配额，用户写够 9 处参考文献
         // 就会被拒，而错误文案指向「音频标签」——他看着自己的引用完全不知道被拒在哪，
         // 而且这是必然发生的，不是概率问题。反过来「用户真想写纯数字标签」在官方标签表里
-        // 不存在，用一个不会发生的场景去换一个必然发生的误伤，不划算。
-        if (!/^\d+$/u.test(match[1].trim()) && !/[[\]［］()（）]/u.test(match[1])) {
+        // 不存在。失败模式代价不对称，故豁免。
+        //
+        // 字符集必须与后端 `MIMO_INLINE_TAG_DIGITS_ONLY = /^[0-9０-９]+$/u` **逐字相同**。
+        // 这里曾经写的是 `/^\d+$/u`——`\d` 只匹配半角 0-9，不匹配全角 `１`，
+        // 于是 `［１］` 前端算 1 个标签、后端算 0 个，同一条裁决两边漂移。
+        // 改的时候两边一起改这两个字面量，别各自「顺手优化」成 \d。
+        //
+        // 内层括号字符集含 `【】`：这是**沿用 HEAD 的既有约束**（当时写在
+        // MIMO_INLINE_TAG_SHELL 的排除类里，注释原文「标签内不得再含任何括号
+        // （含【】）」），不是新加的取舍。`[叹【气】]` 这种嵌套会让剥离与计数
+        // 都失去意义，所以按普通文本放行。后端在改成「先取候选再判内层」那次
+        // 重构里把 `【】` 漏掉了，需要后端同步补回 MIMO_INLINE_TAG_INNER，
+        // 否则这一条会变成新的前后端分叉。
+        if (!/^[0-9０-９]+$/u.test(match[1].trim()) && !/[[\]［］()（）【】]/u.test(match[1])) {
           spans.push({ start: match.index, end: match.index + match[0].length, tag: match[1].trim() });
         }
         re.lastIndex = match.index + match[0].length;
@@ -3704,7 +3786,9 @@ window.__ModuleLoader__.load({
         // 三模式只有 preset 存了 voiceId；design/upload 各自有专属字段，
         // 老配置没有它们，回落 preset 才不会把一条老任务读成空壳。
         voiceSource: ['design', 'upload'].includes(schedule.voice?.voiceSource) ? schedule.voice.voiceSource : 'preset',
-        voiceDesignText: schedule.voice?.designText || '',
+        // 存盘字段是 `voiceDesign`（后端 normalize 的输出），不是 designText。
+        // 读错名字会让编辑一条音色设计任务时描述框空掉，保存后变成非法配置。
+        voiceDesignText: schedule.voice?.voiceDesign || '',
         voiceReference: schedule.voice?.referenceAudio || null,
         voiceId: voice?.voiceId && SV_MIMO_BUILTIN_VOICES.includes(voice.voiceId) ? voice.voiceId : SV_MIMO_DEFAULT_VOICE,
         voiceRate: String(voice?.rate ?? 1),
@@ -4374,12 +4458,15 @@ window.__ModuleLoader__.load({
       const voicePayloadOf = () => {
         const numeric = (value, fallback) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : fallback; };
         // 三模式互斥：只发当前模式那一套字段，不把另外两套传空值过去。
-        // 传空 voiceId 给 design 或传空 designText 给 preset 都会让对方模型 400。
+        // 传空 voiceId 给 design 或传空 voiceDesign 给 preset 都会让对方模型 400。
         // 这套字段必须**逐项都带上**——只搬 voiceId 会让排期任务在到点执行时
         // 静默退回默认音色，用户在排期里选的声音根本没生效，且没有任何报错。
         const base = { voiceSource: form.voiceSource, rate: numeric(form.voiceRate, 1), volume: numeric(form.voiceVolume, 1) };
         const tone = form.voiceStyle.trim() ? { style: form.voiceStyle.trim() } : {};
-        if (form.voiceSource === 'design') return { ...base, ...tone, designText: form.voiceDesignText.trim() };
+        // 字段名是后端定的 `voiceDesign`（见 normalizeVoiceoverRequest）。前端内部
+        // state 叫 voiceDesignText，但**出网必须换成 voiceDesign**——发 designText
+        // 后端读不到描述，会判成「音色设计模式需要填写音色描述」。
+        if (form.voiceSource === 'design') return { ...base, ...tone, voiceDesign: form.voiceDesignText.trim() };
         if (form.voiceSource === 'upload') return { ...base, ...tone, ...(form.voiceReference ? { referenceAudio: form.voiceReference } : {}) };
         return { ...base, ...tone, voiceId: form.voiceId, voiceName: form.voiceId };
       };
@@ -4477,7 +4564,11 @@ window.__ModuleLoader__.load({
           svVoiceModePicker({ value: form.voiceSource, disabled: busy, className: 'sv-voice-modes sv-voice-modes-wide', onChange: (mode) => patchForm((current) => ({ ...current, voiceSource: mode })) }),
           form.voiceSource === 'design'
             // design 的唯一输入就是这段描述，后端也判空，所以空的时候直接拦在提交前。
-            ? h('label', { className: 'sv-as-field sv-as-field-wide' }, h('span', { className: 'sv-as-label' }, '音色描述（必填）'), h('input', { className: 'sv-input', value: form.voiceDesignText, maxLength: 200, disabled: Boolean(busy), placeholder: '例：一位三十岁上下、语速偏慢、带点沙哑的中年男声', onChange: (event) => patchForm((current) => ({ ...current, voiceDesignText: event.target.value })) }), form.voiceDesignText.trim() ? null : h('p', { className: 'sv-as-warn' }, '音色设计模式必须写一段声音描述，否则合成会失败——描述越具体（年龄、声线、语速、气质）出来的音色越接近你想的样子。'))
+            // 预设卡片与配音页同一份表和同一个组件，两边行为不分叉。
+            ? h(React.Fragment, null,
+              h('label', { className: 'sv-as-field sv-as-field-wide' }, h('span', { className: 'sv-as-label' }, '音色描述（必填）'), h('input', { className: 'sv-input', value: form.voiceDesignText, maxLength: SV_DESIGN_TEXT_MAX, disabled: Boolean(busy), placeholder: '例：一位三十岁上下、语速偏慢、带点沙哑的中年男声', onChange: (event) => patchForm((current) => ({ ...current, voiceDesignText: event.target.value })) })),
+              svVoiceDesignPresets({ value: form.voiceDesignText.trim(), disabled: busy, className: 'sv-design-presets-wide', onChange: (text) => patchForm((current) => ({ ...current, voiceDesignText: text })) }),
+              form.voiceDesignText.trim() ? null : h('p', { className: 'sv-as-warn sv-as-field-wide' }, '音色设计模式必须写一段声音描述，否则合成会失败——描述越具体（年龄、声线、语速、气质）出来的音色越接近你想的样子；可以先点上面一个预设再微调。'))
             : form.voiceSource === 'upload'
               ? h('div', { className: 'sv-as-field sv-as-field-wide' },
                 h('span', { className: 'sv-as-label' }, '参考音频（必填）'),
@@ -5359,13 +5450,14 @@ window.__ModuleLoader__.load({
        * Voice payload shared by create and retry, so both stay in step.
        *
        * 三个模型互斥，所以只发当前模式那一套：design 不带 voiceId（带了后端会
-       * 当成混用报错），upload 不带 voiceId 也不带 designText，只带参考音频。
+       * 当成混用报错），upload 不带 voiceId 也不带 voiceDesign，只带参考音频。
        */
       const voiceFieldsOf = () => {
         const tone = stylePrompt.trim() ? { style: stylePrompt.trim() } : {};
         // 开头风格由后端 buildTaggedText 拼，这里只传数组。
         const tags = audioTagParams.length ? { audioTags: audioTagParams } : {};
-        if (voiceSource === 'design') return { voiceSource: 'design', ...tone, ...tags, designText: voiceDesignText.trim() };
+        // 出网字段名是后端的 `voiceDesign`，不是内部 state 名 voiceDesignText。
+        if (voiceSource === 'design') return { voiceSource: 'design', ...tone, ...tags, voiceDesign: voiceDesignText.trim() };
         if (voiceSource === 'upload') return { voiceSource: 'upload', ...tone, ...tags, referenceAudio: voiceReference };
         return { voiceSource: 'preset', voiceId, voiceName: voiceId, ...tone, ...tags };
       };
@@ -5409,7 +5501,9 @@ window.__ModuleLoader__.load({
             voiceSource: ['design', 'upload'].includes(task.input?.voiceSource) ? task.input.voiceSource : 'preset',
             ...(task.input?.voiceId ? { voiceId: task.input.voiceId } : { voiceId, voiceName: voiceId }),
             ...(task.input?.voiceName ? { voiceName: task.input.voiceName } : {}),
-            ...(task.input?.designText ? { designText: task.input.designText } : {}),
+            // 后端冻结的是 `voiceDesign`；designText 是内部 state 名，读它永远读不到，
+            // 会让「重试一条音色设计任务」丢掉描述而直接报错。
+            ...(task.input?.voiceDesign ? { voiceDesign: task.input.voiceDesign } : {}),
             ...(task.input?.referenceAudio ? { referenceAudio: task.input.referenceAudio } : {}),
             ...(task.input?.style ? { style: task.input.style } : {}),
             ...(Array.isArray(task.input?.audioTags) && task.input.audioTags.length ? { audioTags: task.input.audioTags } : {}),
@@ -5561,7 +5655,12 @@ window.__ModuleLoader__.load({
         providerEndpointNote,
         svVoiceModePicker({ value: voiceSource, disabled: submitting, onChange: setVoiceSource }),
         voiceSource === 'design'
-          ? h('label', { className: 'sv-media-field sv-media-field-wide' }, h('span', null, '音色描述（必填）'), h('input', { className: 'sv-input', value: voiceDesignText, maxLength: 200, disabled: Boolean(submitting), placeholder: '例：一位三十岁上下、语速偏慢、带点沙哑的中年男声', onChange: (event) => setVoiceDesignText(event.target.value) }))
+          // 描述是设计模式的唯一输入，所以预设卡片贴着输入框放；
+          // 选中态由文本内容反推，手改一个字就自动脱离选中。
+          ? h(React.Fragment, null,
+            h('label', { className: 'sv-media-field sv-media-field-wide' }, h('span', null, '音色描述（必填）'), h('input', { className: 'sv-input', value: voiceDesignText, maxLength: SV_DESIGN_TEXT_MAX, disabled: Boolean(submitting), placeholder: '例：一位三十岁上下、语速偏慢、带点沙哑的中年男声', onChange: (event) => setVoiceDesignText(event.target.value) })),
+            svVoiceDesignPresets({ value: voiceDesignText.trim(), disabled: submitting, onChange: setVoiceDesignText }),
+            voiceDesignText.trim() ? h('p', { className: 'sv-note' }, `将按这段描述生成音色${svVoiceDesignPresetLabel(voiceDesignText) ? `（预设「${svVoiceDesignPresetLabel(voiceDesignText)}」）` : ''}，可在描述里继续微调年龄、音区、语速。`) : null)
           : voiceSource === 'upload'
             ? h('div', { className: 'sv-media-field sv-media-field-wide' },
               h('span', null, '参考音频（必填）'),
@@ -6604,6 +6703,7 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
       SV_MIMO_DEFAULT_VOICE, svDefaultVoice, SV_VOICE_MODES, SV_SINGING_MODES,
       SV_AUDIO_TAG_GROUPS, SV_AUDIO_TAG_MAX_COUNT, SV_AUDIO_TAG_MAX_LENGTH,
       svAudioTagSlots, svAudioTagNames, svAudioTagError, svInsertAudioTag, SV_VOICE_STYLE_PRESETS,
+      SV_DESIGN_VOICE_PRESETS, SV_DESIGN_TEXT_MAX, svVoiceDesignPresetLabel,
       SV_CLONE_EXTENSIONS, SV_CLONE_ACCEPT, svVoiceReferenceError,
     };
     exports.inject = ['connection', 'lwbPackClient', 'remote']; exports.apply = apply; return module.exports;
