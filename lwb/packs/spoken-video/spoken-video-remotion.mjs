@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, statfs, symlink, unlink, writeFile } from 'node:fs/promises'
-import { readFileSync, realpathSync } from 'node:fs'
+import { readFileSync, realpathSync, statSync } from 'node:fs'
 import { dirname, extname, join, parse as parsePath, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -629,17 +629,52 @@ function systemChromiumPath() {
   return null
 }
 
+/**
+ * 环境变量指定的可执行文件路径，**存在才采信**；不存在就当没设过、返回 null。
+ *
+ * 为什么不「尊重用户配置」优先于存在性：Remotion 对不存在的 `--browser-executable`
+ * 是**硬失败、不回退**（原文：「"browserExecutable" was specified as '…' but the path
+ * doesn't exist. Pass "null" for "browserExecutable" to download a browser automatically.」）。
+ * 2026-10-21 用户真实撞上：启动脚本把 LWB_REMOTION_BROWSER_EXECUTABLE 硬编码成
+ * `C:\Program Files\Google\Chrome\Application\chrome.exe`，而这台机器 Chrome 是
+ * **用户级安装**（%LOCALAPPDATA%），Program Files 下根本没有 → 两个视频任务全失败。
+ *
+ * 也就是说：**误配的环境变量能把程序带到「确定的失败」上，比不设还糟**。
+ * 所以传出去的路径必须保证存在；配错了就忽略它、继续往下探测。
+ */
+function existingExecutableOverride(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  try {
+    // 与其它候选同一套规则：realpath 化（symlink 路径 spawn 会 ENOENT）+ 长度安全。
+    const real = realpathSync(raw)
+    // realpath 对目录也会成功，所以还得确认它真的是个文件——
+    // 传一个目录给 --browser-executable 同样是 Remotion 硬失败。
+    if (!statSync(real).isFile()) {
+      console.warn(`[spoken-video] 环境变量指定的路径不是文件，已忽略并继续自动探测：${raw}`)
+      return null
+    }
+    if (real.length <= MAX_EXECUTABLE_PATH) return real
+    console.warn(`[spoken-video] 环境变量指定的可执行文件路径过长（>${MAX_EXECUTABLE_PATH}），已忽略：${real}`)
+  } catch {
+    // 配错的环境变量不能让整条渲染挂掉，忽略并继续探测。
+    console.warn(`[spoken-video] 环境变量指定的可执行文件不存在，已忽略并继续自动探测：${raw}`)
+  }
+  return null
+}
+
 export function browserExecutableArgs() {
   // 优先用配套 headless-shell（实测快 5.6 倍）：环境变量显式指定 > 共享目录自动探测。
   // 自动探测是必须的：Remotion 自选浏览器时把缓存目录解析到渲染 cwd 的
   // node_modules/.remotion，任务工作区经 symlink spawn 必 ENOENT（同上）。
-  const headlessShell = process.env.LWB_REMOTION_HEADLESS_SHELL?.trim()
-  if (headlessShell && headlessShell.length <= MAX_EXECUTABLE_PATH) return ['--browser-executable', headlessShell]
+  // 两条环境变量都先验存在性再采信——见 existingExecutableOverride 的注释。
+  const headlessShell = existingExecutableOverride(process.env.LWB_REMOTION_HEADLESS_SHELL)
+  if (headlessShell) return ['--browser-executable', headlessShell]
   const shared = sharedHeadlessShellPath()
   if (shared) return ['--browser-executable', shared]
   // 退回系统 Chrome / Edge：比 headless-shell 慢（旧版无头模式已被移除，走更重的
   // 合成路径），但一定有、能启动。这台机器就是**用户级安装**，不在 Program Files。
-  const override = process.env.LWB_REMOTION_BROWSER_EXECUTABLE?.trim()
+  const override = existingExecutableOverride(process.env.LWB_REMOTION_BROWSER_EXECUTABLE)
   if (override) return ['--browser-executable', override]
   const system = systemChromiumPath()
   if (system) return ['--browser-executable', system]

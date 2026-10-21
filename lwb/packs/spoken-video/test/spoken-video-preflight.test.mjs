@@ -184,6 +184,70 @@ test('浏览器探测：headless-shell 与 override 都没有时，必须找出�
   assert.ok(args[1].length <= 200, '可执行文件路径必须长度安全（Windows MAX_PATH 限制）')
 })
 
+test('环境变量配了不存在的浏览器路径时不得采信，要落到能用的浏览器上', async (t) => {
+  // 2026-10-21 用户两个视频任务全失败的真实原因：
+  // 启动脚本把 LWB_REMOTION_BROWSER_EXECUTABLE 硬编码成
+  // `C:\Program Files\Google\Chrome\Application\chrome.exe`，而这台机器 Chrome 是
+  // **用户级安装**（%LOCALAPPDATA%），Program Files 下没有。
+  // 当时 browserExecutableArgs() 对环境变量是**无条件采信**，于是把这个不存在的路径
+  // 传给 Remotion；Remotion 对不存在的 --browser-executable 是硬失败、不回退：
+  // 「"browserExecutable" was specified as '…' but the path doesn't exist.」
+  //
+  // 误配的环境变量能把程序带到确定的失败上，比不设还糟——所以必须先验存在性。
+  const { browserExecutableArgs } = await import('../spoken-video-remotion.mjs')
+  const { existsSync } = await import('node:fs')
+
+  const saved = {
+    shell: process.env.LWB_REMOTION_HEADLESS_SHELL,
+    override: process.env.LWB_REMOTION_BROWSER_EXECUTABLE,
+  }
+  t.after(() => {
+    if (saved.shell !== undefined) process.env.LWB_REMOTION_HEADLESS_SHELL = saved.shell
+    if (saved.override !== undefined) process.env.LWB_REMOTION_BROWSER_EXECUTABLE = saved.override
+  })
+  delete process.env.LWB_REMOTION_HEADLESS_SHELL
+
+  const bogus = process.platform === 'win32'
+    ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+    : '/nonexistent/chrome-does-not-exist'
+  // 前置条件：这个路径在本机确实不存在，否则断言就失去意义。
+  assert.equal(existsSync(bogus), false, '这条断言要求该路径在本机不存在')
+
+  process.env.LWB_REMOTION_BROWSER_EXECUTABLE = bogus
+  let args = null
+  let thrown = null
+  try {
+    args = browserExecutableArgs()
+  } catch (error) {
+    thrown = error
+  }
+
+  // 不得把不存在的路径传出去——无论最终是探测到别的浏览器，还是明确报错。
+  if (args) {
+    assert.notEqual(args[1], bogus, '不得把不存在的路径传给 Remotion（它对此是硬失败、不回退）')
+    assert.ok(existsSync(args[1]), `传出去的路径必须真实存在：${args[1]}`)
+  } else {
+    assert.ok(thrown, '要么探测到可用浏览器，要么明确报错，不能静默返回空')
+    assert.match(thrown.message, /未找到可用的浏览器/u)
+  }
+
+  // 同理，把 HEADLESS_SHELL 也配错时同样不得采信。
+  process.env.LWB_REMOTION_HEADLESS_SHELL = bogus
+  args = null
+  thrown = null
+  try {
+    args = browserExecutableArgs()
+  } catch (error) {
+    thrown = error
+  }
+  if (args) {
+    assert.notEqual(args[1], bogus, 'HEADLESS_SHELL 配错时同样不得采信')
+    assert.ok(existsSync(args[1]))
+  } else {
+    assert.ok(thrown)
+  }
+})
+
 test('never passes an OpenGL flag the bundled Chrome rejects', async (t) => {
   // Chrome 149 的 headless-shell 只允许 [(gl=egl-angle,angle=default)]，
   // --gl=swiftshader 会让 GPU 进程每次初始化即退出并不断重启。真正的契约有两个：
