@@ -2865,6 +2865,27 @@ export class SpokenVideoMediaHost {
   async #runEvent(root, id, label, detail = null) {
     return this.#mutateRun(root, id, (run) => { executionEvent(run, label, { actor: '媒体处理', detail }); return run })
   }
+  /**
+   * 给「正在跑的这条记录」补一条执行事件，**按它真实住在哪个文件里分发**。
+   *
+   * 两个存储是分开的，id 互不相通：
+   *   audio-tasks.json  配音/字幕任务（startAudioTask → #runAudioTask）
+   *   media/runs.json   视频/质检运行（media.start 系列 → #start/#executeRun）
+   * `#mimoVoiceover` 被这**两条**路径共用，所以它内部绝不能写死 `#runEvent`：
+   * 音频任务路径传进来的 run 其实是 audio-task，id 不在 runs.json 里，
+   * `#mutateRun` 会直接抛「媒体任务记录丢失。」——任务在合成成功后立刻失败，
+   * 且因为那条事件本身没写成，界面上看不到任何 MiMo 分段记录，极难定位。
+   *
+   * 判断依据用记录上的类型而不是调用方，避免以后新增调用点又踩一遍。
+   */
+  async #progressEvent(root, record, label, detail = null) {
+    // 音频任务的 type 是 voiceover/subtitles，且带 source/input 结构；
+    // runs 的 type 可能是 voiceover 也可能是 video/qc，所以再看它在哪个文件里。
+    const inAudioTasks = (await readAudioTasks(root)).tasks.some((task) => task.id === record.id)
+    return inAudioTasks
+      ? this.#audioEvent(root, record.id, label, detail)
+      : this.#runEvent(root, record.id, label, detail)
+  }
 
   async #recoverInterruptedRuns(root) {
     const runs = await readRuns(root)
@@ -3244,7 +3265,7 @@ export class SpokenVideoMediaHost {
         }
         chunks.push({ file })
         durations.push(probe.durationSeconds)
-        await this.#runEvent(root, run.id, `小米 MiMo 配音合成 ${index}/${segments.length}`, { provider: 'mimo', stage: '合成中' })
+        await this.#progressEvent(root, run, `小米 MiMo 配音合成 ${index}/${segments.length}`, { provider: 'mimo', stage: '合成中' })
       }
 
       const audio = await this.#concatWavSegments(directory, chunks, '小米 MiMo')
@@ -3766,7 +3787,7 @@ async #mimoReferenceDataUrl(root, input) {
         durationSeconds: Number(completed.duration) || null,
       }
     }
-    await this.#runEvent(root, run.id, '配音服务已返回，处理并检测音频', { provider: generated.provider, taskId: generated.taskId })
+    await this.#progressEvent(root, run, '配音服务已返回，处理并检测音频', { provider: generated.provider, taskId: generated.taskId })
     const written = await this.#writeVoiceoverAudio(root, run.id, generated.audio, outputFormat, input, generated.provider === 'bailian')
     const { relativePath, output } = written
     const probe = await this.#probe(output)

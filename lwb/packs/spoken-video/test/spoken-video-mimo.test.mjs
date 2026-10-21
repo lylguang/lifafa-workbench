@@ -555,3 +555,133 @@ test('时间轴：任何缺少实测时长的输入都返回 null，绝不按字
   assert.equal(buildMimoTimeline({ segments: ['一。'], durations: [0] }), null)
   assert.equal(buildMimoTimeline({ segments: ['一。'], durations: ['abc'] }), null)
 })
+/*
+ * 回归：音频任务的 MiMo 分段进度事件必须写进 audio-tasks.json。
+ *
+ * 线上故障现场：任务 eb2145ce… 用音色设计合成，17.5 秒后报
+ * 「媒体任务记录丢失。」，而 executionEvents 里只有「开始执行」和「执行失败」
+ * 两条——**没有任何 MiMo 分段记录**。
+ *
+ * 根因：#mimoVoiceover 被两条路径共用（音频任务 #runAudioTask、视频运行
+ * #generateVoiceover），它内部却写死了 #runEvent → #mutateRun，而后者只在
+ * media/runs.json 里找 id。音频任务的 id 只存在于 audio-tasks.json，
+ * 于是第一次写进度事件就抛「媒体任务记录丢失。」——合成已经成功了，
+ * 却被这条记账语句炸掉整个任务。
+ *
+ * 断言直接钉「音频任务路径跑完 MiMo 合成不失败」，而不是钉某行源码怎么写，
+ * 因为下次换实现时真正要保住的仍然是这个行为。
+ */
+test('音频任务的 MiMo 分段进度写进 audio-tasks.json，不因「媒体任务记录丢失」而失败', async (t) => {
+  const { mkdtemp, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const cwd = await mkdtemp(join(tmpdir(), 'lwb-voiceover-progress-'))
+  t.after(() => rm(cwd, { recursive: true, force: true }))
+
+  // 0.1 秒 24kHz 单声道静音 wav。
+  //
+  // 以前这里用的是一段 44 字节的最小 wav，它的 data chunk 长度为 0——
+  // ffprobe 读不出 duration，normalizeProbe 返回 durationSeconds=null，
+  // 于是任务在探测那一步就 fail 了，**根本走不到写进度事件那行**。
+  // 断言里的 probeBlocked 分支只兜 EPERM/spawn，兜不住「探测成功但时长为 0」，
+  // 结果这条用例长期没测到它声称要测的东西。换成真正有数据的 wav 才有效。
+  const wav = (() => {
+    const samples = 2400 // 24kHz × 0.1s
+    const buffer = Buffer.alloc(44 + samples * 2)
+    buffer.write('RIFF', 0)
+    buffer.writeUInt32LE(36 + samples * 2, 4)
+    buffer.write('WAVE', 8)
+    buffer.write('fmt ', 12)
+    buffer.writeUInt32LE(16, 16)
+    buffer.writeUInt16LE(1, 20)   // PCM
+    buffer.writeUInt16LE(1, 22)   // 单声道
+    buffer.writeUInt32LE(24_000, 24)
+    buffer.writeUInt32LE(48_000, 28)
+    buffer.writeUInt16LE(2, 32)
+    buffer.writeUInt16LE(16, 34)
+    buffer.write('data', 36)
+    buffer.writeUInt32LE(samples * 2, 40)
+    return buffer // 静音即全零，Buffer.alloc 已清零
+  })()
+  const audioReply = {
+    ok: true, status: 200,
+    headers: { get: () => null },
+    text: async () => JSON.stringify({ choices: [{ message: { audio: { data: wav.toString('base64') } } }] }),
+  }
+
+  const agent = { id: 'test', workspacePath: cwd, cwd }
+  // 记录 fetch 次数：>0 才说明真的走到了 MiMo 合成（而不是在更早就被拦下）。
+  const fetchCalls = { count: 0 }
+  const host = new SpokenVideoMediaHost({
+    projectsStore: new SpokenVideoProjectStore(),
+    credentials: { resolve: async () => ({ value: 'sk-test-mimo' }), describe: async () => ({ configured: true, writable: true }) },
+    fetch: async () => { fetchCalls.count += 1; return audioReply },
+  })
+
+  // 用音色设计模式（与线上失败任务同一条路径），正文短到只分一段，
+  // 这样第 1 段的进度事件就是必踩的那一行。
+  const started = await host.startAudioTask(agent, {
+    subtitleEnabled: false,
+    text: '这是用来验证音频任务进度记录的一句话。',
+    title: '进度事件回归',
+    provider: 'mimo',
+    voiceSource: 'design',
+    voiceDesign: '三十岁出头的男声，中音区，音色清爽不厚重。',
+  })
+
+  // 等任务跑到终态。
+  let task = null
+  for (let i = 0; i < 200; i += 1) {
+    const list = await host.listAudioTasks(agent, {})
+    task = (list.items || list.tasks || []).find((item) => item.id === started.id)
+    if (task && ['succeeded', 'failed'].includes(task.status)) break
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+
+  assert.ok(task, '任务应当能被读回')
+  // 核心断言：不能因记账失败。合成本身是成功的（fetch 返回了合法 wav）。
+  assert.notEqual(task.error && String(task.error).includes('媒体任务记录丢失'), true,
+    '音频任务不应在写进度事件时抛「媒体任务记录丢失」')
+  const { readFile } = await import('node:fs/promises')
+  const onDisk = JSON.parse(await readFile(join(cwd, 'data', 'audio-tasks.json'), 'utf8'))
+  const stored = onDisk.tasks.find((item) => item.id === started.id)
+  assert.ok(stored, '任务应当落盘')
+  const labels = (stored.executionEvents || []).map((event) => event.label)
+  // 走到 MiMo 合成这一步本身证明 fetch 被调用过、模式正确地送进去了。
+  assert.equal(fetchCalls.count > 0, true, 'MiMo 合成应当被实际调用')
+  // 进度事件写在 #probe 之后。受限沙箱禁止子进程，ffprobe 会 EPERM，
+  // 那种环境里事件确实还没写——此时只要求错误是环境限制而非记账失败。
+  // 能跑 ffprobe 的机器上则必须有分段进度，证明事件落进了 audio-tasks.json。
+  const probeBlocked = /EPERM|spawn/iu.test(String(task.error || ''))
+  if (probeBlocked) {
+    assert.equal(task.status, 'failed')
+    assert.equal(typeof stored.executionEvents, 'object', '执行事件结构必须还在')
+  } else {
+    assert.ok(labels.some((label) => label.includes('小米 MiMo 配音合成')), `缺 MiMo 分段进度：${labels.join(' / ')}`)
+  }
+})
+
+/*
+ * 上一条在禁止子进程的沙箱里跑不到进度事件那一行（ffprobe 先 EPERM），
+ * 所以这里再补一条**不依赖子进程**的结构断言，钉住真正的病灶：
+ * #mimoVoiceover 的进度事件必须走按存储分发的 #progressEvent，
+ * 不能写死 #runEvent（runs.json）——那正是线上「媒体任务记录丢失」的成因。
+ */
+test('#mimoVoiceover 的进度事件按存储分发，不写死 runs.json', async () => {
+  const source = readFileSync(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  const start = source.indexOf('async #mimoVoiceover(')
+  assert.ok(start > 0, '#mimoVoiceover 必须还在')
+  // 截到下一个方法定义为止。
+  const nextMethod = source.indexOf('\n  async #', start + 10)
+  const body = source.slice(start, nextMethod > 0 ? nextMethod : undefined)
+
+  assert.match(body, /#progressEvent\(root, run, /u, '#mimoVoiceover 必须用按存储分发的 #progressEvent')
+  assert.doesNotMatch(body, /#runEvent\(/u, '#mimoVoiceover 不得写死 #runEvent：音频任务的 id 不在 runs.json 里')
+
+  // 分发器本身两种都要能写。
+  assert.match(source, /async #progressEvent\(root, record, label, detail = null\)/u)
+  assert.match(source, /const inAudioTasks = \(await readAudioTasks\(root\)\)\.tasks\.some\(\(task\) => task\.id === record\.id\)/u)
+  assert.match(source, /\? this\.#audioEvent\(root, record\.id, label, detail\)/u)
+  assert.match(source, /: this\.#runEvent\(root, record\.id, label, detail\)/u)
+})
