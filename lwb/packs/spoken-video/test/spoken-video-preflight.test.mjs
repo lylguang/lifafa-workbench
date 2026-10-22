@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, lstat, symlink } fro
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { inspectCreativeSource, inspectSceneBoundaryCoverage, inspectTimelineAlignment } from '../spoken-video-preflight.mjs'
 import { inspectContentSafety } from '../spoken-video-content-safety.mjs'
 import { inspectSceneCueCoverage, parseSceneCueMap } from '../spoken-video-scene-cues.mjs'
@@ -268,6 +268,22 @@ test('never passes an OpenGL flag the bundled Chrome rejects', async (t) => {
   const task = JSON.parse(await readFile(join(workspace.projectDir, 'task.json'), 'utf8'))
   assert.doesNotMatch(task.commands.still, /--gl/u)
   assert.match(task.commands.still, /--overwrite/u, 'still 命令的其余参数必须保留')
+
+  // Agent 命令模板也必须走 browserExecutableArgs() 这一个出口，不能漏掉导致 Remotion 静默联网下载
+  // chrome-headless-shell（本任务实测下载链路 + 287 字符路径超 MAX_PATH 的坑）。守卫必须有牙：
+  // 既要 flag 在，也要烤进去的路径真实存在——今天栽过「守卫有牙但咬的是空气」。
+  const beArg = /--browser-executable\s+"([^"]+)"/u
+  for (const [label, cmd] of [
+    ['package.json scripts.still', pkg.scripts.still],
+    ['package.json scripts.render', pkg.scripts.render],
+    ['task.json commands.still', task.commands.still],
+  ]) {
+    assert.match(cmd, beArg, `${label} 必须带 --browser-executable 参数`)
+    const m = cmd.match(beArg)
+    assert.ok(m && existsSync(m[1]), `${label} 烤进去的浏览器路径必须真实存在：${m && m[1]}`)
+  }
+  // task.commands.render 是委托入口（npm run render），本身不带 flag，但委托关系必须 intact。
+  assert.match(task.commands.render, /npm run render/u, 'render 命令应委托给 package.json 的 scripts.render，而非重复烤 flag')
 })
 
 test('Windows 上 Edge 候选必须排在 Chrome 之前（不依赖本机是否安装）', async (t) => {

@@ -315,14 +315,21 @@ function creativePlaceholderSource() {
   ].join('\n')
 }
 
-function agentPackageSource() {
+function agentPackageSource(beShell) {
+  // beShell 由调用方 prepareSpokenVideoAgentProject 算一次（来自 browserExecutableArgs() 这一个出口），
+  // 不再在模板里复制探测逻辑——否则又变成「同一套防护两处实现、迟早分叉」。
+  // browserExecutableArgs() 会 throw（无浏览器时）；它内部已经过 realpathSync + MAX_EXECUTABLE_PATH
+  // 长度校验，所以烤进去的路径是被校验过的真路径。这同时接住本任务那种 287 字符的 headless-shell
+  // 路径（超 Windows MAX_PATH 260），让它在准备阶段就被明确报错，而不是到 render 阶段让 Remotion
+  // spawn ENOENT（同 61df8c2 的 MAX_PATH 一类问题）。路径含空格（如 C:\Program Files\...），
+  // 所以烤进 shell 命令必须加引号。
   return {
     private: true,
     type: 'module',
     scripts: {
       check: 'node scripts/preflight.mjs',
-      still: 'remotion still src/index.ts SpokenVideo outputs/check.png --props public/task-props.json --overwrite',
-      render: 'remotion render src/index.ts SpokenVideo outputs/final_video.mp4 --props public/task-props.json --overwrite',
+      still: `remotion still src/index.ts SpokenVideo outputs/check.png --props public/task-props.json --overwrite ${beShell}`,
+      render: `remotion render src/index.ts SpokenVideo outputs/final_video.mp4 --props public/task-props.json --overwrite ${beShell}`,
     },
   }
 }
@@ -408,6 +415,10 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
     bgmFileName,
     bgmVolume: bgmFileName ? Math.max(0, Math.min(0.5, Number(bgmVolume ?? 0.12))) : null,
   }
+  // 浏览器固定参数只在准备阶段探测一次，喂给 package.json 模板与 task.commands.still 共用。
+  // browserExecutableArgs() 内部已做 realpathSync + MAX_EXECUTABLE_PATH 校验，返回的 beShell 是被校验过的真路径。
+  const beArg = browserExecutableArgs()
+  const beShell = `${beArg[0]} "${beArg[1]}"`
   const task = {
     schemaVersion: 1,
     videoTaskId: runId,
@@ -433,11 +444,14 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
       backgroundMusic: bgmFileName ? { file: `inputs/${bgmFileName}`, name: backgroundMusic?.name || bgmFileName, volume: props.bgmVolume } : null,
     },
     skillPaths: { remotionBestPractices: 'skills/remotion-best-practices/SKILL.md', contentVideo: 'skills/content-video/SKILL.md' },
-    commands: { check: 'node scripts/preflight.mjs', still: 'node_modules/.bin/remotion still src/index.ts SpokenVideo outputs/check.png --props public/task-props.json --overwrite', render: 'npm run render', output: 'outputs/final_video.mp4' },
+    // task.commands.still 与 package.json 的 scripts.still 共用同一套 beShell（上面已算好且只算一次），
+    // 确保 Agent 在 directing 阶段跑帧检查也走 browserExecutableArgs() 这个出口；render 则委托 npm run render，
+    // 不重复烤 flag（render 的 flag 只存在于 scripts.render 一处，符合「一处实现」）。
+    commands: { check: 'node scripts/preflight.mjs', still: `node_modules/.bin/remotion still src/index.ts SpokenVideo outputs/check.png --props public/task-props.json --overwrite ${beShell}`, render: 'npm run render', output: 'outputs/final_video.mp4' },
     visualBrief,
   }
   await Promise.all([
-    writeFile(join(projectDir, 'package.json'), json(agentPackageSource()), { encoding: 'utf8', mode: 0o600 }),
+    writeFile(join(projectDir, 'package.json'), json(agentPackageSource(beShell)), { encoding: 'utf8', mode: 0o600 }),
     writeFile(join(projectDir, 'tsconfig.json'), json({ compilerOptions: { target: 'ES2020', module: 'ESNext', moduleResolution: 'Node', strict: true, skipLibCheck: true, jsx: 'react-jsx', noEmit: true }, include: ['src'] }), { encoding: 'utf8', mode: 0o600 }),
     writeFile(join(srcDir, 'index.ts'), entry, { encoding: 'utf8', mode: 0o600 }),
     writeFile(join(srcDir, 'Root.tsx'), root, { encoding: 'utf8', mode: 0o600 }),
