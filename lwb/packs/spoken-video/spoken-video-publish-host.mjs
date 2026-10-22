@@ -43,6 +43,14 @@ const MAX_ASSET_BYTES = 80 * 1024 * 1024
 const execFileAsync = promisify(execFile)
 
 function fail(code, message) { throw new SpokenVideoPublishError(code, message) }
+// 成片放行判定：质检通过 或 用户已人工放行。两处字段名（qc.data.passed /
+// qc.data.userOverride）来自已提交的 M0+B1（store.mjs@5855c03）；旧数据无
+// userOverride 字段时等价于 false，行为不变。五处（A1-A4 + 发布记录）统一走这里，
+// 避免各写各的漏判导致人工放行的片子在发布侧被静默挡掉。
+function qcReleased(detail) {
+  const qc = detail.artifacts?.qc
+  return qc?.data?.passed === true || qc?.data?.userOverride === true
+}
 function object(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('SPOKEN_VIDEO_PUBLISH_INVALID_INPUT', `${label}必须是对象。`)
   return value
@@ -297,16 +305,21 @@ export class SpokenVideoPublishHost {
     for (const project of eligible) {
       const task = latest.get(project.id) || null
       const detail = await this.projectsStore.get(agent, { projectId: project.id })
-      // Decision C: the shelf only shows QC-passed final cuts; failed or
-      // missing QC keeps the project on the video workbench instead.
-      if (detail.artifacts?.qc?.data?.passed !== true) continue
+      // Decision C: the shelf shows final cuts that are QC-passed OR manually
+      // released (user override). Failed QC without override stays on the video
+      // workbench instead.
+      const released = qcReleased(detail)
+      if (!released) continue
+      const qcPassed = detail.artifacts?.qc?.data?.passed === true
       items.push({
         ...project,
         task: task ? taskSummary(task) : null,
         packaging: detail.artifacts?.packaging?.data || null,
         video: detail.artifacts?.video?.data?.video || null,
         orientation: detail.artifacts?.video?.data?.orientation || null,
-        qcPassed: true,
+        qcPassed: released, // 准入语义：能不能发布（放行片也得能发布）
+        qcVerified: qcPassed, // 是否真的质检通过（放行片为 false）
+        qcUserOverride: !qcPassed && released, // 是否人工放行（留给 C1/C2 做标记用）
       })
     }
     return { items: items.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))), total: items.length }
@@ -318,7 +331,7 @@ export class SpokenVideoPublishHost {
     const expectedRevision = revision(input.expectedRevision)
     const detail = await this.projectsStore.get(agent, { projectId: id })
     if (detail.revision !== expectedRevision) fail('SPOKEN_VIDEO_REVISION_CONFLICT', '项目已更新，请刷新后重试。')
-    if (detail.artifacts?.qc?.data?.passed !== true) fail('SPOKEN_VIDEO_STAGE_BLOCKED', '只有质检通过的成片才能加入发布工作队列。')
+    if (!qcReleased(detail)) fail('SPOKEN_VIDEO_STAGE_BLOCKED', '只有质检通过或已人工放行的成片才能加入发布工作队列。')
     const root = await publishRootFor(agent)
     const settings = await this.status()
     // 只要文案标签、不生成封面。封面要跑两次生图（各几十秒），而 16G 卡上封面生图与
@@ -328,7 +341,14 @@ export class SpokenVideoPublishHost {
     const task = {
       id: randomUUID(), projectId: id, projectTitle: detail.title, account: detail.account || null,
       status: 'queued', phase: 'agent', error: null, expectedRevision, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null,
-      sourceSnapshot: { script: detail.artifacts?.script?.data, topic: detail.artifacts?.topic?.data, video: detail.artifacts?.video?.data },
+      sourceSnapshot: {
+        script: detail.artifacts?.script?.data, topic: detail.artifacts?.topic?.data, video: detail.artifacts?.video?.data,
+        qc: {
+          passed: detail.artifacts?.qc?.data?.passed === true,
+          userOverride: detail.artifacts?.qc?.data?.userOverride === true,
+          overrideAt: detail.artifacts?.qc?.data?.overrideAt || null,
+        },
+      },
       // 自定义渠道的地址/协议要随任务一起冻结：用户中途改了配置，不该让已在跑的
       // 这一轮中途换服务。冻结的是**生效中**的那份（保存值优先、否则用预设默认值）
       // ——status().custom 若只回 settings.customImage，从没保存过配置的用户会
@@ -359,7 +379,10 @@ export class SpokenVideoPublishHost {
     const id = projectId(input.projectId)
     const detail = await this.projectsStore.get(agent, { projectId: id })
     if (detail.artifacts?.packaging) return { skipped: 'already-packaged' }
-    if (detail.artifacts?.qc?.data?.passed !== true) return { skipped: 'qc-not-passed' }
+    if (!qcReleased(detail)) {
+      console.warn(`[spoken-video] autoStartPackaging 跳过项目 ${id}：质检未通过且未人工放行。`)
+      return { skipped: 'qc-not-passed' }
+    }
     // 版本号是提交的前提；拿不到就等下一轮，不在这里跟人抢项目。
     if (!Number.isSafeInteger(detail.revision) || detail.revision < 1) return { skipped: 'no-revision' }
     const root = await publishRootFor(agent)
@@ -774,7 +797,7 @@ export class SpokenVideoPublishHost {
     if (settings.configured !== true) fail('SPOKEN_VIDEO_PUBLISH_CONNECTION_UNAVAILABLE', '请先在「封面生图」里保存当前渠道的 API Key。')
     const detail = await this.projectsStore.get(agent, { projectId: id })
     if (detail.revision !== expectedRevision) fail('SPOKEN_VIDEO_REVISION_CONFLICT', '项目已更新，请刷新后重试。')
-    if (detail.artifacts?.qc?.data?.passed !== true) fail('SPOKEN_VIDEO_STAGE_BLOCKED', '只有质检通过的成片才能生成封面。')
+    if (!qcReleased(detail)) fail('SPOKEN_VIDEO_STAGE_BLOCKED', '只有质检通过或已人工放行的成片才能生成封面。')
     if (!detail.artifacts?.packaging?.data) fail('SPOKEN_VIDEO_STAGE_BLOCKED', '请先生成发布信息，再单独重生封面。')
     const root = await publishRootFor(agent)
     const task = {

@@ -1288,3 +1288,151 @@ test('自定义生图：没保存过地址也判为可用，并回传生效中�
   assert.equal(saved.configured, true)
   assert.ok(settings.get().customImage?.baseUrl, '保存时应把默认地址一并落盘，下次冻结才有地址可用')
 })
+
+// 把项目推到「视频已完成、质检未通过」状态，可选是否人工放行。
+// qc 的 passed=false 且带一条 issues（主画面变化不足）；userOverride 走 M0 落进 data。
+async function projectAtFailedQc(currentAgent, store, { title = '人工放行闸门', userOverride = false, suffix = 'base' } = {}) {
+  let project = await store.create(currentAgent, { title })
+  project = (await store.commit(currentAgent, { projectId: project.id, expectedRevision: project.revision, stage: 'signals', payload: { source: 'manual', text: '用户要求放行极简静态片。' }, idempotencyKey: `qc-failed-${suffix}-signals-0001` })).project
+  project = (await store.commit(currentAgent, { projectId: project.id, expectedRevision: project.revision, stage: 'topic', payload: { title, angle: '放行' }, idempotencyKey: `qc-failed-${suffix}-topic-0001` })).project
+  project = (await store.commit(currentAgent, { projectId: project.id, expectedRevision: project.revision, stage: 'script', payload: { body: '静态海报风格，内容稀疏。' }, idempotencyKey: `qc-failed-${suffix}-script-0001` })).project
+  project = await store.approveScript(currentAgent, { projectId: project.id })
+  project = (await store.commitProduced(currentAgent, {
+    projectId: project.id, expectedRevision: project.revision, stage: 'voiceover', idempotencyKey: `qc-failed-${suffix}-voice-0001`, source: 'spoken-video/tts',
+    payload: { mode: 'tts', provider: 'test', settings: { rate: 1, volume: 1, pitch: 0 }, audio: { file: 'media/voiceovers/publish.wav', mediaType: 'audio/wav', bytes: 4, durationSeconds: 1 } },
+  })).project
+  project = (await store.commitProduced(currentAgent, {
+    projectId: project.id, expectedRevision: project.revision, stage: 'subtitles', idempotencyKey: `qc-failed-${suffix}-subtitles-0001`, source: 'spoken-video/asr',
+    payload: { mode: 'asr', sourceAudioFile: 'media/voiceovers/publish.wav', srtFile: 'media/subtitles/publish.srt', srt: '1\n00:00:00,000 --> 00:00:01,000\n放行。' },
+  })).project
+  project = (await store.commitProduced(currentAgent, {
+    projectId: project.id, expectedRevision: project.revision, stage: 'video', idempotencyKey: `qc-failed-${suffix}-video-0001`, source: 'spoken-video/local-ffmpeg',
+    payload: { mode: 'local-ffmpeg', renderer: 'local-ffmpeg', visualBrief: '竖屏标题卡。', sourceAudioFile: 'media/voiceovers/publish.wav', sourceSubtitleFile: 'media/subtitles/publish.srt', video: { file: 'media/videos/publish.mp4', mediaType: 'video/mp4', bytes: 1024, durationSeconds: 1, width: 1080, height: 1920, fps: 30, hasAudio: true } },
+  })).project
+  return (await store.commitProduced(currentAgent, {
+    projectId: project.id, expectedRevision: project.revision, stage: 'qc', idempotencyKey: `qc-failed-${suffix}-qc-0001`, source: 'spoken-video/ffprobe',
+    payload: { mode: 'automatic', reportFile: 'media/qc/publish.json', passed: false, technical: { passed: false, issues: ['主画面变化不足：12 个采样帧中只有 1 种画面。'], warnings: [], video: {}, audio: {}, subtitles: { cueCount: 1 } }, ...(userOverride ? { userOverride: true } : {}) },
+  })).project
+}
+
+// 旧数据：qc 失败、且没有 userOverride 字段（模拟 M0 落地前的存量项目）。
+async function projectAtFailedQcLegacy(currentAgent, store, { title = '旧数据不放行', suffix = 'legacy' } = {}) {
+  const project = await projectAtFailedQc(currentAgent, store, { title, suffix })
+  // 直接抹掉 qc.data.userOverride，复刻"老项目没有这个字段"的状态。
+  const detail = await store.get(currentAgent, { projectId: project.id })
+  const root = join(currentAgent.session.header.cwd, 'data', 'projects', project.id)
+  const qcPointer = detail.artifacts.qc
+  const qcArtifact = JSON.parse(await readFile(join(root, qcPointer.file), 'utf8'))
+  delete qcArtifact.data.userOverride
+  await writeFile(join(root, qcPointer.file), JSON.stringify(qcArtifact))
+  return project
+}
+
+// 1) A1 列表级断言：人工放行的成片必须出现在货架，且标记正确——不能只断言"不抛错"。
+test('released-by-override cut appears on the publish shelf with correct flags', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const released = await projectAtFailedQc(currentAgent, store, { title: 'A1-放行片', userOverride: true, suffix: 'a1' })
+
+  const host = publishHost({ store })
+  const shelf = await host.listItems(currentAgent, {})
+  assert.ok(shelf.items.some((item) => item.id === released.id), '人工放行的成片必须出现在发布页货架，不能静默消失')
+  const it = shelf.items.find((item) => item.id === released.id)
+  assert.equal(it.qcPassed, true, '放行片必须能发布（准入语义）')
+  assert.equal(it.qcVerified, false, '但它不是质检通过')
+  assert.equal(it.qcUserOverride, true, '是人工放行')
+})
+
+// 2) A2 门禁：未放行 → startPackaging 拦；已放行 → 入队成功。
+test('startPackaging gate allows override-released cut but blocks unreleased', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const blocked = await projectAtFailedQc(currentAgent, store, { title: 'A2-不放行', suffix: 'a2b' })
+  const released = await projectAtFailedQc(currentAgent, store, { title: 'A2-放行', userOverride: true, suffix: 'a2r' })
+
+  const host = publishHost({ store, executor: async () => packagingResult() })
+  await assert.rejects(host.startPackaging(currentAgent, { projectId: blocked.id, expectedRevision: blocked.revision }), /只有质检通过或已人工放行/u, '不放行的失败qc进不去发布队列')
+  const started = await host.startPackaging(currentAgent, { projectId: released.id, expectedRevision: released.revision })
+  assert.ok(started.id, '人工放行的失败qc能加入发布队列')
+  // 等后台跑完再结束，避免 teardown 删临时目录时文件句柄还在（EBUSY）。
+  await waitForTask(host, currentAgent, started.id)
+})
+
+// 3) A3 返回值断言 + 日志：未放行 → 静默 skipped；已放行 → 真正 started。
+test('autoStartPackaging starts override-released cut and still skips unreleased', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const blocked = await projectAtFailedQc(currentAgent, store, { title: 'A3-不放行', suffix: 'a3b' })
+  const released = await projectAtFailedQc(currentAgent, store, { title: 'A3-放行', userOverride: true, suffix: 'a3r' })
+
+  let executorCalls = 0
+  const host = publishHost({ store, executor: async () => { executorCalls += 1; return packagingResult() } })
+  const skipped = await host.autoStartPackaging(currentAgent, { projectId: blocked.id })
+  assert.equal(skipped.skipped, 'qc-not-passed', '不放行的失败qc仍被静默跳过')
+  assert.notEqual(skipped.skipped, undefined)
+  const started = await host.autoStartPackaging(currentAgent, { projectId: released.id })
+  assert.notEqual(started.skipped, 'qc-not-passed', '放行后不得再静默跳过')
+  assert.ok(started.started, '人工放行的失败qc会被自动补发布资料')
+  // executor 在后台异步跑，要等任务完成再数调用次数。
+  await waitForTask(host, currentAgent, started.started)
+  assert.equal(executorCalls, 1)
+})
+
+// 4) A4 门禁：未放行 → regenerateCover 拦；已放行 → 任务入队成功。
+test('regenerateCover gate allows override-released cut but blocks unreleased', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const blocked = await projectAtFailedQc(currentAgent, store, { title: 'A4-不放行', suffix: 'a4b' })
+  const released = await projectAtFailedQc(currentAgent, store, { title: 'A4-放行', userOverride: true, suffix: 'a4r' })
+
+  const host = publishHost({ store, executor: async () => packagingResult(), credentials: credentialStore({ DASHSCOPE_API_KEY: 'sk-test' }), settings: connectionSettings({ enabled: true, provider: 'bailian', model: 'wan2.7-image' }) })
+  await assert.rejects(host.regenerateCover(currentAgent, { projectId: blocked.id, expectedRevision: blocked.revision, kind: 'landscape', prompt: '封面' }), /只有质检通过或已人工放行/u, '不放行的失败qc不能生成封面')
+  // 重生封面门禁（:800）放行后，:801 还要求成片已有 packaging 才能单独重生封面。
+  // 先给放行片补一份发布信息，再验证它能重生封面（否则会卡在「请先生成发布信息」）。
+  const pk = await host.startPackaging(currentAgent, { projectId: released.id, expectedRevision: released.revision })
+  await waitForTask(host, currentAgent, pk.id)
+  // startPackaging 提交后会推进项目版本号，regenerateCover 要拿最新 revision。
+  const fresh = await store.get(currentAgent, { projectId: released.id })
+  const coverTask = await host.regenerateCover(currentAgent, { projectId: released.id, expectedRevision: fresh.revision, kind: 'landscape', prompt: '封面' })
+  assert.ok(coverTask.id, '人工放行的失败qc能生成封面')
+  await waitForTask(host, currentAgent, coverTask.id)
+})
+
+// 5) 旧数据不变：qc.userOverride 缺失（模拟存量项目）时，A1/A2/A3/A4 行为与改前一致。
+test('legacy failed-qc without userOverride field keeps old publish-side behavior', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const legacy = await projectAtFailedQcLegacy(currentAgent, store, { title: '旧数据-不放行', suffix: 'legacy' })
+
+  const host = publishHost({ store, executor: async () => packagingResult(), credentials: credentialStore({ DASHSCOPE_API_KEY: 'sk-test' }), settings: connectionSettings({ enabled: true, provider: 'bailian', model: 'wan2.7-image' }) })
+  const shelf = await host.listItems(currentAgent, {})
+  assert.ok(!shelf.items.some((item) => item.id === legacy.id), '旧失败qc不在货架（与改前一致）')
+  await assert.rejects(host.startPackaging(currentAgent, { projectId: legacy.id, expectedRevision: legacy.revision }), /只有质检通过或已人工放行/u)
+  assert.equal((await host.autoStartPackaging(currentAgent, { projectId: legacy.id })).skipped, 'qc-not-passed')
+  await assert.rejects(host.regenerateCover(currentAgent, { projectId: legacy.id, expectedRevision: legacy.revision, kind: 'landscape', prompt: '封面' }), /只有质检通过或已人工放行/u)
+})
+
+// 6) 发布记录可查：startPackaging 的 sourceSnapshot.qc 冻结 passed/userOverride/overrideAt。
+test('startPackaging freezes qc override in sourceSnapshot for audit', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const released = await projectAtFailedQc(currentAgent, store, { title: '快照-放行', userOverride: true, suffix: 'snap' })
+
+  const host = publishHost({ store, executor: async () => packagingResult() })
+  const started = await host.startPackaging(currentAgent, { projectId: released.id, expectedRevision: released.revision })
+  await waitForTask(host, currentAgent, started.id)
+  // taskSummary 不含 sourceSnapshot，直接读发布任务文件核对冻结内容。
+  // 任务文件落在 data/publish-tasks.json（publishRootFor 返回 data，TASKS_FILE 是 publish-tasks.json）。
+  const root = join(currentAgent.session.header.cwd, 'data')
+  const data = JSON.parse(await readFile(join(root, 'publish-tasks.json'), 'utf8'))
+  const task = data.tasks.find((item) => item.projectId === released.id)
+  assert.equal(task.sourceSnapshot.qc.passed, false, '快照记录质检没过')
+  assert.equal(task.sourceSnapshot.qc.userOverride, true, '快照记录人工放行')
+  assert.ok(task.sourceSnapshot.qc.overrideAt, '快照记录放行时间')
+})
