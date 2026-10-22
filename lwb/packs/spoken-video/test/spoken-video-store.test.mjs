@@ -400,3 +400,96 @@ test('pipelineOverview reports every project stage and its next page, aligned wi
   assert.equal(stageOf('待配音项目').stages.script, true)
   assert.equal(stageOf('可发布项目').stages.qc, true)
 })
+
+// 造出「已完成 video、尚未 qc」的项目，供下面 userOverride 测试复用。
+async function projectThroughVideo(store, currentAgent, title = '极简静态片') {
+  let project = await store.create(currentAgent, { title })
+  for (const [stage, payload] of [
+    ['signals', { source: 'manual', text: 'x' }],
+    ['topic', { title }],
+    ['script', { body: '静态海报风格。' }],
+    ['voiceover', { notes: 'n' }],
+    ['subtitles', { srt: '1\n00:00:00,000 --> 00:00:02,000\n标题。' }],
+  ]) {
+    project = (await store.commit(currentAgent, request(project, stage, payload))).project
+    if (stage === 'script') project = await store.approveScript(currentAgent, { projectId: project.id })
+  }
+  project = (await store.commitProduced(currentAgent, {
+    projectId: project.id, expectedRevision: project.revision, stage: 'video',
+    idempotencyKey: 'm0-video', source: 'spoken-video/local-ffmpeg',
+    payload: { mode: 'local-ffmpeg', renderer: 'local-ffmpeg', visualBrief: 'v', sourceAudioFile: 'media/voiceovers/video.wav', sourceSubtitleFile: 'media/subtitles/video.srt',
+      video: { file: 'media/videos/video.mp4', mediaType: 'video/mp4', bytes: 4096, durationSeconds: 30, width: 1920, height: 1080, fps: 30, hasAudio: true } },
+  })).project
+  return project
+}
+
+// 失败 QC 的 payload 模板：passed=false 且带一条 issues（主画面变化不足）。
+function failingQcPayload(overrides = {}) {
+  return {
+    mode: 'automatic', reportFile: 'media/qc/v.json', passed: false,
+    technical: { passed: false, issues: ['主画面变化不足：12 个采样帧中只有 1 种画面。'], warnings: [], video: {}, audio: {}, subtitles: { cueCount: 1 } },
+    ...overrides,
+  }
+}
+
+test('qc commit stores userOverride while keeping passed=false', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  let project = await projectThroughVideo(store, currentAgent)
+  // 用原始 commit 响应里的 artifactPointer 断言：它不得伪装成「通过」
+  const qcCommit = await store.commitProduced(currentAgent, {
+    projectId: project.id, expectedRevision: project.revision, stage: 'qc', idempotencyKey: 'm0-qc-release-01', source: 'spoken-video/ffprobe',
+    payload: failingQcPayload({ userOverride: true }),
+  })
+  assert.equal(qcCommit.artifact.passed, undefined, 'artifactPointer 不得带 passed:true')
+  const detail = await store.get(currentAgent, { projectId: project.id })
+  assert.equal(detail.artifacts.qc.data.passed, false, '判据没过的事实不被改写')
+  assert.equal(detail.artifacts.qc.data.userOverride, true, '人工放行标记已落盘')
+  assert.ok(detail.artifacts.qc.data.overrideAt, 'overrideAt 已记录')
+  assert.equal(detail.artifacts.qc.data.overrideBy, 'spoken-video/ffprobe', 'overrideBy 记录提交来源')
+})
+
+test('qc commit rejects userOverride when there are no issues', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  let project = await projectThroughVideo(store, currentAgent)
+  await assert.rejects(
+    store.commitProduced(currentAgent, {
+      projectId: project.id, expectedRevision: project.revision, stage: 'qc', idempotencyKey: 'm0-qc-noissues-01', source: 'spoken-video/ffprobe',
+      payload: { mode: 'automatic', reportFile: 'media/qc/v.json', passed: true, technical: { passed: true, issues: [], warnings: [], video: {}, audio: {}, subtitles: { cueCount: 1 } }, userOverride: true },
+    }),
+    /没有质检问题，不需要人工放行。/u,
+  )
+})
+
+test('packaging gate: blocked without release, allowed with userOverride (two-project)', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+
+  // 项目 A：失败 QC，不放行 → 打包被挡
+  let a = await projectThroughVideo(store, currentAgent, '极简静态片-A')
+  a = (await store.commitProduced(currentAgent, {
+    projectId: a.id, expectedRevision: a.revision, stage: 'qc', idempotencyKey: 'm0-qc-projecta-01', source: 'spoken-video/ffprobe',
+    payload: failingQcPayload(),
+  })).project
+  await assert.rejects(
+    store.commitProduced(currentAgent, {
+      projectId: a.id, expectedRevision: a.revision, stage: 'packaging', idempotencyKey: 'm0-pkg-projecta-01', source: 'spoken-video/publish-agent', payload: packagingPayload(),
+    }),
+    /质检未通过且未人工放行/u,
+  )
+
+  // 项目 B：失败 QC，但人工放行 → 打包放行
+  let b = await projectThroughVideo(store, currentAgent, '极简静态片-B')
+  b = (await store.commitProduced(currentAgent, {
+    projectId: b.id, expectedRevision: b.revision, stage: 'qc', idempotencyKey: 'm0-qc-projectb-01', source: 'spoken-video/ffprobe',
+    payload: failingQcPayload({ userOverride: true }),
+  })).project
+  const after = (await store.commitProduced(currentAgent, {
+    projectId: b.id, expectedRevision: b.revision, stage: 'packaging', idempotencyKey: 'm0-pkg-projectb-01', source: 'spoken-video/publish-agent', payload: packagingPayload(),
+  })).project
+  assert.equal(after.stage, 'packaging', '人工放行后打包准入放行')
+})

@@ -182,6 +182,7 @@ function pointer(value, label) {
     file,
     createdAt: text(input.createdAt, `${label}.createdAt`, 64),
     ...(input.passed === true ? { passed: true } : {}),
+    ...(input.userOverride === true ? { userOverride: true } : {}),
   }
 }
 
@@ -503,7 +504,7 @@ function normalizeAudioTagList(value) {
   })
 }
 
-function producedStageData(stage, payload) {
+function producedStageData(stage, payload, source) {
   const input = object(payload, '自动阶段内容')
   if (stage === 'voiceover') {
     const audio = object(input.audio, '自动配音')
@@ -621,11 +622,18 @@ function producedStageData(stage, payload) {
     const passed = input.passed === true
     const issues = messages(technical.issues, '技术质检问题', 40)
     const warnings = messages(technical.warnings, '技术质检警告', 40)
+    const userOverride = input.userOverride === true
     if ((technical.passed === true) !== passed) {
       throw failure('SPOKEN_VIDEO_QC_FAILED', '技术质检结论与通过状态不一致。')
     }
     if (passed && issues.length) {
       throw failure('SPOKEN_VIDEO_QC_FAILED', '存在技术质检问题时不能标记为通过。')
+    }
+    // 人工放行只在「确有质检问题」时允许；没有 issues 就是无病放行，拒绝。
+    // assessed===false（片长<4秒）时 passed 恒 true、不会产生 issues，天然被这一条挡住，
+    // 不需要额外判断——但依赖关系写在这里，免得下一个人看不出。
+    if (userOverride && !issues.length) {
+      throw failure('SPOKEN_VIDEO_QC_FAILED', '没有质检问题，不需要人工放行。')
     }
     const mode = text(input.mode, '质检模式', 40)
     const review = input.review === undefined || input.review === null ? null : videoReview(input.review)
@@ -637,6 +645,8 @@ function producedStageData(stage, payload) {
       mode, reportFile: mediaFile(input.reportFile, '技术质检报告文件', 'qc'),
       ...(input.reviewFile ? { reviewFile: mediaFile(input.reviewFile, '独立审片报告文件', 'qc') } : {}),
       passed,
+      userOverride,
+      ...(userOverride ? { overrideAt: new Date().toISOString(), overrideBy: (source || 'user') } : {}),
       technical: {
         passed: technical.passed === true, issues, warnings,
         video: object(technical.video, '技术质检视频信息'), audio: object(technical.audio, '技术质检音频信息'),
@@ -665,8 +675,9 @@ function satisfied(project, stage) {
   for (const required of REQUIRED_POINTERS[stage]) {
     if (!project.artifacts[required]) throw failure('SPOKEN_VIDEO_STAGE_BLOCKED', `当前阶段需要先完成「${required}」。`)
   }
-  if (stage === 'packaging' && !(project.artifacts.qc?.passed === true)) {
-    throw failure('SPOKEN_VIDEO_STAGE_BLOCKED', '质检未通过，不能生成发布资料。')
+  const qcReleased = project.artifacts.qc?.passed === true || project.artifacts.qc?.userOverride === true
+  if (stage === 'packaging' && !qcReleased) {
+    throw failure('SPOKEN_VIDEO_STAGE_BLOCKED', '质检未通过且未人工放行，不能生成发布资料。')
   }
 }
 
@@ -931,7 +942,7 @@ export class SpokenVideoProjectStore {
       if (prior) return prior.result
       if (project.revision !== expected) throw failure('SPOKEN_VIDEO_REVISION_CONFLICT', '项目已被其他操作更新，请刷新后重试。')
       satisfied(project, stage)
-      const data = producedStageData(stage, input.payload)
+      const data = producedStageData(stage, input.payload, source)
       invalidateDownstream(project, stage)
       const revision = project.revision + 1
       const artifactId = randomUUID()
@@ -939,7 +950,7 @@ export class SpokenVideoProjectStore {
       const file = `artifacts/${revision}-${stage}-${artifactId}.json`
       const artifact = { schemaVersion: PROJECT_SCHEMA_VERSION, id: artifactId, projectId: project.id, stage, revision, createdAt, source, data }
       await writeJson(join(root, file), artifact)
-      const artifactPointer = { id: artifactId, stage, revision, file, createdAt, ...(data.passed === true ? { passed: true } : {}) }
+      const artifactPointer = { id: artifactId, stage, revision, file, createdAt, ...(data.passed === true ? { passed: true } : {}), ...(data.userOverride === true ? { userOverride: true } : {}) }
       project.artifacts[stage] = artifactPointer
       project.revision = revision
       project.stage = stage
