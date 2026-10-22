@@ -85,9 +85,13 @@ const HISTORICAL = [
     message: '成片未通过技术质检：主画面变化不足，成片可能退化为静态画面或少量文字卡片。',
     category: 'content.qc_failed',
     retryable: false,
-    // 断言盯「行为」而非某个固定词汇：分类正确、且给出了能让人执行的下一步
-    // （画面变化不足的事实 / 极简风格可直接采用 / 反馈问题），而不是逼用户重跑。
-    mustMention: /画面变化不足|反馈问题|程序问题|极简|采用/u,
+    // 断言盯「行为」而非某个固定词汇：分类正确、且给出了能让人执行的下一步。
+    // 2026-10-22 修复：真空白（QC 抽帧全单色）属于渲染浏览器画不出画面，必须
+    // 同时保住两条出口——(1) 极简/纯字幕风格的合法用法可直接采用，(2) 非极简时
+    // 给出换 Edge / 设 LWB_REMOTION_BROWSER_EXECUTABLE 的可执行动作。两者缺一不可，
+    // 所以分别断言，任一项脱落都算没达标（守卫要有牙且咬对地方）。
+    mustMention: /画面变化不足|程序问题/u,
+    mustMentionAll: [/极简/u, /Edge|LWB_REMOTION_BROWSER_EXECUTABLE/u],
   },
   {
     name: '渲染管线画不出画面（探测帧只有一种颜色）',
@@ -132,6 +136,11 @@ for (const testCase of HISTORICAL) {
     assert.equal(failure.category, testCase.category)
     assert.equal(failure.retryable, testCase.retryable)
     assert.match(failure.remedy, testCase.mustMention, '修法必须说清下一步做什么')
+    // mustMentionAll：每条都要命中（AND），用来把「多个出口缺一不可」钉死——
+    // 例如 content.qc_failed 必须同时保住极简风格出口和换 Edge 指引，任一项脱落都红。
+    for (const pattern of testCase.mustMentionAll || []) {
+      assert.match(failure.remedy, pattern, `修法必须包含：${pattern}`)
+    }
     assert.ok(CATEGORY_LABEL[failure.category], '每个分类都要有中文标签供界面展示')
   })
 }

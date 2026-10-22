@@ -102,7 +102,7 @@ const RULES = [
     category: 'content.qc_failed',
     test: /(未通过技术质检|未通过质检|主画面变化不足|审片未通过|qc\s*failed|退化为静态)/iu,
     retryable: false,
-    remedy: '成片已经渲染出来了，但画面几乎全程没有变化。如果你要的就是极简/纯字幕风格，可以直接采用这条成片，不用重跑；如果不是，说明渲染环节没有把画面元素画出来，属于程序问题——重跑解决不了，请点「反馈问题」并附上这条任务编号。',
+    remedy: '成片已经渲染出来了，但画面几乎全程没有变化。如果你要的就是极简/纯字幕风格，可以直接采用这条成片，不用重跑；如果不是，说明渲染环节没有把画面元素画出来，属于程序问题——重跑解决不了。这通常是因为渲染所用的浏览器无法在当前环境画出画面：请改用 Microsoft Edge，或设置环境变量 LWB_REMOTION_BROWSER_EXECUTABLE 指向 chrome-headless-shell / Edge 的可执行文件后重跑；也可点「反馈问题」并附上这条任务编号。',
     remedyTarget: null,
   },
   {

@@ -90,12 +90,6 @@ if exist "%~dp0ä¯ÀÀÆ÷\chrome-headless-shell-win64\chrome-headless-shell.exe" (
     rem app probe LOCALAPPDATA / Program Files / Edge itself.
     set "LWB_REMOTION_BROWSER_EXECUTABLE="
 )
-rem Only pre-set a browser path when one actually exists on this machine.
-if not defined LWB_REMOTION_HEADLESS_SHELL if not defined LWB_REMOTION_BROWSER_EXECUTABLE (
-    if exist "%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe" set "LWB_REMOTION_BROWSER_EXECUTABLE=%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
-)
-if not defined LWB_REMOTION_HEADLESS_SHELL if not defined LWB_REMOTION_BROWSER_EXECUTABLE (
-    if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" set "LWB_REMOTION_BROWSER_EXECUTABLE=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
 )
 rem Let the launcher pick the scratch drive itself when it has not been told.
 set "LWB_SCRATCH_ROOT=%LWB_SCRATCH_ROOT%"
