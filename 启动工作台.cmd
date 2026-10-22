@@ -82,9 +82,21 @@ if exist "%~dp0ä¯ÀÀÆ÷\chrome-headless-shell-win64\chrome-headless-shell.exe" (
     set "LWB_REMOTION_HEADLESS_SHELL=%~dp0ä¯ÀÀÆ÷\chrome-headless-shell-win64\chrome-headless-shell.exe"
 ) else (
     rem No bundled shell: fall back to a locally installed Chrome/Chromium.
-    set "LWB_REMOTION_BROWSER_EXECUTABLE=C:\Program Files\Google\Chrome\Application\chrome.exe"
+    rem Do NOT hardcode a chrome path here: Chrome is often installed per-user
+    rem (%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe), which does not
+    rem match the machine-wide Program Files path. A wrong path here is fatal:
+    rem Remotion rejects a non-existent --browser-executable instead of falling
+    rem back (see remotion ensure-browser.js). Leaving the variable unset lets the
+    rem app probe LOCALAPPDATA / Program Files / Edge itself.
+    set "LWB_REMOTION_BROWSER_EXECUTABLE="
 )
-if not defined LWB_REMOTION_HEADLESS_SHELL set "LWB_REMOTION_BROWSER_EXECUTABLE=C:\Program Files\Google\Chrome\Application\chrome.exe"
+rem Only pre-set a browser path when one actually exists on this machine.
+if not defined LWB_REMOTION_HEADLESS_SHELL if not defined LWB_REMOTION_BROWSER_EXECUTABLE (
+    if exist "%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe" set "LWB_REMOTION_BROWSER_EXECUTABLE=%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
+)
+if not defined LWB_REMOTION_HEADLESS_SHELL if not defined LWB_REMOTION_BROWSER_EXECUTABLE (
+    if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" set "LWB_REMOTION_BROWSER_EXECUTABLE=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
+)
 rem Let the launcher pick the scratch drive itself when it has not been told.
 set "LWB_SCRATCH_ROOT=%LWB_SCRATCH_ROOT%"
 set "LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL=http://127.0.0.1:8199"
