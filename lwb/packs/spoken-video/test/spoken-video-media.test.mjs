@@ -9,7 +9,7 @@ import test from 'node:test'
 import { WebSocketServer } from 'ws'
 import { buildTechnicalReport, DEFAULT_VIDEO_VISUAL_BRIEF, DEFAULT_VOICE_PROFILE, mediaServiceConfig, normalizeProbe, normalizeRenderRequest, normalizeVoiceoverRequest, subtitleResult } from '../spoken-video-media.mjs'
 import { SpokenVideoProjectStore, SpokenVideoStoreError } from '../spoken-video-store.mjs'
-import { SpokenVideoMediaHost, parseRemotionRenderProgress, parseSceneSpans, reviewTimestamps, REVIEW_FRAME_LIMIT, REVIEW_FRAME_HARD_LIMIT, REVIEW_MAX_GAP_SECONDS } from '../spoken-video-media-host.mjs'
+import { SpokenVideoMediaHost, parseRemotionRenderProgress, parseSceneSpans, reviewTimestamps, REVIEW_FRAME_LIMIT, REVIEW_FRAME_HARD_LIMIT, REVIEW_MAX_GAP_SECONDS, analyzeFrameContent } from '../spoken-video-media-host.mjs'
 import { remotionEncodingSettings, remotionRendererAvailable } from '../spoken-video-remotion.mjs'
 import { buildLineArtPlanPrompt, composeLineArtPrompt, LINE_ART_PLAN_SCHEMA, lineArtSeed, normalizeLineArtPlan } from '../spoken-video-whiteboard-art.mjs'
 
@@ -1310,6 +1310,56 @@ test('builds the deterministic technical release gate from ffprobe data', () => 
   assert.equal(noCaptions.subtitles.enabled, false)
 })
 
+// 画面内容检测的纯函数：分数制（不是零容忍）——单帧空白可能是留白/转场/分隔卡，
+// 只有「大部分帧都空白」才是真故障（Chrome 153 × Remotion 4.0.522 出的无效成片就是每帧空白）。
+// 阈值签名来自实测：Chrome 无效成片 distinctColors=1，全透明 still transparent=1.0；
+// Edge 正常成片 distinctColors=5446、alpha 全 255。
+test('QC frame-content gate uses a ratio, not zero-tolerance', () => {
+  const frames = (count, blank) => Array.from({ length: count }, (_, index) => (
+    index < blank
+      ? { distinctColors: 1, transparentFraction: 0 }
+      : { distinctColors: 300, transparentFraction: 0 }
+  ))
+  // 留白片：8 帧里 3 张纯色（片头/片尾/转场），合法片子必须放行。
+  assert.equal(analyzeFrameContent(frames(8, 3)).passed, true, '3/8 空白要放行（留白/转场）')
+  assert.equal(analyzeFrameContent(frames(8, 3)).blankFrameCount, 3)
+  // 真故障临界：ratio < 0.5 才放行（「超过一半」才判死），恰好一半不放行。
+  assert.equal(analyzeFrameContent(frames(8, 4)).passed, false, '4/8 空白（恰好 0.5）要判死')
+  assert.equal(analyzeFrameContent(frames(8, 5)).passed, false, '5/8 空白要判死')
+  // 真故障：全部空白（命中 Chrome 无效成片签名）。
+  assert.equal(analyzeFrameContent(frames(8, 8)).passed, false, '8/8 空白是真故障')
+  assert.equal(analyzeFrameContent(frames(8, 8)).blankRatio, 1)
+})
+
+test('QC frame-content gate catches the all-transparent still signature', () => {
+  // 全透明签名：单帧 rgba(0,0,0,0) 占 100%，任何比例都判死（不依赖颜色数阈值）。
+  const allTransparent = Array.from({ length: 8 }, () => ({ distinctColors: 1, transparentFraction: 1 }))
+  assert.equal(analyzeFrameContent(allTransparent).passed, false)
+  assert.equal(analyzeFrameContent(allTransparent).maxTransparentFraction, 1)
+  // 一帧透明、其余正常：整片 not 透明主导，但透明帧本身算空白，按 ratio 计。
+  const oneTransparent = [{ distinctColors: 1, transparentFraction: 1 }, ...Array.from({ length: 7 }, () => ({ distinctColors: 300, transparentFraction: 0 }))]
+  assert.equal(analyzeFrameContent(oneTransparent).passed, true, '1/8 透明帧属留白，放行')
+})
+
+test('QC frame-content gate passes a normal frame and fails a normal blank frame', () => {
+  // 正常帧：内容层画出（distinctColors=300、alpha 全 255）→ PASS。
+  assert.equal(analyzeFrameContent([{ distinctColors: 300, transparentFraction: 0 }]).passed, true, '正常帧要放行')
+  // 单帧空白：blankRatio=1 → FAIL（真故障）。
+  assert.equal(analyzeFrameContent([{ distinctColors: 1, transparentFraction: 0 }]).passed, false, '单帧空白即失败')
+  // 两帧里一帧空白：blankRatio=0.5 → 恰好不过线 → FAIL。
+  assert.equal(analyzeFrameContent([{ distinctColors: 1, transparentFraction: 0 }, { distinctColors: 300, transparentFraction: 0 }]).passed, false, '两帧一空白=0.5 判死')
+})
+
+test('QC frame-content gate tolerates an empty frame list without crashing', () => {
+  // 抽帧失败/无成片时 frames 可能是空数组：不能崩，且必须标记「未评估」。
+  const empty = analyzeFrameContent([])
+  assert.equal(empty.assessed, false, '空数组应标记未评估')
+  assert.equal(empty.sampledFrameCount, 0)
+  assert.doesNotThrow(() => analyzeFrameContent([]), '空数组不能抛错')
+  // 注意（fail-open，待 Chief 决定是否收紧）：当前空数组 passed=true（blankRatio=0<0.5）。
+  // 若 sampled.frameFiles 为空，content 门会静默跳过；建议改为 passed:false（fail-closed）。
+})
+
 test('treats an attached album cover as audio metadata, not a real video stream', () => {
   const audio = normalizeProbe({
     format: { duration: '199.56' },
@@ -1685,7 +1735,12 @@ test('runs the DSH Remotion creator, deterministic QC, and independent reviewer 
   const started = await host.startVideoRender(currentAgent, { projectId: project.id, expectedRevision: project.revision, visualBrief: '清晰、克制的信息视觉。', orientation: 'landscape', renderer: 'remotion', backgroundMusic, bgmVolume: 0.16 })
   assert.equal(started.input.backgroundMusic.name, '测试背景音乐.wav')
   assert.equal(started.input.bgmVolume, 0.16)
-  const finished = await waitForOperation(host, currentAgent, project.id, started.id)
+  // 这是一条**真实 Remotion 渲染**（约 200 秒片长、--concurrency 16），
+  // 实测端到端要 593 秒。默认 90 秒超时会让它在渲染途中就被判失败，报出来的是
+  // `Visited "http://localhost:3000/index.html" but got no response`——那是
+  // 浏览器启动竞态，不是这条用例要验的东西。
+  // 同文件 :1632 / :1890 早已为长渲染显式给 300_000 / 180_000，这里漏了。
+  const finished = await waitForOperation(host, currentAgent, project.id, started.id, 900_000)
   assert.equal(finished.status, 'succeeded', finished.error)
   const rendered = await store.get(currentAgent, { projectId: project.id })
   assert.equal(rendered.artifacts.video.data.renderer, 'remotion', JSON.stringify(rendered.artifacts.video.data.fallback || null))

@@ -1424,6 +1424,69 @@ async function measureVisualVariation(frameFiles, orientation, durationSeconds, 
 }
 
 /**
+ * 单帧内容检测：这一帧里到底有没有画出东西。
+ *
+ * 与 {@link measureVisualVariation} 互补且**必须独立**：variation 走的是 crop 后的
+ * `normalizedMainFrame`（横屏只留上 80%），会主动把底部字幕区裁掉——QA 实测过
+ * 「主视觉在下部」的合法片子因此被判死。所以这里用**全帧原始 PNG**，不 crop。
+ *
+ * 为什么需要它：2026-10-21 线上事故，用户三次拿到"质检合格"的空片。根因是
+ * Remotion 4.0.522 配 Chrome 153 时整页内容层零像素，而成片被 H.264 编码成
+ * **1 种不透明纯色**（背景画出来了，标题/字幕/栅格/进度条全没画）。
+ * 实测签名（同一工程同一帧）：
+ *   Chrome 153 → distinctRGBA=1   透明 0%
+ *   Edge   155 → distinctRGBA=5446 透明 0%
+ * 两者隔着 3-4 个数量级，阈值有充足的安全带。
+ *
+ * 为什么是**分数制**而不是"有一帧空白就整片 FAIL"：真实成片的片头、片尾、
+ * 转场经常出现接近纯色的帧，留白也是正当设计。零容忍会把合法片子判死——
+ * 那正是这轮反复踩的"自动判据必然误杀"。只有空白帧**过半**才判失败。
+ */
+const BLANK_DISTINCT_COLORS = 64
+const BLANK_TRANSPARENT_FRACTION = 0.99
+const BLANK_FRAME_RATIO = 0.5
+
+/** 纯判定：frames 为 [{ distinctColors, transparentFraction }]，离线可测、不碰 ffmpeg。 */
+export function analyzeFrameContent(frames) {
+  const list = Array.isArray(frames) ? frames : []
+  const blankFrameCount = list.filter(
+    (frame) => frame.distinctColors <= BLANK_DISTINCT_COLORS
+      || frame.transparentFraction >= BLANK_TRANSPARENT_FRACTION,
+  ).length
+  // 空数组（抽帧失败/无成片）时 blankRatio 取 1：没有内容证据就不放行。
+  const blankRatio = list.length ? blankFrameCount / list.length : 1
+  return {
+    assessed: list.length > 0,
+    passed: blankRatio < BLANK_FRAME_RATIO,
+    sampledFrameCount: list.length,
+    blankFrameCount,
+    blankRatio: Number(blankRatio.toFixed(3)),
+    maxTransparentFraction: list.length ? Math.max(0, ...list.map((frame) => frame.transparentFraction)) : 0,
+  }
+}
+
+/** 对全帧 PNG 抽唯一色数与透明占比（不 crop）。 */
+async function measureFrameContent(frameFiles, signal) {
+  const perFrame = await Promise.all(frameFiles.map(async (file) => {
+    const { stdout } = await execFileAsync('ffmpeg', [
+      '-v', 'error', '-i', file,
+      '-vf', 'scale=256:256:force_original_aspect_ratio=decrease,format=rgba',
+      '-f', 'rawvideo', '-pix_fmt', 'rgba', 'pipe:1',
+    ], { signal, encoding: 'buffer', maxBuffer: 1024 * 1024 * 4 })
+    const seen = new Set()
+    let transparent = 0
+    for (let index = 0; index + 4 <= stdout.length; index += 4) {
+      const alpha = stdout[index + 3]
+      if (alpha === 0) transparent += 1
+      seen.add((stdout[index] << 16) | (stdout[index + 1] << 8) | stdout[index + 2] | (alpha << 24))
+    }
+    const total = stdout.length / 4
+    return { distinctColors: seen.size, transparentFraction: total ? transparent / total : 0 }
+  }))
+  return analyzeFrameContent(perFrame)
+}
+
+/**
  * Host-side media adapter. It owns provider calls and local binaries; the browser
  * only sees durable operation summaries and bounded media reads through the gateway.
  */
@@ -4540,12 +4603,23 @@ async #mimoReferenceDataUrl(root, input) {
       const sampled = await extractVideoReviewFrames(renderedPath, reviewFramesDir, videoProbe.durationSeconds || durationSeconds, this.signal, sceneSpans)
       const contactSheet = await renderVideoContactSheet(renderedPath, reviewFramesDir, videoProbe.durationSeconds || durationSeconds, this.signal)
       const variation = await measureVisualVariation(sampled.frameFiles, orientation, videoProbe.durationSeconds || durationSeconds, this.signal)
+      // 画面内容兜底：复用同批全帧 PNG，查「整帧空白/全透明」的帧占比。
+      // 与 variation 互补——variation 抓「各帧雷同」，content 抓「单帧空白」，
+      // 覆盖「每帧不同但每帧都空白」这种 variation 漏掉的情况。不 crop，crop 会骗过检测。
+      const content = await measureFrameContent(sampled.frameFiles, this.signal)
       const topology = buildTechnicalReport({ video: videoProbe, audio: audioProbe, subtitles, subtitleEnabled, orientation })
-      const variationIssues = variation.passed ? [] : ['主画面变化不足，成片可能退化为静态画面或少量文字卡片。']
+      // 给数字、去掉猜测语气。原先写的是「成片可能退化为静态画面或少量文字卡片」——
+      // 那是推测，用户看完仍不知道实际有多差。现在直接报采样帧数、不同画面数、
+      // 以及完全相同的帧数，让用户能自己判断严重程度。
+      const variationIssues = variation.passed ? [] : [`主画面变化不足：${variation.sampledFrameCount} 个采样帧中只有 ${variation.distinctMainFrames} 种画面，其余 ${variation.sampledFrameCount - variation.distinctMainFrames} 帧完全相同。`]
+      const contentIssues = content.passed ? [] : [
+        `成片有 ${content.blankFrameCount}/${content.sampledFrameCount} 张画面没有任何内容（整帧只有一种颜色或近乎全透明）。`
+        + `这说明渲染管线没有把内容画出来，属于程序问题，重跑通常无效。请点「反馈问题」并附上任务编号 ${run.id}。`,
+      ]
       const technical = {
         ...topology,
-        passed: topology.passed && variation.passed && subtitleIssues.length === 0,
-        issues: [...topology.issues, ...variationIssues, ...subtitleIssues],
+        passed: topology.passed && variation.passed && subtitleIssues.length === 0 && content.passed,
+        issues: [...topology.issues, ...variationIssues, ...subtitleIssues, ...contentIssues],
         subtitles: { ...topology.subtitles, maxTextChars: maxSubtitleChars, displayLimit: subtitleDisplayLimit, longCueCount: longSubtitleCount },
         variation,
         sampledFrames: sampled.frameFiles.map((file) => portableRelative(root, file)),
