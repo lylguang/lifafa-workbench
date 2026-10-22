@@ -752,8 +752,19 @@ export class SpokenVideoScheduleHost {
     if (!agentDefaultModel || typeof agentDefaultModel.currentSelection !== 'function') {
       fail('SPOKEN_VIDEO_SCHEDULE_UNAVAILABLE', '当前运行环境不提供默认模型服务，无法执行自动化任务。')
     }
-    const selection = agentDefaultModel.currentSelection()
-    const agentOptions = { provider: selection.provider, model: selection.model }
+    // 视觉导演（以及所有 pack 子 agent）需要真能读图做帧自检，所以 pack 在这里
+    // 显式指定模型，不再依赖运行时的默认选择（agentDefaultModel.currentSelection()）。
+    // 实测 workbuddy-ai/glm-5.3-flash 读图最准（能读出字幕条完整内容）；今天 minimax
+    // 的 provider 间歇性故障让整轮端到端失败，证明单一运行时默认是单点，故默认用
+    // glm-5.3-flash。环境变量可覆盖；但若 LWB_SPOKEN_VIDEO_AGENT_MODEL 被显式设为
+    // 空字符串，则报错而不是静默回落到默认——否则用户以为设了其实没生效。
+    const rawAgentModel = this.environment.LWB_SPOKEN_VIDEO_AGENT_MODEL
+    if (rawAgentModel === '') {
+      fail('SPOKEN_VIDEO_AGENT_MODEL_INVALID', 'AI 导演模型未指定（LWB_SPOKEN_VIDEO_AGENT_MODEL 为空），请设置可用的模型，例如 workbuddy-ai/glm-5.3-flash。')
+    }
+    const agentModel = rawAgentModel || 'workbuddy-ai/glm-5.3-flash'
+    const agentProvider = this.environment.LWB_SPOKEN_VIDEO_AGENT_PROVIDER || 'magpie'
+    const agentOptions = { provider: agentProvider, model: agentModel }
     const preset = await agentPresets.resolve(this.presetId)
     const setup = async (agentCtx) => { await agentPresets.mount(agentCtx, preset.id) }
     // One identity per task, reused across rounds, so the sidebar gains a

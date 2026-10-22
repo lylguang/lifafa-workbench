@@ -617,7 +617,38 @@ test('depth packaging runs the whole chain and records a full lifeline', async (
   assert.equal(fake.created.length, 1)
   assert.equal(fake.created[0].meta.agentPreset, 'standard')
   assert.equal(fake.created[0].meta.cwd, currentAgent.session.header.cwd, 'the identity gets the task workspace, not process.cwd()')
-  assert.deepEqual(fake.created[0].agentOptions, { provider: 'deepseek', model: 'deepseek-chat' })
+  // The pack pins the AI director model explicitly instead of trusting the
+  // runtime default: glm-5.3-flash reads frames most accurately, and a single
+  // runtime default was a single point of failure today.
+  assert.deepEqual(fake.created[0].agentOptions, { provider: 'magpie', model: 'workbuddy-ai/glm-5.3-flash' })
+})
+
+test('the AI director model honors explicit environment overrides', async (t) => {
+  const { host, currentAgent, fake } = await setup(t, {
+    depth: 'packaging',
+    hostOptions: {
+      environment: {
+        LWB_SPOKEN_VIDEO_AGENT_PROVIDER: 'custom-provider',
+        LWB_SPOKEN_VIDEO_AGENT_MODEL: 'workbuddy-ai/hy3',
+      },
+    },
+  })
+  const created = await createTask(host, currentAgent, { sources: { sourceIds: ['baidu'], platforms: ['抖音'] } })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  await settleRun(host, currentAgent, runId)
+  assert.deepEqual(fake.created[0].agentOptions, { provider: 'custom-provider', model: 'workbuddy-ai/hy3' })
+})
+
+test('an empty AI director model fails loudly instead of silently falling back', async (t) => {
+  const { host, currentAgent } = await setup(t, {
+    depth: 'packaging',
+    hostOptions: { environment: { LWB_SPOKEN_VIDEO_AGENT_MODEL: '' } },
+  })
+  const created = await createTask(host, currentAgent, { sources: { sourceIds: ['baidu'], platforms: ['抖音'] } })
+  const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
+  const run = await settleRun(host, currentAgent, runId)
+  assert.equal(run.status, 'failed')
+  assert.match(String(run.error), /AI 导演模型未指定/u)
 })
 
 test('a stored voice preset rides the voiceover request and stages uploaded references', async (t) => {
