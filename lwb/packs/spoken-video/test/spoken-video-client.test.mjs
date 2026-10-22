@@ -473,6 +473,90 @@ test('video task card renders the progress surface instead of a bare phase label
   assert.match(page, /videoEtaFromHistory\(taskFeed\.items/u)
 })
 
+test('video progress keeps ticking when a running task is off the current page', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const pageStart = source.indexOf('function VideoPreviewPageV2(')
+  const pageEnd = source.indexOf('\n    function ', pageStart + 40)
+  const page = source.slice(pageStart, pageEnd)
+
+  // 时钟开关必须来自全局 counts（后端按全部任务统计），不能只看当前页的
+  // `taskFeed.anyRunning`——那个值只统计当前这页 + 当前筛选，翻页或筛 tab
+  // 时会变 false，正在跑的任务秒数随之冻结，而用户最需要它跳的时候正是这时。
+  assert.match(page, /hasLiveTask/u)
+  assert.match(page, /Number\(taskFeed\.counts\?\.running \|\| 0\) > 0/u)
+  assert.match(page, /Number\(taskFeed\.counts\?\.queued \|\| 0\) > 0/u)
+  assert.match(page, /\}, \[hasLiveTask\]\)/u)
+  // 反向钉死：不许再退回到只看当前页的那个开关。
+  assert.doesNotMatch(page, /\}, \[taskFeed\.anyRunning\]\)/u, '时钟开关不得退回当前页的 anyRunning')
+})
+
+test('video progress explains each phase in plain words and proves it is alive', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const component = source.slice(source.indexOf('function VideoTaskProgress('), source.indexOf('\n    function VideoPreviewPageV2(', source.indexOf('function VideoTaskProgress(')))
+
+  // 七个阶段都有一句人话；漏一个就会出现「只有编号没有说明」的窗口期。
+  for (const phrase of [
+    '正在为这次制作准备空间',
+    'AI 正在设计分镜和画面',
+    '正在检查工程，避免渲染到一半才发现问题',
+    '正在逐帧生成画面，这一步最花时间',
+    '正在检查画质、音轨和字幕',
+    '另一个 AI 正在看你的片子挑毛病',
+    '马上就好',
+  ]) {
+    assert.ok(source.includes(phrase), `阶段说明缺失：${phrase}`)
+  }
+  // 说明表必须覆盖步骤条里的每一个 id，否则新增阶段会静默没有说明。
+  const stages = ['preparing', 'directing', 'preflight', 'rendering', 'technical-qc', 'editorial-review', 'committing']
+  const table = source.slice(source.indexOf('const VIDEO_PHASE_HINT'), source.indexOf('const VIDEO_STALL_SECONDS'))
+  for (const id of stages) {
+    assert.ok(table.includes(`'${id}':`) || table.includes(`${id}:`), `VIDEO_PHASE_HINT 缺少阶段 ${id}`)
+  }
+  // 长阶段必须有「还活着」的证据，阈值 30 秒。
+  assert.match(source, /const VIDEO_STALL_SECONDS = 30;/u)
+  assert.match(component, /sv-vprogress-alive/u)
+  // 这里只断言「有这条提示」，**不断言具体措辞**。
+  // 措辞的诚实性由「等待反馈不能说谎」那条用例按**渲染出来的字符串**管；
+  // 在这里对整段源码断言「没有卡住」，命中的只会是注释，等于给旧文案留后门。
+  assert.match(component, /className: 'sv-vprogress-alive', role: 'status'/u)
+  // 渲染阶段本身有帧进度，就不再重复喊「还在进行」。
+  assert.match(component, /const showStall = stalledSeconds != null && !\(render/u)
+})
+
+test('video progress motion is subtle and fully disabled under prefers-reduced-motion', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  // 直接取内嵌样式表本体，避免拿整份源码当 CSS 匹配造成假绿。
+  // 样式分两段模板：`css` 是基础块，`productCss` 用 ${css} 接着追加。
+  // 两段都是最终装进页面的样式，所以取到 productCss 结束为止。
+  const cssStart = source.indexOf('const css = `')
+  const productStart = source.indexOf('const productCss')
+  const cssEnd = source.indexOf('`;', productStart)
+  assert.ok(cssStart > 0 && productStart > cssStart && cssEnd > productStart, 'client must define its product CSS')
+  const css = source.slice(cssStart, cssEnd)
+
+  // 呼吸而不是转圈：转圈是「假装在干活」，等得久时只会加剧焦躁。
+  assert.ok(css.includes('@keyframes sv-vprogress-breathe'))
+  assert.match(css, /\.sv-vprogress-step\[data-status="active"\] \{ animation:sv-vprogress-breathe/u)
+  assert.doesNotMatch(css, /sv-vprogress[^}]*animation:[^;]*spin/u)
+  // 已完成阶段一次性落定，不是无限循环。
+  assert.match(css, /@keyframes sv-vprogress-settle/u)
+  assert.match(css, /\.sv-vprogress-step\[data-status="done"\] i \{ animation:sv-vprogress-settle \.5s ease-out 1;/u)
+  // 进度条高光扫过，且结束后不再扫（100% 还在扫会像没跑完）。
+  assert.match(css, /\.sv-vprogress-sweep::after/u)
+  assert.match(css, /\.sv-vprogress-sweep\[data-status="succeeded"\]::after/u)
+  assert.match(css, /\.sv-vprogress-sweep\[data-status="failed"\]::after \{ content:none; \}/u)
+
+  // 无障碍底线：本轮新增的四处动画都必须在 reduced-motion 下静止。
+  // 旧规则只覆盖了 active 的 i，漏掉任何一条都会让「关了动画还在动」。
+  const reducedMotion = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce) {', css.indexOf('sv-vprogress-alive')))
+  for (const selector of ['.sv-vprogress-step[data-status="active"]', '.sv-vprogress-step[data-status="done"] i', '.sv-vprogress-alive-dot', '.sv-vprogress-sweep::after']) {
+    assert.ok(reducedMotion.includes(selector), `reduced-motion 未覆盖：${selector}`)
+  }
+  // 动画只碰 opacity / transform，不碰宽高（避免逐帧重排）。
+  assert.match(css, /@keyframes sv-vprogress-breathe \{ 0%,100% \{ opacity:1; \} 50% \{ opacity:\.62; \} \}/u)
+  assert.match(css, /@keyframes sv-vprogress-alive \{ 0%,100% \{ opacity:\.35; transform:scale\(\.82\); \} 50% \{ opacity:1; transform:scale\(1\.06\); \} \}/u)
+})
+
 test('video workbench offers a re-QC path for a finished cut that never got one', async () => {
   const source = await readFile(clientPath, 'utf8')
   const start = source.indexOf('function VideoPreviewPageV2(')
@@ -769,7 +853,13 @@ test('a finished render reports completion instead of still claiming to render',
   const source = await readFile(clientPath, 'utf8')
   const start = source.indexOf('function VideoTaskProgress(')
   assert.ok(start >= 0, 'VideoTaskProgress must remain extractable')
-  const page = source.slice(start, start + 4000)
+  // 原来是固定 4000 字符窗口，靠「刚好够」吃饭：组件一加注释就会把后半段
+  // （修复提示、进度条）挤出窗口，测试随之假红。改成切到下一个顶层声明为止，
+  // 与文件里其它切片用例同一套做法。
+  const nextDecl = /\r?\n {4}(?:function|async function|const [A-Za-z_$]|let |var )/gu
+  nextDecl.lastIndex = start + 'function VideoTaskProgress('.length
+  const boundary = nextDecl.exec(source)
+  const page = source.slice(start, boundary ? boundary.index : source.length)
 
   // 结束后换标题：完成 / 中断 / 已停止。
   assert.match(page, /const renderHeadline = !running/u)
@@ -784,6 +874,50 @@ test('a finished render reports completion instead of still claiming to render',
   assert.match(page, /className: 'sv-vprogress-bar', 'data-status': status/u)
   assert.ok(source.includes('.sv-vprogress-bar[data-status="succeeded"] progress::-webkit-progress-value { background:#1f7354; }'), 'a finished render paints its bar green, not the in-progress orange')
   assert.ok(source.includes('.sv-vprogress-bar[data-status="failed"] progress::-webkit-progress-value { background:#a94343; }'), 'an interrupted render paints its bar red')
+
+  /*
+   * 等待反馈不能说谎：界面不许保证「没有卡住」。
+   *
+   * QA 查实：进度秒数来自前端 setInterval，后端渲染进程死了它照样跳，
+   * 要跳到 90 分钟硬超时才报错。所以「界面每秒刷新，没有卡住」这句会在
+   * 真卡住时持续骗用户一个半小时。
+   *
+   * 「界面静止用户会自己去刷新；界面假装活着，用户就会被骗着一直等。」
+   */
+  // 只查**会被渲染出来的字符串**，不查注释——注释里为了说明缘由会引用这句原文，
+  // 直接对整段源码做 doesNotMatch 会被自己的注释绊倒。
+  const rendered = [...page.matchAll(/'([^'\n]{4,})'|`([^`]{4,})`/gu)].map((m) => m[1] || m[2])
+  for (const text of rendered) {
+    assert.doesNotMatch(text, /没有卡住/u, `界面不能保证一件它无法知道的事：${text}`)
+    assert.doesNotMatch(text, /界面每秒刷新/u, `本地时钟在跳不代表后端在干活：${text}`)
+  }
+  // 改成只陈述后端能作证的事实：已持续多久 + 最后一次后台动作在多久以前。
+  assert.match(page, /最后一次后台动作在 \$\{formatElapsed\(silent\)\} 前/u)
+  // 沉默超阈值要换措辞，明确说可能卡住了，并给出下一步。
+  // 常量在组件外（与 VIDEO_STALL_SECONDS 并列），所以断言查整份源码。
+  assert.match(source, /const VIDEO_SILENT_ALARM_SECONDS = 300;/u)
+  assert.match(page, /silent >= VIDEO_SILENT_ALARM_SECONDS/u)
+  // 「可能卡住了」必须出现在**渲染出来的字符串**里，而不是只出现在注释中
+  // ——注释里说明缘由时也会写这四个字，对整段源码断言会被自己的注释蒙混过关。
+  assert.ok(rendered.some((text) => text.includes('可能卡住了')), '沉默超阈值时渲染文案必须明说可能卡住了')
+  assert.ok(rendered.some((text) => text.includes('可以刷新看看')), '说了可能卡住就要给出下一步，不能只报丧')
+  // 沉默超阈值时那颗「跳动 = 我还活着」的橙点必须停：文案说卡住、点在跳，
+  // 两种相反信号摆在同一个元素上，用户只会信那个在动的。
+  const motionCss = source.slice(source.indexOf('const css = `'), source.indexOf('`;', source.indexOf('const productCss')))
+  assert.match(motionCss, /\.sv-vprogress-alive\[data-silent="true"\] \.sv-vprogress-alive-dot \{[^}]*animation:none/u, '沉默态的点必须停止跳动')
+  assert.match(motionCss, /\.sv-vprogress-alive\[data-silent="true"\] \.sv-vprogress-alive-dot \{[^}]*background:#a94343/u, '沉默态的点要改色，不能还是代表活着的橙')
+  // 光有 CSS 规则不够——得确认那颗元素真的拿到了 data-silent。
+  // 少了这半条，规则写好了但没人给它挂上，视觉上等于没做。
+  assert.match(page, /'data-silent': progress\.silentSeconds != null && progress\.silentSeconds >= VIDEO_SILENT_ALARM_SECONDS \? 'true' : 'false'/u, '沉默态的 data-silent 必须由真实沉默时长决定，不能写死')
+  // 沉默时长必须从**后端心跳**算，不能从本地 now 减本地 now，也不能拿阶段出生时间冒充。
+  const progressFn = source.slice(source.indexOf('function videoTaskProgress('), source.indexOf('function videoTaskDurationSeconds('))
+  assert.match(progressFn, /updatedAt: typeof rawRender\.updatedAt === 'string'/u, '渲染进度要带上后端的 updatedAt')
+  // 心跳只认 render.updatedAt：别的阶段只在开始时写一次 startedAt，拿它算沉默
+  // 会把每个正常跑十几分钟的导演/审片阶段误报成「卡住」。
+  assert.match(progressFn, /const heartbeatMs = typeof render\?\.updatedAt === 'string' \? Date\.parse\(render\.updatedAt\) : NaN;/u, '心跳源只能是渲染进度的 updatedAt')
+  assert.doesNotMatch(progressFn, /stages\[phase\]\?\.startedAt/u, '阶段出生时间不能当心跳用')
+  assert.match(progressFn, /silentSeconds: hasHeartbeat \? Math\.max\(0, \(now - heartbeatMs\) \/ 1000\) : null/u, '没有心跳源时必须是 null，不推断死活')
+  assert.doesNotMatch(progressFn, /silentSeconds.*?Date\.now\(\)/u, '不能拿本地时钟冒充后端心跳')
   assert.ok(source.includes('.sv-vprogress-bar[data-status="succeeded"] progress::-moz-progress-bar { background:#1f7354; }'), 'Firefox gets the same green bar')
 })
 
@@ -833,5 +967,94 @@ test('the pipeline board times out a dead connection instead of hanging forever'
   assert.match(page, /onClick: \(\) => location\.reload\(\)/u)
   assert.ok(page.includes("}, '刷新页面')"), 'the reload escape hatch is labelled')
 })
+
+// ---- 人工放行（C1/C2）：视频任务卡按钮 + 二次确认 + 持久标记 ----
+
+test('video workbench releases a failed cut with a verifiable override commit', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function VideoPreviewPageV2(')
+  const end = source.indexOf('\n    function ', start + 40)
+  assert.ok(start >= 0 && end > start, 'VideoPreviewPageV2 must remain a standalone component')
+  const page = source.slice(start, end)
+
+  // 放行入口：只在「质检失败且确有技术问题、且尚未放行」时出现。
+  assert.match(page, /const qcFailedWithIssues = task\.status === 'succeeded' && Boolean\(task\.result\?\.video\) && !qcPassed && qcTechnicalIssues\.length > 0;/u)
+  assert.match(page, /const qcReleased = qcFailedWithIssues && taskQc\?\.result\?\.userOverride === true;/u)
+
+  // 放行提交：走独立 remote('commit')，idempotencyKey 绑定 task.id（重复提交同一任务不产生两条 qc 产物），
+  // 必须带上 userOverride:true 且 passed:false（判据没过的事实不改写），technical 原样带回满足后端「有 issues 才放行」与「passed===technical.passed」两道断言。
+  assert.match(page, /const releaseVideoCut = async \(task\) => \{/u)
+  assert.match(page, /idempotencyKey: `manual-release-\$\{task\.id\}`,/u)
+  assert.match(page, /userOverride: true,/u)
+  assert.match(page, /passed: false,/u)
+  assert.match(page, /technical: qc\.result\.technical,/u)
+  // 放回行后刷新任务与项目，让 userOverride 生效、按钮消失、常驻标记出现。
+  assert.match(page, /await taskFeed\.refresh\(\);/u)
+  assert.match(page, /await reload\(\);/u)
+  // 结论不完整时禁止放行：重提交会造出残缺 qc 产物，让用户先去补做技术质检。
+  assert.match(page, /质检结论不完整，无法人工放行。请先点「补做技术质检」生成完整结论。/u)
+})
+
+test('video task card shows the release button only for a failed cut that is not yet released', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function VideoPreviewPageV2(')
+  const end = source.indexOf('\n    function ', start + 40)
+  const page = source.slice(start, end)
+
+  // 按钮文案与显示条件：qcFailedWithIssues && !qcReleased。
+  assert.match(page, /qcFailedWithIssues && !qcReleased \? h\('button', \{ type: 'button', className: 'lwb-primary-button', disabled: Boolean\(submitting\) \|\| taskFeed\.anyRunning, onClick: \(\) => ask\(\{ title: '人工放行这条成片'/u)
+  assert.match(page, /'这是我要的静态风格，直接采用'\) : null,/u)
+})
+
+test('release confirmation states the static-style escape and the blank-video risk', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function VideoPreviewPageV2(')
+  const end = source.indexOf('\n    function ', start + 40)
+  const page = source.slice(start, end)
+
+  // 二次确认必须把「这其实可能是空白视频」这层最坏可能说在前——否则用户以为放行的是正常视频。
+  assert.ok(page.includes('如果你要的就是纯字幕/静态海报风格，可以继续。'), 'confirm copy offers the static-style escape')
+  assert.ok(page.includes('如果这不是你要的效果，说明画面没渲染出来——放行后发出去就是一条空白视频。'), 'confirm copy warns the blank-video risk')
+  // 还要说清放行会清掉已有发布文案/封面（invalidateDownstream 的副作用），让用户有预期。
+  assert.ok(page.includes('放行会按当前稿件版本重新计算发布资料，原已生成的发布文案/封面将被清掉，放行后需重新生成封面。'), 'confirm copy warns that existing publish info is cleared')
+  // 确认按钮文案明确是「放行」，不是模棱两可的「继续」。
+  assert.match(page, /confirm: '确认放行'/u)
+})
+
+test('release button is disabled while its request is in flight to prevent double submit', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function VideoPreviewPageV2(')
+  const end = source.indexOf('\n    function ', start + 40)
+  const page = source.slice(start, end)
+
+  // 防连点：提交中（submitting === `release:<id>`）时按钮 disabled，且文案切到「正在提交…」。
+  assert.match(page, /disabled: Boolean\(submitting\) \|\| taskFeed\.anyRunning, onClick: \(\) => ask\(/u)
+  assert.match(page, /submitting === `release:\$\{task\.id\}` \? '正在提交…' : '这是我要的静态风格，直接采用'\)/u)
+})
+
+test('after release the task card shows a persistent marker and hides the button', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function VideoPreviewPageV2(')
+  const end = source.indexOf('\n    function ', start + 40)
+  const page = source.slice(start, end)
+
+  // 常驻标记：用中性偏冷新色（sv-released，不复用 warn 黄），几天后回看也知道它没合格质检。
+  assert.match(page, /qcReleased \? h\('p', \{ className: 'sv-released' \}, `已人工放行 · 质检未通过（\$\{qcTechnicalIssues\[0\] \|\| '技术问题'\}）`\)/u)
+  // 按钮被 !qcReleased 门控：放行成功后同一条件为假，按钮随之消失——用户不会以为没成功而重复点。
+  assert.match(page, /qcFailedWithIssues && !qcReleased \? h\('button', \{ type: 'button', className: 'lwb-primary-button'/u)
+})
+
+test('publish shelf tags a manually-released cut so the user sees it from the other path too', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function PublishPageV4(')
+  const end = source.indexOf('\n    async function apply(ctx)', start)
+  assert.ok(start >= 0 && end > start, 'PublishPageV4 must remain a standalone component')
+  const page = source.slice(start, end)
+
+  // 发布页也要带「已人工放行」标记：复用后端 277c968 落地的 qcUserOverride 字段，无需新接口。
+  // 用独立灰蓝标签，与任务卡常驻标记同色系，不与「质检通过」混淆。
+  assert.match(page, /item\.qcUserOverride \? h\('span', \{ className: 'sv-released-tag' \}, '已人工放行'\)/u)
+})
+
 
 

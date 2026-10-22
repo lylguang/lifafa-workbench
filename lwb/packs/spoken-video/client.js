@@ -680,6 +680,12 @@ window.__ModuleLoader__.load({
       .sv-audio-tag-group { min-width:64px; font-size:var(--lwb-text-xs,12px); color:var(--lwb-muted); }
       .sv-warn { margin:0; padding:10px 11px; border:1px solid #ecd39b; border-radius:7px; color:#7a5b17; background:#fffaf0; font-size:var(--lwb-text-sm,13px); line-height:1.55; }
       body[data-ds-dark-theme] .sv-warn { border-color:#7a6534; color:#e8d9a9; background:#332b1b; }
+      /* 人工放行是「用户已确认」的状态，不是风险提醒——用中性偏冷的灰蓝，
+         与 sv-warn 的黄明确区分，避免用户以为刚放行就有问题。 */
+      .sv-released { margin:0; padding:10px 11px; border:1px solid #bcd0e0; border-radius:7px; color:#2f5d7c; background:#f1f7fb; font-size:var(--lwb-text-sm,13px); line-height:1.55; }
+      body[data-ds-dark-theme] .sv-released { border-color:#3f6076; color:#bcd6e6; background:#1c2a33; }
+      .sv-released-tag { display:inline-block; padding:2px 8px; border:1px solid #bcd0e0; border-radius:999px; color:#2f5d7c; background:#f1f7fb; font-size:var(--lwb-text-xs,12px); line-height:1.4; font-weight:600; }
+      body[data-ds-dark-theme] .sv-released-tag { border-color:#3f6076; color:#bcd6e6; background:#1c2a33; }
       .sv-media-drawer-foot { display:flex; align-items:center; justify-content:space-between; gap:8px; padding-top:14px; border-top:1px solid var(--lwb-line); }
       body[data-ds-dark-theme] .sv-media-config-mark,body[data-ds-dark-theme] .sv-media-provider-choice[data-active="true"] { background:rgba(192,132,211,.14); }
       body[data-ds-dark-theme] .sv-media-config-trigger { border-color:var(--lwb-line); background:var(--lwb-surface); }
@@ -722,11 +728,52 @@ window.__ModuleLoader__.load({
       .sv-vprogress-step[data-status="failed"] { color:#e5484d; font-weight:700; }
       .sv-vprogress-step[data-status="failed"] i { color:#fff; background:#e5484d; border-color:#e5484d; }
       @keyframes sv-vprogress-pulse { 0%,100% { opacity:1; } 50% { opacity:.45; } }
+      /* 当前阶段整体缓慢呼吸：像心跳，表示「还在走」。
+         刻意不用 spinner 转圈——转圈是廉价的「假装在干活」，等得久时只会加剧焦躁。
+         只动 opacity，不动宽高，避免重排。 */
+      .sv-vprogress-step[data-status="active"] { animation:sv-vprogress-breathe 2.6s ease-in-out infinite; }
+      @keyframes sv-vprogress-breathe { 0%,100% { opacity:1; } 50% { opacity:.62; } }
+      /* 已完成阶段：打勾后轻微一闪再落定，给「这一步真的过去了」一个反馈。
+         一次性动画，不是循环——循环会让步骤条整体在闪，反而更乱。 */
+      .sv-vprogress-step[data-status="done"] i { animation:sv-vprogress-settle .5s ease-out 1; }
+      @keyframes sv-vprogress-settle { 0% { transform:scale(.72); opacity:.45; } 60% { transform:scale(1.12); opacity:1; } 100% { transform:scale(1); opacity:1; } }
+      /* 阶段说明：一行小字，跟步骤条同宽，不抢注意力。 */
+      .sv-vprogress-hint { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); line-height:1.6; }
+      /* 长阶段「还活着」提示：小圆点持续跳动 + 秒数在涨，两者一起证明没卡死。 */
+      .sv-vprogress-alive { display:flex; align-items:center; gap:6px; margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); line-height:1.6; font-variant-numeric:tabular-nums; }
+      .sv-vprogress-alive-dot { position:relative; display:block; width:7px; height:7px; flex:none; border-radius:50%; background:#f59e0b; animation:sv-vprogress-alive 1.1s ease-in-out infinite; }
+      @keyframes sv-vprogress-alive { 0%,100% { opacity:.35; transform:scale(.82); } 50% { opacity:1; transform:scale(1.06); } }
+      /* 沉默超阈值时这颗点必须停下来、变灰。
+         跳动的橙点意思是「我在动」——当文案已经在说「可能卡住了」，
+         还让它继续跳就是两种相反信号摆在同一个元素上，用户只会信那个在动的。
+         灰 + 静止 + 换底色，三个通道同时说「这个没在动」。 */
+      .sv-vprogress-alive[data-silent="true"] { color:#a94343; }
+      .sv-vprogress-alive[data-silent="true"] .sv-vprogress-alive-dot { background:#a94343; animation:none; opacity:1; transform:none; box-shadow:none; }
+      body[data-ds-dark-theme] .sv-vprogress-alive[data-silent="true"] { color:#e8b9b9; }
+      body[data-ds-dark-theme] .sv-vprogress-alive[data-silent="true"] .sv-vprogress-alive-dot { background:#e8b9b9; }
       @media (prefers-reduced-motion: reduce) { .sv-vprogress-step[data-status="active"] i { animation:none; } }
+      /* reduced-motion：用户关掉动画就全部静止。圈出的是本轮新增的四处动画，
+         前面的旧规则只覆盖了 active 的 i，不写这条会让呼吸/落定/跳动继续跑。 */
+      @media (prefers-reduced-motion: reduce) {
+        .sv-vprogress-step[data-status="active"],
+        .sv-vprogress-step[data-status="done"] i,
+        .sv-vprogress-alive-dot,
+        .sv-vprogress-sweep::after { animation:none !important; }
+        .sv-vprogress-alive-dot { opacity:1; transform:none; }
+        .sv-vprogress-step[data-status="done"] i { transform:none; opacity:1; }
+      }
       .sv-vprogress-repair { margin:0; padding:6px 8px; border-radius:6px; color:#b45309; background:rgba(245,158,11,.12); font-size:var(--lwb-text-sm,13px); line-height:1.6; }
       .sv-vprogress-bar { display:grid; gap:4px; }
       .sv-vprogress-bar-head { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font-size:var(--lwb-text-sm,13px); font-weight:700; }
       .sv-vprogress-bar progress { width:100%; height:7px; border:0; border-radius:999px; appearance:none; overflow:hidden; }
+      /* 渲染进度条上的一层高光从左扫到右，暗示「正在推进」。
+         只在运行中扫：任务结束后还在扫，会让人觉得 100% 还在跑。
+         用 transform 位移（GPU 合成），不动 width，避免每帧重排。 */
+      .sv-vprogress-sweep { position:relative; overflow:hidden; border-radius:999px; }
+      .sv-vprogress-sweep::after { content:''; position:absolute; inset:0; border-radius:999px; background:linear-gradient(90deg, transparent 0%, rgba(255,255,255,.55) 45%, rgba(255,255,255,.55) 55%, transparent 100%); animation:sv-vprogress-sweep 1.9s linear infinite; transform:translateX(-100%); pointer-events:none; }
+      .sv-vprogress-sweep[data-status="succeeded"]::after,
+      .sv-vprogress-sweep[data-status="failed"]::after { content:none; }
+      @keyframes sv-vprogress-sweep { 0% { transform:translateX(-100%); } 100% { transform:translateX(100%); } }
       .sv-vprogress-bar progress::-webkit-progress-bar { border-radius:999px; background:var(--lwb-line); }
       .sv-vprogress-bar progress::-webkit-progress-value { border-radius:999px; background:#f59e0b; transition:width .4s ease; }
       .sv-vprogress-bar progress::-moz-progress-bar { border-radius:999px; background:#f59e0b; }
@@ -4706,6 +4753,32 @@ window.__ModuleLoader__.load({
       { id: 'editorial-review', label: '独立审片' },
       { id: 'committing', label: '提交成片' },
     ];
+    /**
+     * 每个阶段一句人话：说「这一步在干嘛、为什么值得等」。
+     *
+     * 步骤条上的「AI 导演」只说了是谁在干活，没说在干什么；用户等十几分钟时
+     * 最想知道的是「它现在具体在做哪件事」，而不是阶段编号。
+     * 文案只描述**已知在做的事**，不承诺剩余时间——耗时不可预测，猜就是骗人。
+     */
+    const VIDEO_PHASE_HINT = {
+      preparing: '正在为这次制作准备空间。',
+      directing: 'AI 正在设计分镜和画面。',
+      preflight: '正在检查工程，避免渲染到一半才发现问题。',
+      rendering: '正在逐帧生成画面，这一步最花时间。',
+      'technical-qc': '正在检查画质、音轨和字幕。',
+      'editorial-review': '另一个 AI 正在看你的片子挑毛病。',
+      committing: '马上就好，正在提交成片。',
+    };
+    // 当前阶段超过这个时长没有任何新阶段事件，就要显式告诉用户「它没死」。
+    const VIDEO_STALL_SECONDS = 30;
+    /**
+     * 后端沉默超过这个秒数，措辞就从「还在跑」换成「可能卡住了」。
+     *
+     * 5 分钟是按现有阶段耗时定的：渲染单帧、打包工程、审片重跑都可能连续
+     * 几分钟不写事件，比这更短的阈值会把正常慢阶段误报成卡死。
+     * 超过它还没动静，就该把人从等待里捞出来，而不是继续安慰。
+     */
+    const VIDEO_SILENT_ALARM_SECONDS = 300;
     function formatElapsed(seconds) {
       const value = Math.max(0, Math.floor(Number(seconds) || 0));
       if (value < 60) return `${value} 秒`;
@@ -4757,14 +4830,37 @@ window.__ModuleLoader__.load({
           done: Number.isFinite(rawRender.done) ? Number(rawRender.done) : null,
           total: Number.isFinite(rawRender.total) ? Number(rawRender.total) : null,
           remainingSeconds: Number.isFinite(rawRender.remainingSeconds) ? Number(rawRender.remainingSeconds) : null,
+          // 后端每次写入渲染进度都会带 updatedAt（spoken-video-media-host.mjs
+          // #setVideoRenderProgress）。这是**后端时钟**的最后一次动作时间，
+          // 与界面每秒滴答的本地 setInterval 是两回事——后者后端死了也照样跳。
+          updatedAt: typeof rawRender.updatedAt === 'string' && Number.isFinite(Date.parse(rawRender.updatedAt))
+            ? rawRender.updatedAt
+            : null,
         }
         : null;
+      // 「后端沉默多久」只从**会持续更新的**后端时间戳算。
+      //
+      // 关键区分：`#setVideoRenderProgress` 在渲染阶段每几秒写一次 `render.updatedAt`；
+      // 而 `#setVideoPhase` 对其它阶段只在**阶段开始那一刻**写一次 `startedAt`，
+      // 整个 AI 导演 / 预检 / 审片跑完都不再落任何记录（见 media-host.mjs:3924）。
+      //
+      // 所以：
+      //  · 只有 `render.updatedAt` 能回答「后端还活着吗」——它是心跳。
+      //  · `stages[phase].startedAt` 只是**出生时间**。拿它算沉默，会把每个本来就要
+      //    跑十几分钟的导演/审片阶段误判成「卡住」，狼来了两次之后真卡住也没人信。
+      //
+      // 「没有证据说明它活着」和「有证据说明它死了」是两回事。只有后者才配报警。
+      const heartbeatMs = typeof render?.updatedAt === 'string' ? Date.parse(render.updatedAt) : NaN;
+      const hasHeartbeat = Number.isFinite(heartbeatMs);
       return {
         steps,
         phase,
         label: videoPhaseLabel(phase) || mediaStatusLabel(task.status),
         totalSeconds,
         activeSeconds,
+        // 距上一次**后端心跳**过了多久（秒）。没有心跳源就是 null——此时界面
+        // 只说「已持续多久」，不推断死活。
+        silentSeconds: hasHeartbeat ? Math.max(0, (now - heartbeatMs) / 1000) : null,
         render,
         // 修复重试：后端记录 attempts/maxAttempts，重试期间必须让用户看见，
         // 否则长耗时的修复看起来就像卡死。
@@ -5742,6 +5838,32 @@ window.__ModuleLoader__.load({
       if (running && render?.remainingSeconds != null) summary.push(`预计剩余 ${formatElapsed(render.remainingSeconds)}`);
       else if (running && eta?.range) summary.push(`参考历史 ${eta.range}`);
       const doneCount = progress.steps.filter((step) => step.status === 'done').length;
+      // 当前阶段的人话说明：告诉用户「这一步在干嘛」，而不只是阶段名。
+      const activeHint = running ? VIDEO_PHASE_HINT[progress.phase] || null : null;
+      // 长时间没有新阶段事件时的「还活着」证据：秒数本身在跳，配上明确措辞，
+      // 避免用户把「卡住」和「还在跑」混为一谈。渲染阶段本身有帧进度，不重复喊。
+      const stalledSeconds = running && progress.activeSeconds != null && progress.activeSeconds >= VIDEO_STALL_SECONDS
+        ? progress.activeSeconds
+        : null;
+      const showStall = stalledSeconds != null && !(render && Number.isFinite(render.percent) && render.percent > 0);
+      /**
+       * 沉默提示的两档措辞。
+       *
+       * 后端沉默超过 VIDEO_SILENT_ALARM_SECONDS 就换第二档，明确说「可能卡住了」——
+       * 区分「这个阶段本来就慢」和「后端没动静」是这条提示存在的全部意义。
+       * 拿不到后端时间戳（progress.silentSeconds 为 null）时只说已持续多久，
+       * 不编一个「最后一次动作」出来。
+       */
+      const silent = progress.silentSeconds;
+      const percentText = render && render.done != null && render.total != null
+        ? `（渲染 ${render.done}/${render.total} 帧）`
+        : '';
+      const gotAction = silent != null
+        ? `，最后一次后台动作在 ${formatElapsed(silent)} 前${percentText}`
+        : '';
+      const stallCopy = silent != null && silent >= VIDEO_SILENT_ALARM_SECONDS
+        ? `已 ${formatElapsed(stalledSeconds)} 没有收到后台进度${gotAction}，可能卡住了。可以刷新看看，或到任务记录里查看详情。`
+        : `还在进行，本阶段已持续 ${formatElapsed(stalledSeconds)}${gotAction}。`;
       // 进度块在任务结束后仍然保留（时长、帧数值得看），但标题不能说「正在」——
       // 2026-10-08 反馈：卡片已标「已完成」却又写着「正在渲染成片 100%」。
       const renderHeadline = !running
@@ -5753,13 +5875,27 @@ window.__ModuleLoader__.load({
             key: step.id, role: 'listitem', className: 'sv-vprogress-step', 'data-status': step.status,
             title: step.seconds == null ? step.label : `${step.label} · ${formatElapsed(step.seconds)}`,
           }, h('i', { 'aria-hidden': true }, step.status === 'done' ? '✓' : step.status === 'failed' ? '!' : String(index + 1)), h('span', null, step.label)))),
+        activeHint ? h('p', { className: 'sv-vprogress-hint', role: 'status' }, activeHint) : null,
+        // 只说事实，不做保证。
+        //
+        // 原来这里写的是「界面每秒刷新，没有卡住」——那是在保证一件界面不知道的事：
+        // 每秒跳动的秒数来自前端的 setInterval，后端渲染进程死了它照样跳，
+        // 要跳到 90 分钟硬超时才报错。也就是说这句「没有卡住」会在真卡住时
+        // 持续骗用户一个半小时。界面静止用户会自己去刷新；界面假装活着，
+        // 用户就会被骗着一直等。
+        //
+        // 现在改成陈述两件后端能作证的事实：本阶段已持续多久、上一次后端动作
+        // 是多久以前。沉默超过阈值就明说「可能卡住了」，把人从等待里捞出来。
+        showStall ? h('p', { className: 'sv-vprogress-alive', role: 'status', 'data-silent': progress.silentSeconds != null && progress.silentSeconds >= VIDEO_SILENT_ALARM_SECONDS ? 'true' : 'false' },
+          h('span', { className: 'sv-vprogress-alive-dot', 'aria-hidden': 'true' }),
+          stallCopy) : null,
         // 修复提示同理：结束后它记录的是「做过第几次修复」，不是「正在」。
         repair ? h('p', { className: 'sv-vprogress-repair', role: 'status' }, running
           ? `审片触发修复：第 ${repair.attempts}${repair.maxAttempts ? `/${repair.maxAttempts}` : ''} 次尝试，正在按审片意见重做。`
           : `审片曾触发修复：共 ${repair.attempts}${repair.maxAttempts ? `/${repair.maxAttempts}` : ''} 次尝试。`) : null,
         render ? h('div', { className: 'sv-vprogress-bar', 'data-status': status },
           h('div', { className: 'sv-vprogress-bar-head' }, h('span', null, renderHeadline), h('span', { className: 'sv-vprogress-live' }, `${render.percent}%`)),
-          h('progress', { max: 100, value: render.percent, 'aria-label': '渲染进度' }),
+          h('div', { className: 'sv-vprogress-sweep', 'data-status': status }, h('progress', { max: 100, value: render.percent, 'aria-label': '渲染进度' })),
           render.total ? h('span', { className: 'sv-meta' }, `已完成 ${render.done}/${render.total} 帧`) : null,
         ) : null,
         h('div', { className: 'sv-vprogress-foot' },
@@ -5816,12 +5952,19 @@ window.__ModuleLoader__.load({
       const [confirmNode, ask] = useSvConfirm();
       const taskFeed = useVideoTasks(packId, taskQuery, taskFilter, taskPage, activeTab === GENERAL_TAB ? { general: true } : { accountId: activeTab }, setError, refresh);
       // 运行中任务需要一个每秒推进的时钟，阶段用时与总耗时才会走动。
+      // 开关必须看**全局计数**（counts 由后端按全部任务统计），不能看当前页的
+      // `taskFeed.anyRunning`：那个值只统计「当前这页 + 当前筛选」的任务，翻到
+      // 第 2 页或筛到「失败」tab 时就会变 false，于是正在跑的任务秒数**冻结**——
+      // 用户最需要它跳的时候它偏偏不动。
       const [now, setNow] = React.useState(() => Date.now());
+      const hasLiveTask = Boolean(taskFeed.anyRunning)
+        || Number(taskFeed.counts?.running || 0) > 0
+        || Number(taskFeed.counts?.queued || 0) > 0;
       React.useEffect(() => {
-        if (!taskFeed.anyRunning) return undefined;
+        if (!hasLiveTask) return undefined;
         const timer = setInterval(() => setNow(Date.now()), 1000);
         return () => clearInterval(timer);
-      }, [taskFeed.anyRunning]);
+      }, [hasLiveTask]);
       // 参考历史耗时：只在样本足够时给出区间，否则不显示，避免错误预期。
       const taskEta = React.useMemo(() => videoEtaFromHistory(taskFeed.items, null), [taskFeed.items]);
       React.useEffect(() => {
@@ -5931,6 +6074,46 @@ window.__ModuleLoader__.load({
           await taskFeed.refresh(); setError(null);
         } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
       };
+      /**
+       * 人工放行：成片技术质检未通过（确实有画面/音轨问题），但用户确认就要这个
+       * 静态风格时，把这条 qc 以 userOverride 形式重新提交，让它进入「发布」页。
+       * 提交的是整段 replace 的 qc 产物，会触发 invalidateDownstream 清掉已有
+       * packaging/封面——所以确认文案里必须提前说清，让用户有预期。
+       */
+      const releaseVideoCut = async (task) => {
+        const project = projectForTask(task);
+        const qc = task.qc;
+        // 结论不完整（缺 mode/reportFile/technical）时禁止放行：重提交会造出残缺
+        // qc 产物，比「不显示按钮」更糟。让用户在「补做技术质检」拿到完整结论再来。
+        if (!project || !qc || qc.status !== 'succeeded' || !qc.result?.technical || !qc.result?.mode || !qc.result?.reportFile) {
+          setError('质检结论不完整，无法人工放行。请先点「补做技术质检」生成完整结论。');
+          return;
+        }
+        setSubmitting(`release:${task.id}`);
+        try {
+          await remote(packId, 'commit', {
+            projectId: project.id,
+            expectedRevision: project.revision,
+            stage: 'qc',
+            idempotencyKey: `manual-release-${task.id}`,
+            payload: {
+              mode: qc.result.mode,
+              reportFile: qc.result.reportFile,
+              // 判据没过的事实不改写；technical 原样带回，后端才不会因为
+              // `passed !== technical.passed` 或「没有 issues 却放行」而拒绝。
+              passed: false,
+              technical: qc.result.technical,
+              userOverride: true,
+            },
+          });
+          // 重新拉取任务与项目：让 task.qc.result.userOverride 生效，按钮随之消失、
+          // 常驻标记出现；同时 invalidateDownstream 清掉的 packaging/封面也会刷新。
+          await taskFeed.refresh();
+          await reload();
+          setError(null);
+          setNotice('已人工放行：这条成片已进入「发布」页，原已生成的发布文案/封面已被清掉，需重新生成封面。');
+        } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
+      };
       // 删一条已结束的视频任务及其产物。视频渲染产物动辄几百 MB，失败任务尤其占地方。
       const deleteVideoTasks = async (tasks) => {
         const targets = (Array.isArray(tasks) ? tasks : [tasks]).filter(Boolean);
@@ -5954,6 +6137,12 @@ window.__ModuleLoader__.load({
       const taskCard = (task) => {
         const taskQc = task.qc || null;
         const qcPassed = taskQc?.status === 'succeeded' && taskQc.result?.technical?.passed === true && (task.result?.qc ? taskQc.result?.review?.passed === true : true);
+        // 技术质检结论里的具体问题清单；缺结论时为空数组，不放行。
+        const qcTechnicalIssues = taskQc?.status === 'succeeded' && Array.isArray(taskQc.result?.technical?.issues) ? taskQc.result.technical.issues : [];
+        // 质检失败且确有技术问题：可人工放行，但「质检通过」标记不会点亮。
+        const qcFailedWithIssues = task.status === 'succeeded' && Boolean(task.result?.video) && !qcPassed && qcTechnicalIssues.length > 0;
+        // 已经点过人工放行：常驻标记，且不再提供放行按钮（避免用户以为没成功而重复点）。
+        const qcReleased = qcFailedWithIssues && taskQc?.result?.userOverride === true;
         const liveStatus = task.status === 'running' ? videoPhaseLabel(task.phase) || mediaStatusLabel(task.status) : mediaStatusLabel(task.status);
         const statusClass = task.status === 'failed' ? 'sv-status-error' : task.status === 'succeeded' ? 'sv-stage' : 'sv-status-manual';
         const progress = task.status === 'running' || task.status === 'succeeded' ? videoTaskProgress(task, now) : null;
@@ -5962,8 +6151,18 @@ window.__ModuleLoader__.load({
           progress ? h(VideoTaskProgress, { progress, status: task.status, eta: task.status === 'running' && task.status !== 'succeeded' ? taskEta : null }) : null,
           task.status === 'succeeded' && task.result?.video ? h(React.Fragment, null, h(VideoTaskMediaPreview, { packId, task, stage: 'video', setError }), h('div', { className: 'sv-video-task-detail' }, h('span', null, `${task.result.video.width || '?'}x${task.result.video.height || '?'} · ${task.result.video.fps || '?'}fps`), h('span', null, `时长 ${formatMediaDuration(task.result.video.durationSeconds)}`), h('span', null, formatMediaBytes(task.result.video.bytes)))) : null,
           task.error ? h('p', { className: 'sv-error' }, mediaErrorText(task.error)) : null,
-          task.status === 'succeeded' && task.result?.video && !qcPassed ? h('p', { className: 'sv-warn' }, '这条成片还没有技术质检记录，因此不会出现在「发布」页。可点「补做技术质检」，无需重新渲染。') : null,
-          h('div', { className: 'sv-actions' }, task.source?.script?.body ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setScriptDrawer(task) }, '查看稿件') : null, task.source?.voiceover?.audio || task.source?.subtitles || task.input?.backgroundMusic ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setMediaDrawer(task) }, '查看配音/字幕/BGM') : null, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSummaryDrawer(task) }, '执行详情'), task.status === 'succeeded' && task.result?.video && !qcPassed ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(submitting) || taskFeed.anyRunning, onClick: () => ask({ title: '补做技术质检', copy: `将对「${task.projectTitle}」的现有成片补做一次技术质检（检查分辨率、帧率、音轨、时长与字幕），通过后该成片会出现在「发布」页。不会重新渲染视频。`, confirm: '开始质检', onConfirm: () => { void runTechnicalQc(task); } }) }, submitting === `qc:${task.id}` ? '正在提交…' : '补做技术质检') : null, task.status === 'failed' ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: submitting === task.projectId, onClick: () => retryTask(task) }, submitting === task.projectId ? '正在提交…' : '重试') : null, qcPassed ? h('span', { className: 'sv-meta' }, task.result?.qc ? '技术质检与独立审片通过' : '技术质检通过') : null, ['succeeded', 'failed'].includes(task.status) ? h('button', { type: 'button', className: 'lwb-danger-button', disabled: Boolean(submitting), onClick: () => ask({ title: '删除这条视频任务？', copy: `将删除「${task.projectTitle}」这条${task.status === 'failed' ? '失败' : '已完成'}的视频任务记录，以及磁盘上的成片与渲染中间文件（视频产物通常有几百 MB）。删除后无法恢复；项目的稿件与配音不受影响，只是这条渲染记录不再出现在列表里。`, confirm: '确认删除', danger: true, onConfirm: () => { void deleteVideoTasks(task); } }) }, submitting === `delete:${task.id}` ? '正在删除…' : '删除') : null),
+          // 三种下游缺失，分开说清，避免把「质检失败」误报成「没有记录」。
+          // 1) 根本没有质检记录（缺 qc 产物）：引导去补做。
+          task.status === 'succeeded' && task.result?.video && !taskQc ? h('p', { className: 'sv-warn' }, '这条成片还没有技术质检记录，因此不会出现在「发布」页。可点「补做技术质检」，无需重新渲染。') : null,
+          // 2) 质检失败且确有技术问题：给放行入口 + 危险提示（warn 黄，提示风险）。
+          qcFailedWithIssues && !qcReleased ? h('p', { className: 'sv-warn' }, `这条成片技术质检未通过（${qcTechnicalIssues[0]}），不会出现在「发布」页。若你确认这正是要的静态/字幕风格，可点下方按钮人工放行。`) : null,
+          // 3) 已人工放行：常驻状态标记，用中性偏冷的新色（不复用 warn 黄），
+          //    让用户几天后回看也知道它没经过合格质检。
+          qcReleased ? h('p', { className: 'sv-released' }, `已人工放行 · 质检未通过（${qcTechnicalIssues[0] || '技术问题'}）`) : null,
+          h('div', { className: 'sv-actions' }, task.source?.script?.body ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setScriptDrawer(task) }, '查看稿件') : null, task.source?.voiceover?.audio || task.source?.subtitles || task.input?.backgroundMusic ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setMediaDrawer(task) }, '查看配音/字幕/BGM') : null, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSummaryDrawer(task) }, '执行详情'), task.status === 'succeeded' && task.result?.video && !qcPassed ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(submitting) || taskFeed.anyRunning, onClick: () => ask({ title: '补做技术质检', copy: `将对「${task.projectTitle}」的现有成片补做一次技术质检（检查分辨率、帧率、音轨、时长与字幕），通过后该成片会出现在「发布」页。不会重新渲染视频。`, confirm: '开始质检', onConfirm: () => { void runTechnicalQc(task); } }) }, submitting === `qc:${task.id}` ? '正在提交…' : '补做技术质检') : null,
+          // 人工放行：仅当质检失败且确有技术问题、且尚未放行时显示。放过之后按钮消失。
+          qcFailedWithIssues && !qcReleased ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(submitting) || taskFeed.anyRunning, onClick: () => ask({ title: '人工放行这条成片', copy: `这条成片技术质检未通过（${qcTechnicalIssues[0]}）。放行后它会进入「发布」页，可正常打包与生成封面，但「质检通过」标记不会点亮。\n\n如果你要的就是纯字幕/静态海报风格，可以继续。\n如果这不是你要的效果，说明画面没渲染出来——放行后发出去就是一条空白视频。\n\n注意：放行会按当前稿件版本重新计算发布资料，原已生成的发布文案/封面将被清掉，放行后需重新生成封面。`, confirm: '确认放行', onConfirm: () => { void releaseVideoCut(task); } }) }, submitting === `release:${task.id}` ? '正在提交…' : '这是我要的静态风格，直接采用') : null,
+          task.status === 'failed' ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: submitting === task.projectId, onClick: () => retryTask(task) }, submitting === task.projectId ? '正在提交…' : '重试') : null, qcPassed ? h('span', { className: 'sv-meta' }, task.result?.qc ? '技术质检与独立审片通过' : '技术质检通过') : null, ['succeeded', 'failed'].includes(task.status) ? h('button', { type: 'button', className: 'lwb-danger-button', disabled: Boolean(submitting), onClick: () => ask({ title: '删除这条视频任务？', copy: `将删除「${task.projectTitle}」这条${task.status === 'failed' ? '失败' : '已完成'}的视频任务记录，以及磁盘上的成片与渲染中间文件（视频产物通常有几百 MB）。删除后无法恢复；项目的稿件与配音不受影响，只是这条渲染记录不再出现在列表里。`, confirm: '确认删除', danger: true, onConfirm: () => { void deleteVideoTasks(task); } }) }, submitting === `delete:${task.id}` ? '正在删除…' : '删除') : null),
         );
       };
       const sourcePanel = h('section', { className: 'sv-section sv-video-source' },
@@ -6474,7 +6673,7 @@ window.__ModuleLoader__.load({
             h('input', { type: 'checkbox', checked: selected.has(item.id), disabled: Boolean(deleting), 'aria-label': `选择素材「${item.title}」`, onChange: () => setSelected((current) => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next; }) }),
           ),
           h('p', { className: 'sv-pb-card-title' }, item.title),
-          stateBadge(item),
+          h('div', { className: 'sv-pb-card-badges' }, stateBadge(item), item.qcUserOverride ? h('span', { className: 'sv-released-tag' }, '已人工放行') : null),
         ),
         h('p', { className: 'sv-pb-card-meta' }, [item.account?.name || '通用', videoSpec(item)].filter(Boolean).join(' · ')),
         h('p', { className: 'sv-pb-card-meta' }, [coverNote(item), item.packaging ? `标签 ${item.packaging.content?.tags?.length || 0} 个` : null, archived ? `已归档 · ${item.account?.name || ''}` : null, relativeTime(item.updatedAt)].filter(Boolean).join(' · ')),
