@@ -654,6 +654,9 @@ function producedStageData(stage, payload, source) {
         ...(variationInput ? { variation: {
           assessed: variationInput.assessed === true,
           passed: variationInput.passed === true,
+          // 2026-10-22：variation 降级为记录项。advisory=true 表示这条只记录、不参与否决。
+          // 字段一个没删（失败提示与人工放行仍依赖它们），只是多带一个语义标记。
+          ...(variationInput.advisory === true ? { advisory: true } : {}),
           sampledFrameCount: optionalInteger(variationInput.sampledFrameCount, '主画面抽帧数', 1, maxSampledFrames),
           distinctMainFrames: optionalInteger(variationInput.distinctMainFrames, '主画面不同帧数', 1, maxSampledFrames),
           meaningfulPairs: optionalInteger(variationInput.meaningfulPairs, '主画面有效变化对数', 0, maxSampledFrames - 1),

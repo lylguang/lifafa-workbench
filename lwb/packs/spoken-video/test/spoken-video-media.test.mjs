@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { linkDirectoryForTest } from './fs-link-helper.mjs'
 import { tmpdir } from 'node:os'
@@ -1359,6 +1359,104 @@ test('QC frame-content gate tolerates an empty frame list without crashing', () 
   // 注意（fail-open，待 Chief 决定是否收紧）：当前空数组 passed=true（blankRatio=0<0.5）。
   // 若 sampled.frameFiles 为空，content 门会静默跳过；建议改为 passed:false（fail-closed）。
 })
+
+// ---------------------------------------------------------------------------
+// 边缘密度（edgeDensity）：2026-10-22 新增的第三条空白信号。
+//
+// 为什么加它：颜色数只数「颜色种类」，平滑渐变废片有 219 色照样放行；
+// 变化量（variation）比的是「帧与帧」，合法片「只有一行标题在换」与真故障片
+// 「完全静止」在像素层面完全一样（distinct=1 / avg=0），任何单一像素变化阈值
+// 都分不开。边缘密度是空间信号：看「这一帧里有没有画出形状的东西」——
+// 文字/图形/进度条有边缘，纯色/平滑渐变/噪点没有。
+//
+// 下列数字是 QA 2026-10-22 在同一批真实帧上实测的（7 类样本）：
+//   合法极简（底部字幕变 / 仅顶部标题变 / 仅底部进度条）：0.0140–0.0375
+//   真故障（纯色 / 有色渐变 / 空白+噪点）：              0.0000–0.0004
+// 阈值 0.005 只由这 7 个样本标定，**不是标定过的硬阈值**，上线前需真实批量回归。
+// ---------------------------------------------------------------------------
+const EDGE_LEGAL_MIN = 0.0140
+const EDGE_FAULT_MAX = 0.0004
+
+test('QC frame-content gate treats a frame without any drawn shape as blank', () => {
+  // 有色但无形状（平滑渐变废片）：色数 219 > 64、透明 0 → 只有边缘密度能抓住它。
+  const gradientWaste = { distinctColors: 219, transparentFraction: 0, edgeDensity: 0 }
+  assert.equal(analyzeFrameContent([gradientWaste]).passed, false, '有色但无形状的帧算空白')
+  // 合法极简帧：色数高、有边缘 → 不是空白。
+  const legalMinimal = { distinctColors: 4075, transparentFraction: 0, edgeDensity: 0.0375 }
+  assert.equal(analyzeFrameContent([legalMinimal]).passed, true, '有形状的极简帧要放行')
+  // 不传 edgeDensity 的旧调用（无边缘数据）不能被误判成空白。
+  assert.equal(analyzeFrameContent([{ distinctColors: 300, transparentFraction: 0 }]).passed, true, '缺边缘数据时按原有语义放行')
+})
+
+test('QC frame-content gate keeps the edge-density rule on a ratio, not zero-tolerance', () => {
+  // 边缘密度同样走分数制：单帧无形状可能有合法原因（整帧就是一张无边缘的照片）。
+  const frames = (count, blank) => Array.from({ length: count }, (_, index) => (
+    index < blank
+      ? { distinctColors: 300, transparentFraction: 0, edgeDensity: 0 }
+      : { distinctColors: 300, transparentFraction: 0, edgeDensity: 0.0375 }
+  ))
+  assert.equal(analyzeFrameContent(frames(8, 3)).passed, true, '3/8 无形状要放行（留白/转场）')
+  assert.equal(analyzeFrameContent(frames(8, 3)).blankFrameCount, 3)
+  assert.equal(analyzeFrameContent(frames(8, 4)).passed, false, '4/8 无形状（恰好 0.5）要判死')
+  assert.equal(analyzeFrameContent(frames(8, 8)).passed, false, '8/8 无形状是真故障')
+  assert.equal(analyzeFrameContent(frames(8, 8)).blankRatio, 1)
+})
+
+test('QC frame-content gate separates the seven measured sample classes', () => {
+  // 2026-10-22 QA 七案例对照（用实测得到的色数/边缘密度复现判据结果）。
+  // A-G 七例在「内容检测」下必须全部判对：真故障三例拦下、合法三例放行。
+  const sample = (colors, edge) => ({ distinctColors: colors, transparentFraction: 0, edgeDensity: edge })
+  const judge = (frames) => analyzeFrameContent(frames)
+  // A 真实好片：放行
+  assert.equal(judge([sample(1332, 0.0107)]).passed, true, 'A 真实好片放行')
+  // B 合法·底部 20% 字幕变：放行
+  assert.equal(judge([sample(2832, 0.0277)]).passed, true, 'B 合法底部字幕变放行')
+  // C 合法·仅顶部 6% 标题变：放行
+  assert.equal(judge([sample(4075, 0.0375)]).passed, true, 'C 合法顶部标题变放行')
+  // D 合法·仅底部 2% 进度条：放行
+  assert.equal(judge([sample(4075, 0.0375)]).passed, true, 'D 合法底部进度条放行')
+  // E 真故障·今天真实空白片（1 色）：拦下
+  assert.equal(judge([sample(1, 0)]).passed, false, 'E 真实空白片拦下')
+  // F 真故障·有色渐变废片：拦下（靠边缘密度，色数 219 拦不住）
+  assert.equal(judge([sample(219, 0)]).passed, false, 'F 有色渐变废片拦下')
+  // G 真故障·空白+噪点：拦下
+  assert.equal(judge([sample(146, 0.0004)]).passed, false, 'G 空白+噪点拦下')
+  // 边缘密度两档之间必须留有空隙：合法最低 0.0140 > 故障最高 0.0004。
+  assert.ok(EDGE_LEGAL_MIN > EDGE_FAULT_MAX, '合法与故障的边缘密度区间不能重叠')
+})
+
+// ---------------------------------------------------------------------------
+// variation 必须是「记录项」，不得重新参与质检否决。
+//
+// 2026-10-22 端到端实测：变化量这个判据分不开「合法极简片」与「真故障片」——
+// 「只有一行标题在换」「只有一条进度条在动」在像素层面与「完全静止」一模一样
+// （都是 distinctMainFrames=1 / averagePairDifference=0），三种裁切口径 + 三档
+// 阈值全部试过，没有任何单一像素阈值能分开。所以 variation 降级为记录项，
+// 空白判定交给 content（色数 + 透明 + 边缘密度）。
+//
+// 这条守卫存在的理由：变异验证时发现，把 variation 加回 passed 计算、删掉
+// advisory 标记，四条 content 测试**全绿**——没有任何东西拦得住「有人不知道
+// 今天的结论，把 variation 改回否决线」。那等于把今天的误杀原样放回去。
+// ---------------------------------------------------------------------------
+test('visual variation stays advisory and never gates the technical verdict', () => {
+  const source = readFileSync(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+
+  // 1) measureVisualVariation 必须自报 advisory，让下游知道它只记录不否决。
+  assert.match(source, /advisory:\s*true/u, 'measureVisualVariation 必须标注 advisory: true')
+
+  // 2) technical 的 passed 不得再包含 variation.passed。
+  const passedLine = source.split(/\r?\n/).find((line) => line.includes('passed: topology.passed'))
+  assert.ok(passedLine, '必须找得到 technical.passed 的计算行')
+  assert.doesNotMatch(passedLine, /variation\.passed/u,
+    'variation 不得重新参与质检否决——它分不开合法极简片与真故障片（2026-10-22 实测）')
+
+  // 3) variation 的数字必须照常算出来并写进 technical-qc.json（降级不等于删数据）。
+  assert.match(source, /distinctMainFrames:\s*hashes\.size/u, 'variation 的数字仍要照常计算')
+  assert.match(source, /averagePairDifference:\s*Number\(averagePairDifference\.toFixed\(3\)\)/u,
+    'variation 的平均帧差仍要照常计算')
+  assert.match(source, /variation,/u, 'technical-qc.json 必须仍带 variation 块')
+})
+
 
 test('treats an attached album cover as audio metadata, not a real video stream', () => {
   const audio = normalizeProbe({

@@ -450,6 +450,45 @@ test('qc commit stores userOverride while keeping passed=false', async (t) => {
   assert.equal(detail.artifacts.qc.data.overrideBy, 'spoken-video/ffprobe', 'overrideBy 记录提交来源')
 })
 
+// 2026-10-22：variation 降级为记录项，但它仍是失败提示与人工放行的数据来源，
+// 所以落盘后的字段一个都不能少。这条测试就是 schema 的守卫：谁删字段谁红。
+test('qc commit keeps every variation field even though variation is now advisory', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await projectThroughVideo(store, currentAgent)
+  await store.commitProduced(currentAgent, {
+    projectId: project.id, expectedRevision: project.revision, stage: 'qc', idempotencyKey: 'm0-qc-variation-01', source: 'spoken-video/ffprobe',
+    payload: {
+      mode: 'automatic', reportFile: 'media/qc/v.json', passed: false,
+      technical: {
+        passed: false, issues: ['成片有 24/24 张画面没有任何内容。'], warnings: ['画面变化量偏少（记录项）。'],
+        video: {}, audio: {}, subtitles: { cueCount: 1 },
+        variation: {
+          assessed: true, passed: false, advisory: true,
+          sampledFrameCount: 24, distinctMainFrames: 1, meaningfulPairs: 0,
+          averagePairDifference: 0, pairDifferences: Array.from({ length: 23 }, () => 0),
+          crop: 'top 80%', note: '画面变化量为记录项，不参与质检否决。',
+        },
+      },
+    },
+  })
+  const detail = await store.get(currentAgent, { projectId: project.id })
+  const variation = detail.artifacts.qc.data.technical.variation
+  assert.ok(variation, 'variation 块必须落盘')
+  // 五个必需字段一个都不能少——它们是失败提示与人工放行的数据来源。
+  assert.equal(variation.distinctMainFrames, 1, 'distinctMainFrames 必须保留')
+  assert.equal(variation.meaningfulPairs, 0, 'meaningfulPairs 必须保留')
+  assert.equal(variation.averagePairDifference, 0, 'averagePairDifference 必须保留')
+  assert.equal(variation.pairDifferences.length, 23, 'pairDifferences 必须保留')
+  assert.equal(variation.crop, 'top 80%', 'crop 必须保留')
+  // 降级语义标记也要落盘：它是「这条只记录、不否决」的凭据。
+  assert.equal(variation.advisory, true, 'advisory 标记必须落盘')
+  assert.equal(variation.passed, false, 'passed 仍如实反映变化量是否够，不改写事实')
+  // 记录项不能变成否决线：warnings 里可以写，但 issues 才是拦截依据。
+  assert.equal(detail.artifacts.qc.data.technical.issues.length, 1, 'issues 不因 variation 而增加')
+})
+
 test('qc commit rejects userOverride when there are no issues', async (t) => {
   const cwd = await workspace(t)
   const store = new SpokenVideoProjectStore()

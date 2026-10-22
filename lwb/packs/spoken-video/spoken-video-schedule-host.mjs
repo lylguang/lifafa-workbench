@@ -836,7 +836,23 @@ export class SpokenVideoScheduleHost {
     let lastProgressAt = startedAt
     let lastMark = null
     const markOf = fingerprint || ((value) => {
-      try { return JSON.stringify([value?.status ?? null, value?.updatedAt ?? value?.updated ?? null, value?.phase ?? null, value?.progress ?? null]) } catch { return null }
+      try {
+        // 进度不一定在顶层：视频任务的渲染进度写在 pipeline.render（media-host 的
+        // #setVideoRenderProgress），而配音等阶段写在 progressInfo。两者都要纳入指纹，
+        // 否则「一直在写进度」的任务会因为指纹取错位置而纹丝不动，被停滞预算误杀。
+        // 2026-10-22 端到端实测：渲染到 82%（16565/20274）被 15 分钟停滞预算杀掉，
+        // 而 pipeline.render.updatedAt 在被杀前 1 秒还在更新——三个顶层字段全是 null。
+        const render = value?.pipeline?.render && typeof value.pipeline.render === 'object' ? value.pipeline.render : null
+        const info = value?.progressInfo && typeof value.progressInfo === 'object' ? value.progressInfo : null
+        return JSON.stringify([
+          value?.status ?? null,
+          value?.updatedAt ?? value?.updated ?? null,
+          value?.phase ?? null,
+          value?.progress ?? null,
+          render ? [render.stage ?? null, render.done ?? null, render.total ?? null, render.percent ?? null, render.updatedAt ?? null] : null,
+          info ? [info.stage ?? null, info.progress ?? null, info.updatedAt ?? null] : null,
+        ])
+      } catch { return null }
     })
     // 「暂时读不到」与「永远读不到」必须分开。写盘走「临时文件 + 原子 rename」，
     // rename 目标被任意句符打开就 EPERM 重试（见 writeJson）——落地前那一瞬读者会

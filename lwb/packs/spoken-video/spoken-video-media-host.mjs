@@ -1413,13 +1413,23 @@ async function measureVisualVariation(frameFiles, orientation, durationSeconds, 
   return {
     assessed,
     passed,
+    // 2026-10-22：variation 由「否决线」降级为「记录项」。
+    // 降级理由（QA 实测，7 类样本对照）：变化量分不开「合法极简片」与「真故障片」——
+    // 「只有一行标题在换」「只有一条进度条在动」这类口播主流排版，改全帧口径后
+    // avg 只有 0.246、meaningful 只有 1，照样判死；而真正该拦的空白片，
+    // content 判据（色数 + 透明 + 边缘密度）已经能可靠拦住。
+    // 因此 variation 的数字仍然照常计算并写进 technical-qc.json 供人工审片参考，
+    // 但不再参与总判定。字段与 schema 一律不变（见 spoken-video-store.mjs 的 qc 落盘校验）。
+    advisory: true,
     sampledFrameCount: frames.length,
     distinctMainFrames: hashes.size,
     meaningfulPairs,
     averagePairDifference: Number(averagePairDifference.toFixed(3)),
     pairDifferences,
     crop: orientation === 'landscape' ? 'top 80%' : 'left 88%, top 70%',
-    ...(assessed ? {} : { note: '成片短于 4 秒，仅记录变化数据，不启用变化阈值。' }),
+    ...(assessed
+      ? { note: '画面变化量为记录项，不参与质检否决；空白判定以内容检测（色数/透明/边缘密度）为准。' }
+      : { note: '成片短于 4 秒，仅记录变化数据，不启用变化阈值。' }),
   }
 }
 
@@ -1441,17 +1451,39 @@ async function measureVisualVariation(frameFiles, orientation, durationSeconds, 
  * 为什么是**分数制**而不是"有一帧空白就整片 FAIL"：真实成片的片头、片尾、
  * 转场经常出现接近纯色的帧，留白也是正当设计。零容忍会把合法片子判死——
  * 那正是这轮反复踩的"自动判据必然误杀"。只有空白帧**过半**才判失败。
+ *
+ * 2026-10-22 加了第三条空白信号：**帧内边缘密度**（edgeDensity）。
+ * 背景：前两条信号都分不开「合法极简片」与「真故障片」——
+ *   · 颜色数（distinctColors）只数颜色种类：平滑渐变废片有 219 色，照样放行；
+ *   · 变化量（variation）比的是帧与帧：合法片「只有一行标题在换」与真故障片
+ *     「完全静止」在像素层面完全一样（都是 distinct=1 / avg=0），任何单一
+ *     像素变化阈值都分不开（2026-10-22 实测三种裁切口径 + 三档阈值全部失败）。
+ * 边缘密度是**空间信号**：它看的是「这一帧里有没有画出形状的东西」——
+ * 文字/图形/进度条都有边缘，纯色、平滑渐变、噪点都没有。
+ * 2026-10-22 实测（同一批真实帧构造 7 类样本）：
+ *   合法极简（底部字幕变 / 仅顶部标题变 / 仅底部进度条）：0.0140–0.0375
+ *   真故障（纯色 1 色 / 有色渐变 / 空白+噪点）：        0.0000–0.0004
+ * 两个区间不重叠，中间有空隙。
+ *
+ * 阈值 0.005 的来历与局限（**重要，后人别当它是标定过的硬阈值**）：
+ * 这个数只由 7 个样本标定，其中真故障样本是人工构造的（真实渲染管线从未
+ * 产出过「有色但无形状」的废片）。真实生成器的排版多样性远大于这 7 例，
+ * 上线前必须拿**真实批量成片**回归验证这个阈值；样本量不足时宁可调松。
+ * 它与其他两条信号一样走分数制：单帧边缘密度低可能有合法原因
+ * （比如一整帧就是一张无边缘的照片），只有过半帧都这样才判失败。
  */
 const BLANK_DISTINCT_COLORS = 64
 const BLANK_TRANSPARENT_FRACTION = 0.99
 const BLANK_FRAME_RATIO = 0.5
+const BLANK_EDGE_DENSITY = 0.005
 
-/** 纯判定：frames 为 [{ distinctColors, transparentFraction }]，离线可测、不碰 ffmpeg。 */
+/** 纯判定：frames 为 [{ distinctColors, transparentFraction, edgeDensity }]，离线可测、不碰 ffmpeg。 */
 export function analyzeFrameContent(frames) {
   const list = Array.isArray(frames) ? frames : []
   const blankFrameCount = list.filter(
     (frame) => frame.distinctColors <= BLANK_DISTINCT_COLORS
-      || frame.transparentFraction >= BLANK_TRANSPARENT_FRACTION,
+      || frame.transparentFraction >= BLANK_TRANSPARENT_FRACTION
+      || (typeof frame.edgeDensity === 'number' && frame.edgeDensity < BLANK_EDGE_DENSITY),
   ).length
   // 空数组（抽帧失败/无成片）时 blankRatio 取 1：没有内容证据就不放行。
   const blankRatio = list.length ? blankFrameCount / list.length : 1
@@ -1462,10 +1494,11 @@ export function analyzeFrameContent(frames) {
     blankFrameCount,
     blankRatio: Number(blankRatio.toFixed(3)),
     maxTransparentFraction: list.length ? Math.max(0, ...list.map((frame) => frame.transparentFraction)) : 0,
+    minEdgeDensity: list.length ? Number(Math.min(...list.map((frame) => (typeof frame.edgeDensity === 'number' ? frame.edgeDensity : 1))).toFixed(6)) : 0,
   }
 }
 
-/** 对全帧 PNG 抽唯一色数与透明占比（不 crop）。 */
+/** 对全帧 PNG 抽唯一色数、透明占比与边缘密度（不 crop）。 */
 async function measureFrameContent(frameFiles, signal) {
   const perFrame = await Promise.all(frameFiles.map(async (file) => {
     const { stdout } = await execFileAsync('ffmpeg', [
@@ -1481,7 +1514,21 @@ async function measureFrameContent(frameFiles, signal) {
       seen.add((stdout[index] << 16) | (stdout[index + 1] << 8) | stdout[index + 2] | (alpha << 24))
     }
     const total = stdout.length / 4
-    return { distinctColors: seen.size, transparentFraction: total ? transparent / total : 0 }
+    // 边缘密度：单独一遍 edgedetect 采样。判据看的是「帧内有没有形状」，
+    // 所以按 640x360 灰度取样即可（够抓文字/图形的边，又不至于太慢）。
+    const { stdout: edgeRaw } = await execFileAsync('ffmpeg', [
+      '-v', 'error', '-i', file,
+      '-vf', 'scale=640:360,format=gray,edgedetect=low=0.1:high=0.4',
+      '-f', 'rawvideo', '-pix_fmt', 'gray', 'pipe:1',
+    ], { signal, encoding: 'buffer', maxBuffer: 1024 * 1024 * 4 })
+    let edgePixels = 0
+    for (const value of edgeRaw) if (value > 128) edgePixels += 1
+    const edgeTotal = edgeRaw.length
+    return {
+      distinctColors: seen.size,
+      transparentFraction: total ? transparent / total : 0,
+      edgeDensity: edgeTotal ? edgePixels / edgeTotal : 0,
+    }
   }))
   return analyzeFrameContent(perFrame)
 }
@@ -4611,15 +4658,20 @@ async #mimoReferenceDataUrl(root, input) {
       // 给数字、去掉猜测语气。原先写的是「成片可能退化为静态画面或少量文字卡片」——
       // 那是推测，用户看完仍不知道实际有多差。现在直接报采样帧数、不同画面数、
       // 以及完全相同的帧数，让用户能自己判断严重程度。
-      const variationIssues = variation.passed ? [] : [`主画面变化不足：${variation.sampledFrameCount} 个采样帧中只有 ${variation.distinctMainFrames} 种画面，其余 ${variation.sampledFrameCount - variation.distinctMainFrames} 帧完全相同。`]
+      //
+      // 2026-10-22：variation 降级为记录项，这条从「否决问题」变成「提示」。
+      // 理由：变化量分不开合法极简片与真故障片（QA 实测 7 类样本），而真正该拦的
+      // 空白片由 content 判据负责。数字照常写进 technical-qc.json 供人工审片参考。
+      const variationWarnings = variation.passed ? [] : [`画面变化量偏少（记录项，不影响本片是否通过）：${variation.sampledFrameCount} 个采样帧中只有 ${variation.distinctMainFrames} 种画面，其余 ${variation.sampledFrameCount - variation.distinctMainFrames} 帧完全相同。`]
       const contentIssues = content.passed ? [] : [
-        `成片有 ${content.blankFrameCount}/${content.sampledFrameCount} 张画面没有任何内容（整帧只有一种颜色或近乎全透明）。`
+        `成片有 ${content.blankFrameCount}/${content.sampledFrameCount} 张画面没有任何内容（整帧只有一种颜色、近乎全透明，或画面里没有画出任何文字/图形）。`
         + `这说明渲染管线没有把内容画出来，属于程序问题，重跑通常无效。请点「反馈问题」并附上任务编号 ${run.id}。`,
       ]
       const technical = {
         ...topology,
-        passed: topology.passed && variation.passed && subtitleIssues.length === 0 && content.passed,
-        issues: [...topology.issues, ...variationIssues, ...subtitleIssues, ...contentIssues],
+        passed: topology.passed && subtitleIssues.length === 0 && content.passed,
+        issues: [...topology.issues, ...subtitleIssues, ...contentIssues],
+        warnings: [...(topology.warnings || []), ...variationWarnings],
         subtitles: { ...topology.subtitles, maxTextChars: maxSubtitleChars, displayLimit: subtitleDisplayLimit, longCueCount: longSubtitleCount },
         variation,
         sampledFrames: sampled.frameFiles.map((file) => portableRelative(root, file)),
