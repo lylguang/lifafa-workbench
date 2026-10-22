@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, lstat, symlink } fro
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { inspectCreativeSource, inspectSceneBoundaryCoverage, inspectTimelineAlignment } from '../spoken-video-preflight.mjs'
 import { inspectContentSafety } from '../spoken-video-content-safety.mjs'
 import { inspectSceneCueCoverage, parseSceneCueMap } from '../spoken-video-scene-cues.mjs'
@@ -543,3 +544,44 @@ test('the cue contract stays out of the way when there is no scene table to chec
   assert.deepEqual(inspectSceneCueCoverage([{ id: 'a', start: 0, end: 5, cues: [1, 2] }], sixCues()), [])
   assert.deepEqual(inspectSceneCueCoverage([{ id: 'a', start: 0, end: 5, cues: [1, 2] }, { id: 'b', start: 5, end: 9, cues: [3, 4] }], [{ start: 0, end: 1 }]), [])
 })
+
+/*
+ * 回归：系统浏览器的探测顺序必须是 Edge 先、Chrome 后。
+ *
+ * 线上故障现场（2026-10-21）：用户三次视频制作失败，最后一次渲染"成功"，
+ * 但成片 1920×1080 每一帧都是 rgba(0,0,0,0)——**整页零像素**，被 H.264
+ * 编码成一片纯色。用户等 10 分钟拿到空片，还被质检判成"内容问题"。
+ *
+ * 根因：Remotion 4.0.522 配本机 Chrome 153（用户级安装）画不出任何像素；
+ * 同一份源码换 Edge 155 实测 2735 种颜色、画面完整（已端到端验证成片）。
+ * 旧注释写「Edge 放在 Chrome 之后（Chrome 与 Remotion 版本更接近）」——
+ * 该判断被实测推翻，故调换顺序。
+ *
+ * 为什么断言"顺序"而不是"某个路径存在"：候选顺序本身就是这次修复。
+ * 断言路径存在会让这条用例在没装 Edge 的机器上假失败；而顺序无论装没装
+ * 都成立，正是我们要钉的东西。后人若按「Chrome 更主流」把顺序调回去，
+ * 用户又会拿到全透明成片——而那种失败看起来像内容问题，极难定位。
+ */
+test('system browser candidates put Edge ahead of Chrome', () => {
+  // 只在 Windows 上有意义：macOS/Linux 的候选集不同，顺序不是这次的修复。
+  if (process.platform !== 'win32') return
+
+  // 用源码断言顺序，不真实探测：探测结果依赖本机装了什么，
+  // 而我们要钉的是"代码决定的优先级"，不是"这台机器装了什么"。
+  const remotion = readFileSync(new URL('../spoken-video-remotion.mjs', import.meta.url), 'utf8')
+  const start = remotion.indexOf('export function systemChromiumPath()')
+  assert.ok(start > 0, 'systemChromiumPath 必须还在')
+  const body = remotion.slice(start, remotion.indexOf('\n}\n', start))
+
+  const edgeAt = body.indexOf('msedge.exe')
+  const chromeAt = body.indexOf("'chrome.exe'")
+  assert.ok(edgeAt > 0 && chromeAt > 0, 'Edge 与 Chrome 都必须仍是候选')
+  assert.ok(edgeAt < chromeAt,
+    'Edge 必须排在 Chrome 之前：Remotion 4.0.522 配 Chrome 153 会渲染出全透明成片，Edge 155 正常')
+
+  // 用户级安装的 Chrome 在 %LOCALAPPDATA%，Program Files 下反而没有——
+  // 所以 LOCALAPPDATA 的候选必须保留，否则这台机器上两个都探测不到。
+  assert.match(body, /join\(local, 'Google', 'Chrome', 'Application', 'chrome\.exe'\)/u,
+    '必须保留 LOCALAPPDATA 下的 Chrome 候选（本机是用户级安装）')
+})
+

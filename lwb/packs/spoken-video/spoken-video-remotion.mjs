@@ -581,6 +581,10 @@ function sharedHeadlessShellPath() {
 /**
  * 探测系统里可用的 Chromium 内核浏览器（Chrome / Edge）。
  *
+ * 导出它只为测试：候选**顺序**是 2026-10-21 那次事故的修复本身，
+ * 必须被断言钉住（Edge 先于 Chrome），否则后人按「Chrome 更主流」调回去，
+ * 用户又会拿到全透明成片，而那种失败看起来像内容问题、极难定位。
+ *
  * 为什么必须做这一步：`browserExecutableArgs()` 以前探测不到 headless-shell 时
  * 直接返回空数组，Remotion 就会**自己去下载** chrome-headless-shell——用户点
  * 「制作视频」只看到一直卡着、没有任何进度提示，实测在本机卡了 390 秒并持有
@@ -593,22 +597,28 @@ function sharedHeadlessShellPath() {
  *
  * 返回真正的可执行文件路径，找不到返回 null。
  */
-function systemChromiumPath() {
+export function systemChromiumPath() {
   const candidates = []
   if (process.platform === 'win32') {
     const local = process.env.LOCALAPPDATA
     const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
     const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'
+    // Edge 必须排在 Chrome 之前：2026-10-21 实测，Remotion 4.0.522 配本机
+    // Chrome 153（用户级安装）时整页零像素输出——成片 1920×1080 全部
+    // rgba(0,0,0,0)，被 H.264 编码成一片底色；用户等 3 分钟拿到空片，
+    // 还被质检判成「内容问题」。同一份源码换 Edge 155 实测 2735 种颜色、画面完整。
+    // 旧注释写「Edge 放在 Chrome 之后（Chrome 与 Remotion 版本更接近）」——
+    // 该判断已被实测推翻，故调换顺序。若某台机器 Edge 反而不可用，
+    // 用 LWB_REMOTION_BROWSER_EXECUTABLE 显式指定。
     if (local) candidates.push(join(local, 'Google', 'Chrome', 'Application', 'chrome.exe'))
-    candidates.push(
-      join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    )
-    // Edge：Windows 上基本必有，放在 Chrome 之后（Chrome 与 Remotion 版本更接近）。
-    if (local) candidates.push(join(local, 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
     candidates.push(
       join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
       join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    )
+    if (local) candidates.push(join(local, 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
+    candidates.push(
+      join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
     )
   } else if (process.platform === 'darwin') {
     candidates.push(
