@@ -578,18 +578,50 @@ function sharedHeadlessShellPath() {
   } catch { /* 浏览器未安装时退回自选路径 */ }
   return null
 }
+// 候选顺序（不验存在性）。抽成独立函数是为了能被单测断言「Windows 上 Edge 必须
+// 排在 Chrome 之前」——那条测试不能依赖本机是否真的装了 Edge，所以只比数组顺序。
+//
+// Edge 必须排在 Chrome 之前：2026-10-21 实测，Remotion 4.0.522 配本机
+// Chrome 153（用户级安装）时整页零像素输出——成片 1920×1080 全部
+// rgba(0,0,0,0)，被 H.264 编码成一片底色；用户等 3 分钟拿到空片，
+// 还被质检判成「内容问题」。同一份源码换 Edge 155 实测 2735 种颜色、画面完整。
+// 旧注释写「Edge 放在 Chrome 之后（Chrome 与 Remotion 版本更接近）」——
+// 该判断已被实测推翻，故调换顺序。若某台机器 Edge 反而不可用，
+// 用 LWB_REMOTION_BROWSER_EXECUTABLE 显式指定。
+export function chromiumCandidates() {
+  if (process.platform === 'win32') {
+    const local = process.env.LOCALAPPDATA
+    const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
+    const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'
+    const edge = []
+    if (local) edge.push(join(local, 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
+    edge.push(
+      join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    )
+    const chrome = []
+    if (local) chrome.push(join(local, 'Google', 'Chrome', 'Application', 'chrome.exe'))
+    chrome.push(
+      join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    )
+    return [...edge, ...chrome]
+  }
+  if (process.platform === 'darwin') {
+    return [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    ]
+  }
+  return ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/microsoft-edge']
+}
+
 /**
  * 探测系统里可用的 Chromium 内核浏览器（Chrome / Edge）。
  *
- * 导出它只为测试：候选**顺序**是 2026-10-21 那次事故的修复本身，
+ * 导出 chromiumCandidates() 只为测试：候选**顺序**是 2026-10-21 那次事故的修复本身，
  * 必须被断言钉住（Edge 先于 Chrome），否则后人按「Chrome 更主流」调回去，
  * 用户又会拿到全透明成片，而那种失败看起来像内容问题、极难定位。
- *
- * 为什么必须做这一步：`browserExecutableArgs()` 以前探测不到 headless-shell 时
- * 直接返回空数组，Remotion 就会**自己去下载** chrome-headless-shell——用户点
- * 「制作视频」只看到一直卡着、没有任何进度提示，实测在本机卡了 390 秒并持有
- * 到 142.250.73.123:443 的连接。而代码上方那句注释「退回系统 Chrome：慢，但一定
- * 能启动」当时并没有对应的实现，是典型「注释承诺了、代码没做」。
  *
  * 注意 Chrome 的安装位置不止标准路径：这台机器就是**用户级安装**
  * （%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe），Program Files 下没有。
@@ -598,37 +630,7 @@ function sharedHeadlessShellPath() {
  * 返回真正的可执行文件路径，找不到返回 null。
  */
 export function systemChromiumPath() {
-  const candidates = []
-  if (process.platform === 'win32') {
-    const local = process.env.LOCALAPPDATA
-    const programFiles = process.env.ProgramFiles || 'C:\\Program Files'
-    const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'
-    // Edge 必须排在 Chrome 之前：2026-10-21 实测，Remotion 4.0.522 配本机
-    // Chrome 153（用户级安装）时整页零像素输出——成片 1920×1080 全部
-    // rgba(0,0,0,0)，被 H.264 编码成一片底色；用户等 3 分钟拿到空片，
-    // 还被质检判成「内容问题」。同一份源码换 Edge 155 实测 2735 种颜色、画面完整。
-    // 旧注释写「Edge 放在 Chrome 之后（Chrome 与 Remotion 版本更接近）」——
-    // 该判断已被实测推翻，故调换顺序。若某台机器 Edge 反而不可用，
-    // 用 LWB_REMOTION_BROWSER_EXECUTABLE 显式指定。
-    if (local) candidates.push(join(local, 'Google', 'Chrome', 'Application', 'chrome.exe'))
-    candidates.push(
-      join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-      join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-    )
-    if (local) candidates.push(join(local, 'Microsoft', 'Edge', 'Application', 'msedge.exe'))
-    candidates.push(
-      join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-    )
-  } else if (process.platform === 'darwin') {
-    candidates.push(
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-    )
-  } else {
-    candidates.push('/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/microsoft-edge')
-  }
-  for (const candidate of candidates) {
+  for (const candidate of chromiumCandidates()) {
     try {
       // 与 sharedHeadlessShellPath 同一套规则：先 realpath 化（symlink 路径 spawn 会
       // 报 ENOENT），再检查长度安全，超长宁可不返回也不要 spawn 失败。
@@ -705,13 +707,107 @@ export function browserExecutableArgs() {
 // DevToolsActivePort——25 秒后整个 render 在出第一帧前就失败；紧接着重跑同一条
 // 命令必然成功（2026-10-01 实测两次失败均如此）。对这种明确的「启动即静默」签名
 // 做有限重试，其他渲染/编码错误必须立刻抛出，不能被重试掩盖。
+/**
+ * 渲染前管线探测：先用 Remotion 渲染一帧到临时文件，再统计不同颜色数，
+ * 作用是在跑完整片（几分钟）之前，拦住「浏览器能启动、但整页画不出任何东西」
+ * 这种最坑的情况——2026-10-21 用户连续三次视频失败：渲染退出码 0、成片却全是
+ * 透明/纯色，还被技术质检误判成「内容问题」。这种失败等 3 分钟毫无意义，
+ * 探测用 15 秒预算即可判定。
+ *
+ * 用 rgb24 而非带 alpha 的格式：透明整页在 rgb24 下会塌成单一黑色，与 Edge 正常
+ * 渲染出的多样画面可区分。阈值取「≥ 2 种颜色」——只要能画出哪怕一个元素即可，
+ * 不要求画面有多复杂。
+ *
+ * @param {string} executable 实际会用的浏览器真实路径（来自 browserExecutableArgs）
+ * @param {string} projectDir 已写好的 Remotion 工程目录（含 src/index.ts 与 props）
+ * @returns {Promise<boolean>} 管线能画出内容则为 true
+ */
+const RENDER_PROBE_TIMEOUT_MS = 15_000
+async function probeRenderPipeline(executable, projectDir, signal) {
+  const out = join(projectDir, 'outputs', '.preflight-probe.png')
+  await mkdir(dirname(out), { recursive: true, mode: 0o700 })
+  try {
+    await execFileAsync(process.execPath, [REMOTION_CLI,
+      'still', join('src', 'index.ts'), 'SpokenVideo', out,
+      '--frame', '15', '--props', join('public', 'task-props.json'),
+      '--browser-executable', executable,
+    ], { cwd: projectDir, timeout: RENDER_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 * 8, signal })
+  } catch {
+    // 连一帧都渲染不出来（或超时）——管线不可用。
+    return false
+  }
+  try {
+    const { stdout } = await execFileAsync('ffmpeg', [
+      '-v', 'error', '-i', out, '-vf', 'scale=12:12,format=rgb24', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1',
+    ], { signal, encoding: 'buffer', maxBuffer: 1024 * 1024 })
+    const seen = new Set()
+    for (let index = 0; index + 3 <= stdout.length; index += 3) {
+      seen.add(`${stdout[index]}.${stdout[index + 1]}.${stdout[index + 2]}`)
+    }
+    return seen.size >= 2
+  } catch {
+    // 抽帧/统计失败：保守判定为不可用，宁可明确报错也不放空片通过。
+    return false
+  } finally {
+    await rm(out, { force: true }).catch(() => {})
+  }
+}
+
+// 进程内缓存：同一浏览器路径只探测一次。重启后自然重探（满足「缓存」要求，
+// 且不跨进程残留）。2026-10-22：这是本轮事故最该长的记性——用户等 10 分钟拿到
+// 一个空片，还被告知「是你的内容问题」。
+const renderPipelineProbeCache = new Map()
+
+/**
+ * 渲染前必须调用的门：确认当前浏览器能真正画出画面，否则快速失败。
+ * 失败文案给出可执行动作（改用 Edge 或指定 LWB_REMOTION_BROWSER_EXECUTABLE），
+ * 不让用户白等整片渲染。结果按浏览器路径缓存。
+ *
+ * @param {string} projectDir 已写好的 Remotion 工程目录
+ * @param {{ signal?: AbortSignal }} [options]
+ */
+export async function assertRenderPipelineUsable(projectDir, { signal } = {}) {
+  const args = browserExecutableArgs() // 抛错或返回 ['--browser-executable', path]
+  const executable = args[1]
+  // 只认「已确认能画」这一个结论。失败不写缓存，所以这里不存在「缓存了失败」
+  // 的情况——每个新工程都有一次重新探测的机会，不会被前一个工程的失败挡住。
+  if (renderPipelineProbeCache.get(executable) === true) return
+  signal?.throwIfAborted()
+  const usable = await probeRenderPipeline(executable, projectDir, signal)
+  // 只缓存「能用」的结论，**不缓存失败**。
+  //
+  // 缓存键是浏览器路径，但探测结果同时取决于「浏览器能不能画」和「这个工程的
+  // 内容能不能画出画面」两件事。把失败也缓存进去，等于把「这个工程没画出来」
+  // 记成「这个浏览器不能画」——之后同一进程里其他工程（本来能渲染的）全被
+  // 这道缓存挡死，报「渲染管线无法在当前浏览器画出画面」，而浏览器明明是好的。
+  // 2026-10-22 实测复现：先用一个会失败的工程探测，再用真实项目就被缓存挡住。
+  //
+  // 代价是浏览器真坏时要重探几次；换来的是一个工程的失败不会毒死同进程其他任务。
+  // 「这片子有没有内容」由技术质检的 analyzeFrameContent 负责，不该由这道门判定。
+  if (usable) renderPipelineProbeCache.set(executable, true)
+  if (!usable) {
+    throw new Error(
+      '渲染管线无法在当前浏览器画出画面：探测帧只有一种颜色，说明该浏览器（或它与 Remotion 的组合）不能正确渲染视频。'
+      + '请改用 Microsoft Edge，或设置环境变量 LWB_REMOTION_BROWSER_EXECUTABLE 指向 chrome-headless-shell / Edge 的可执行文件后重跑。',
+    )
+  }
+}
 export const RENDER_BROWSER_ATTEMPTS = 3
 const RENDER_BROWSER_RETRY_DELAY_MS = 3000
 
+// 浏览器启动失败（连接超时 / 进程拉不起来）→ 可有限重试。
+// 第三个签名是 dev server 页面加载竞态：dev server 起来了、但浏览器去访问 `localhost:3000`
+// 的页面时没响应（Remotion 报错 `Visited "http://localhost:3000/index.html" but got no
+// response`）。同一工程、同一个工程，renderStill 能取到页、render 在 16 路浏览器池时
+// 会中招——和前两种同源，都是「启动即静默」，应同等待重试。
+// 注意：签名必须精确（localhost:3000[^"]* + "but got no response"）。写成宽泛的
+// /localhost:3000/ 会把「dev server 真的起不来」（端口占用、打包失败）也重试三次，
+// 把真故障拖慢还掩盖原因。
 export function isBrowserLaunchFailure(message) {
   const text = String(message || '')
   return /Timed out after \d+ ms while trying to connect to the browser/u.test(text)
     || /Failed to launch the browser process/u.test(text)
+    || /Visited "http:\/\/localhost:3000[^"]*" but got no response/u.test(text)
 }
 
 /** 把 `remotion compositions` 的失败输出归位成预检 finding（含 file:line）。 */
@@ -872,11 +968,20 @@ function waitBeforeRetry(ms, signal) {
  * 实测把并发提到 16，1000 帧中段画面从 25s 降到 23s（-8%）。收益不大但零风险，
  * 再往上（24）实测回到 23s，CPU 已被喂饱，所以 16 就是拐点。
  */
+// 已知限制（2026-10-22）：测试的临时工程在 --concurrency 16 下会确定性失败于
+// `Visited "http://localhost:3000/index.html" but got no response`（3 次重试同样失败，非竞态）。
+// 同机同一条命令改为 --concurrency 4 实测可跑通（同一临时工程、端口 3000 全程无监听，排除端口残留），
+// 故根因与并发度相关而非端口占用。真实项目同参数（--concurrency 16）实测可跑通（676s / 33.44 MB），
+// 因此判定为测试环境特有问题，不影响用户。根因未定位（疑似 16 路浏览器池在临时工程上的页面加载竞态，无证据），
+// 不阻塞发布；待有真实复现再处理。
 export const RENDER_CONCURRENCY = 16
 
 /** Render the already-authored Agent project through the locally pinned Remotion CLI. */
+/** Render the already-authored Agent project through the locally pinned Remotion CLI. */
 export async function renderSpokenVideoAgentProject(workspace, { signal, onProgress } = {}) {
   signal?.throwIfAborted()
+  // 渲染前先确认管线能画出画面，几秒内拦住「浏览器能启动但整页空白」这类坑。
+  await assertRenderPipelineUsable(workspace.projectDir, { signal })
   const temporaryOutput = `${workspace.outputPath}.partial.mp4`
   const renderLogPath = join(workspace.projectDir, 'outputs', 'render.log')
   const encoding = remotionEncodingSettings(workspace.durationSeconds)
@@ -921,9 +1026,15 @@ export async function renderSpokenVideoAgentProject(workspace, { signal, onProgr
       await rename(temporaryOutput, workspace.outputPath)
       return workspace.outputPath
     }
-    const retryable = attempt < RENDER_BROWSER_ATTEMPTS && isBrowserLaunchFailure(`${failure.message}\n${failure.stderr || ''}`)
+    const failureDetail = `${failure.message}\n${failure.stderr || ''}`
+    const retryable = attempt < RENDER_BROWSER_ATTEMPTS && isBrowserLaunchFailure(failureDetail)
     if (!retryable) throw failure
-    onProgress?.(`浏览器未能在 25 秒内就绪（第 ${attempt}/${RENDER_BROWSER_ATTEMPTS} 次尝试），正在重试…`)
+    // 两种瞬态原因分开报，避免文案与实际不符（监控/排查能直接定位）。
+    const isPageLoadRace = /Visited "http:\/\/localhost:3000[^"]*" but got no response/u.test(failureDetail)
+    const reason = isPageLoadRace
+      ? `页面加载无响应（dev server 竞态，第 ${attempt}/${RENDER_BROWSER_ATTEMPTS} 次尝试），正在重试…`
+      : `浏览器未能在 25 秒内就绪（第 ${attempt}/${RENDER_BROWSER_ATTEMPTS} 次尝试），正在重试…`
+    onProgress?.(reason)
   }
 }
 
@@ -949,12 +1060,18 @@ export async function remotionRendererAvailable() {
  * Render a DSH-planned, deterministic Remotion composition. The model owns only
  * task props; this module owns the executable composition and all filesystem paths.
  */
+/**
+ * Render a DSH-planned, deterministic Remotion composition. The model owns only
+ * task props; this module owns the executable composition and all filesystem paths.
+ */
 export async function renderSpokenVideoWithRemotion({ projectRoot, runId, audioPath, durationSeconds, plan, subtitles, subtitleEnabled, orientation = 'landscape', outputPath }) {
   if (!await remotionRendererAvailable()) throw new Error('当前安装未包含 Remotion 渲染器。')
   const projectDir = join(projectRoot, 'media', 'remotion', runId)
   const publicDir = join(projectDir, 'public')
   await writeProject(projectDir)
   if (!await ensureLinkedNodeModules(projectDir)) throw new Error('Remotion 运行依赖不可用。')
+  // 渲染前先确认管线能画出画面，几秒内拦住「浏览器能启动但整页空白」这类坑。
+  await assertRenderPipelineUsable(projectDir, {})
 
   const audioExtension = extname(audioPath) || '.wav'
   const audioFileName = `narration${audioExtension}`
@@ -975,10 +1092,22 @@ export async function renderSpokenVideoWithRemotion({ projectRoot, runId, audioP
   await writeFile(propsPath, json(props), { encoding: 'utf8', mode: 0o600 })
   await mkdir(dirname(outputPath), { recursive: true, mode: 0o700 })
   const temporaryOutput = `${outputPath}.partial.mp4`
-  await execFileAsync(process.execPath, [REMOTION_CLI,
-    'render', join('src', 'index.ts'), 'SpokenVideo', temporaryOutput,
-    '--props', propsPath, '--overwrite', ...browserExecutableArgs(),
-  ], { cwd: projectDir, timeout: 15 * 60 * 1000, maxBuffer: 1024 * 1024 * 12 })
+  // 与 agent 渲染路径共用同一张重试网：浏览器启动竞态 / dev server 页面加载竞态
+  // 都是瞬态，重试一次通常就好（2026-10-22 实测仍偶发）。真故障（打包失败、编码失败）
+  // 不在此列，直接抛出。
+  for (let attempt = 1; ; attempt += 1) {
+    if (attempt > 1) await new Promise((resolve) => setTimeout(resolve, RENDER_BROWSER_RETRY_DELAY_MS))
+    try {
+      await execFileAsync(process.execPath, [REMOTION_CLI,
+        'render', join('src', 'index.ts'), 'SpokenVideo', temporaryOutput,
+        '--props', propsPath, '--overwrite', ...browserExecutableArgs(),
+      ], { cwd: projectDir, timeout: 15 * 60 * 1000, maxBuffer: 1024 * 1024 * 12 })
+      break
+    } catch (error) {
+      const detail = `${error.message}\n${error.stderr || ''}`
+      if (attempt >= RENDER_BROWSER_ATTEMPTS || !isBrowserLaunchFailure(detail)) throw error
+    }
+  }
   if (!await exists(temporaryOutput)) throw new Error('Remotion 没有生成视频文件。')
   await rename(temporaryOutput, outputPath)
   return {
@@ -987,3 +1116,4 @@ export async function renderSpokenVideoWithRemotion({ projectRoot, runId, audioP
     entryFile: `media/remotion/${runId}/src/index.ts`,
   }
 }
+

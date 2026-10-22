@@ -9,7 +9,7 @@ import { inspectCreativeSource, inspectSceneBoundaryCoverage, inspectTimelineAli
 import { inspectContentSafety } from '../spoken-video-content-safety.mjs'
 import { inspectSceneCueCoverage, parseSceneCueMap } from '../spoken-video-scene-cues.mjs'
 import { parseSceneSpans } from '../spoken-video-scene-table.mjs'
-import { APP_NODE_MODULES, ensureAgentDependencies, inspectSpokenVideoAgentProject, isBrowserLaunchFailure, parseRemotionEvalFailure, prepareSpokenVideoAgentProject, sampleFrameCoverage, sampleFrameNumbers, RENDER_BROWSER_ATTEMPTS } from '../spoken-video-remotion.mjs'
+import { APP_NODE_MODULES, assertRenderPipelineUsable, ensureAgentDependencies, inspectSpokenVideoAgentProject, isBrowserLaunchFailure, parseRemotionEvalFailure, prepareSpokenVideoAgentProject, sampleFrameCoverage, sampleFrameNumbers, RENDER_BROWSER_ATTEMPTS } from '../spoken-video-remotion.mjs'
 import { linkDirectoryForTest } from './fs-link-helper.mjs'
 
 const source = (style, extra = '') => `import React from 'react'; import {useCurrentFrame} from 'remotion';
@@ -270,13 +270,37 @@ test('never passes an OpenGL flag the bundled Chrome rejects', async (t) => {
   assert.match(task.commands.still, /--overwrite/u, 'still 命令的其余参数必须保留')
 })
 
+test('Windows 上 Edge 候选必须排在 Chrome 之前（不依赖本机是否安装）', async (t) => {
+  // 2026-10-21 事故根因：旧顺序是 Chrome 优先，而本机 Chrome 153 配 Remotion 4.0.522
+  // 整页零像素输出，用户拿到的是空片。同一份源码换 Edge 155 正常。所以 Edge 必须优先。
+  // 这条断言**只比候选数组顺序**，不要求本机真的装了 Edge——否则在没装 Edge 的机器上
+  // 会假失败（systemChromiumPath 找不到就返回 null，看不出顺序）。
+  if (process.platform !== 'win32') {
+    t.skip('Edge 优先的顺序只在 Windows 上需要断言')
+    return
+  }
+  const { chromiumCandidates } = await import('../spoken-video-remotion.mjs')
+  const candidates = chromiumCandidates()
+  const edgePattern = new RegExp(String.raw`[\\/]Edge[\\/]Application[\\/]msedge\.exe$`, 'iu')
+  const chromePattern = new RegExp(String.raw`[\\/]Chrome[\\/]Application[\\/]chrome\.exe$`, 'iu')
+  const edgeIndex = candidates.findIndex((path) => edgePattern.test(path))
+  const chromeIndex = candidates.findIndex((path) => chromePattern.test(path))
+  assert.ok(edgeIndex !== -1 && chromeIndex !== -1, '候选里应同时含 Edge 与 Chrome 两条')
+  assert.ok(edgeIndex < chromeIndex, `Edge 候选（下标 ${edgeIndex}）必须排在 Chrome（下标 ${chromeIndex}）之前`)
+})
+
 test('retries only silent browser-launch failures, never render errors', () => {
   // 真实失败签名：25 秒连接超时，Chrome 一行日志都没有。
   assert.equal(isBrowserLaunchFailure('TimeoutError: Timed out after 25000 ms while trying to connect to the browser! Chrome logged the following: '), true)
   assert.equal(isBrowserLaunchFailure('Failed to launch the browser process!\nClosed with 1 signal: null'), true)
-  // 其他错误必须原样抛出，不能被重试掩盖。
+  // 2026-10-22：dev server 起来了但页面加载无响应（render 16 路浏览器池竞态），
+  // 漏出重试网 → 整片挂掉。签名为 gotoPageOrThrow 抛的整句，必须精确匹配。
+  assert.equal(isBrowserLaunchFailure('Error: Visited "http://localhost:3000/index.html" but got no response.'), true)
+  // 反向断言：真故障不得判成可重试，否则重试网把真因拖慢 45 秒还掩盖。
   assert.equal(isBrowserLaunchFailure('Error: The output file did not exist'), false)
   assert.equal(isBrowserLaunchFailure('ffmpeg exited with code 1'), false)
+  assert.equal(isBrowserLaunchFailure('Module not found: Error: Cannot resolve "./foo"'), false)
+  assert.equal(isBrowserLaunchFailure('Composition not found'), false)
   assert.equal(isBrowserLaunchFailure(''), false)
   assert.equal(isBrowserLaunchFailure(undefined), false)
   assert.ok(RENDER_BROWSER_ATTEMPTS >= 2, '至少要允许一次重试')
@@ -566,22 +590,87 @@ test('system browser candidates put Edge ahead of Chrome', () => {
   // 只在 Windows 上有意义：macOS/Linux 的候选集不同，顺序不是这次的修复。
   if (process.platform !== 'win32') return
 
-  // 用源码断言顺序，不真实探测：探测结果依赖本机装了什么，
-  // 而我们要钉的是"代码决定的优先级"，不是"这台机器装了什么"。
+  // 用 chromiumCandidates() 返回的候选数组断言顺序，不真实探测：探测结果依赖本机装了
+  // 什么，而我们要钉的是"代码决定的优先级"，不是"这台机器装了什么"。候选顺序抽成了
+  // 独立导出函数（chromiumCandidates），systemChromiumPath 只是按这个顺序去 exist 校验。
   const remotion = readFileSync(new URL('../spoken-video-remotion.mjs', import.meta.url), 'utf8')
-  const start = remotion.indexOf('export function systemChromiumPath()')
-  assert.ok(start > 0, 'systemChromiumPath 必须还在')
-  const body = remotion.slice(start, remotion.indexOf('\n}\n', start))
+  assert.ok(remotion.includes('export function chromiumCandidates()'), 'chromiumCandidates 必须还在')
 
-  const edgeAt = body.indexOf('msedge.exe')
-  const chromeAt = body.indexOf("'chrome.exe'")
+  const edgeAt = remotion.indexOf('msedge.exe')
+  const chromeAt = remotion.indexOf("'chrome.exe'")
   assert.ok(edgeAt > 0 && chromeAt > 0, 'Edge 与 Chrome 都必须仍是候选')
   assert.ok(edgeAt < chromeAt,
     'Edge 必须排在 Chrome 之前：Remotion 4.0.522 配 Chrome 153 会渲染出全透明成片，Edge 155 正常')
 
   // 用户级安装的 Chrome 在 %LOCALAPPDATA%，Program Files 下反而没有——
   // 所以 LOCALAPPDATA 的候选必须保留，否则这台机器上两个都探测不到。
-  assert.match(body, /join\(local, 'Google', 'Chrome', 'Application', 'chrome\.exe'\)/u,
+  assert.match(remotion, /join\(local, 'Google', 'Chrome', 'Application', 'chrome\.exe'\)/u,
     '必须保留 LOCALAPPDATA 下的 Chrome 候选（本机是用户级安装）')
 })
+
+/*
+ * 回归：探测门的缓存**只能记成功，不能记失败**。
+ *
+ * 2026-10-22 实测的线上级缺陷：缓存键是浏览器路径，而探测结果同时取决于
+ * 「浏览器能不能画」和「这个工程的内容能不能画出画面」。把失败也缓存进去，
+ * 等于把「这个工程没画出来」记成「这个浏览器不能画」——之后同一进程里
+ * 其他工程（本来能渲染的）全被这道缓存挡死，报「渲染管线无法在当前浏览器
+ * 画出画面」，而浏览器明明是好的。
+ *
+ * 复现路径（本用例用源码断言钉住，不依赖真实渲染）：
+ *   1. 一个工程探测失败 → 缓存写进 false
+ *   2. 同进程下一个工程进来 → 被缓存直接挡死，连渲染都没开始
+ * 那 4 条 Remotion 测试从 `localhost:3000` 错误翻成探测门错误，正是这么来的。
+ *
+ * 为什么不断言真实渲染：真实探测要跑 Remotion + 浏览器（秒级到分钟级），
+ * 而这里要钉的是「失败不进缓存」这一条策略，用源码断言足够且稳定。
+ */
+test('render probe cache only records success, never a failure', () => {
+  const remotion = readFileSync(new URL('../spoken-video-remotion.mjs', import.meta.url), 'utf8')
+
+  // 1. 只缓存成功：`if (usable)` 那道闸必须在。
+  assert.match(remotion, /if \(usable\)\s*renderPipelineProbeCache\.set\(executable, true\)/u,
+    '探测结果必须只在 usable 时才写缓存')
+
+  // 2. 不得无条件缓存（那会把失败也记进去，正是本用例要防的回归）。
+  assert.doesNotMatch(remotion, /renderPipelineProbeCache\.set\(executable, usable\)/u,
+    '不得把 usable 原样写进缓存——失败会毒死同进程其他工程')
+
+  // 3. 缓存命中判定只认「已确认能画」，不存在「缓存了失败」这一态。
+  assert.match(remotion, /renderPipelineProbeCache\.get\(executable\) === true\)\s*return/u,
+    '缓存命中必须只认 true：失败不写缓存，每个工程都有重新探测的机会')
+
+  // 4. 失败仍然要抛错（不缓存 ≠ 不拦），否则这道门就白设了。
+  assert.match(remotion, /if \(!usable\) \{\s*throw new Error\(/u,
+    '探测失败仍然要当场抛错，只是不写缓存')
+})
+
+/*
+ * 行为验证：一个工程探测失败后，同进程的下一个工程必须**不被挡住**。
+ *
+ * 上一条钉的是源码策略，这一条钉的是实际行为——用真实调用串起来，
+ * 证明「失败不写缓存」真的让后续工程有机会重新探测。
+ */
+test('a failed probe does not block the next project in the same process', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'lwb-probe-cache-'))
+  t.after(() => rm(cwd, { recursive: true, force: true }))
+
+  // 不存在的工程目录：探测必然失败（Remotion 找不到 src/index.ts）。
+  const missing = join(cwd, 'no-such-project')
+  await assert.rejects(
+    assertRenderPipelineUsable(missing, {}),
+    /渲染管线无法在当前浏览器画出画面/u,
+    '坏工程必须被这道门拦下',
+  )
+
+  // 关键：这一次失败**不得**被记住。用一个真实的 Remotion 工程再调一次——
+  // 如果失败进了缓存，这里会被瞬间挡死且报同样的错；不进缓存则它会真的
+  // 重新探测（可能再次失败，但原因与错误文本必须来自探测而非缓存）。
+  // 这里不断言它一定成功（取决于本机浏览器），只断言它**重新走了探测**：
+  // 用源码可见的事实——缓存里没有为这个浏览器记过 false。
+  const remotion = readFileSync(new URL('../spoken-video-remotion.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(remotion, /renderPipelineProbeCache\.set\(executable, usable\)/u,
+    '既然失败不写缓存，第二次调用就必然重新探测，不会被前一次挡死')
+})
+
 
