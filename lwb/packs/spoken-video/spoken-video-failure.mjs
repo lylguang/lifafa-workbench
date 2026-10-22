@@ -90,10 +90,19 @@ const RULES = [
     remedyTarget: null,
   },
   {
+    category: 'video.render_pipeline',
+    test: /渲染管线无法在当前浏览器画出画面|探测帧只有一种颜色|render pipeline could not draw/u,
+    retryable: false,
+    // 这是程序/环境缺陷，不是用户内容问题：重跑同一浏览器只会再等满整片渲染又拿空片。
+    // 给可执行动作——改用 Edge 或显式指定浏览器——而不是让用户「调整画面要求重跑」。
+    remedy: '渲染管线不能在当前浏览器画出画面（探测帧只有一种颜色），属于程序/环境问题，重跑没有用。请改用 Microsoft Edge，或设置环境变量 LWB_REMOTION_BROWSER_EXECUTABLE 指向 chrome-headless-shell / Edge 的可执行文件后重跑；也可点「反馈问题」附上这条任务编号。',
+    remedyTarget: null,
+  },
+  {
     category: 'content.qc_failed',
     test: /(未通过技术质检|未通过质检|主画面变化不足|审片未通过|qc\s*failed|退化为静态)/iu,
     retryable: false,
-    remedy: '成片未通过质量检查。这是内容本身的问题，可让系统定向修复一次，或调整画面要求后重跑本条。',
+    remedy: '成片已经渲染出来了，但画面几乎全程没有变化。如果你要的就是极简/纯字幕风格，可以直接采用这条成片，不用重跑；如果不是，说明渲染环节没有把画面元素画出来，属于程序问题——重跑解决不了，请点「反馈问题」并附上这条任务编号。',
     remedyTarget: null,
   },
   {
@@ -186,6 +195,7 @@ export const CATEGORY_LABEL = Object.freeze({
   'timeout.no_progress': '阶段停滞',
   'timeout.ceiling': '超过时间上限',
   'content.qc_failed': '成片质检未过',
+  'video.render_pipeline': '渲染管线不可用',
   'content.invalid': '内容格式无效',
   'publish.blocked': '发布目标不可用',
   'preflight.blocked': '开工前体检未过',

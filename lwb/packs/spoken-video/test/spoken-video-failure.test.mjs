@@ -85,7 +85,16 @@ const HISTORICAL = [
     message: '成片未通过技术质检：主画面变化不足，成片可能退化为静态画面或少量文字卡片。',
     category: 'content.qc_failed',
     retryable: false,
-    mustMention: /质量检查|质检/u,
+    // 断言盯「行为」而非某个固定词汇：分类正确、且给出了能让人执行的下一步
+    // （画面变化不足的事实 / 极简风格可直接采用 / 反馈问题），而不是逼用户重跑。
+    mustMention: /画面变化不足|反馈问题|程序问题|极简|采用/u,
+  },
+  {
+    name: '渲染管线画不出画面（探测帧只有一种颜色）',
+    message: '渲染管线无法在当前浏览器画出画面：探测帧只有一种颜色，说明该浏览器（或它与 Remotion 的组合）不能正确渲染视频。请改用 Microsoft Edge，或设置环境变量 LWB_REMOTION_BROWSER_EXECUTABLE 指向 chrome-headless-shell / Edge 的可执行文件后重跑。',
+    category: 'video.render_pipeline',
+    retryable: false,
+    mustMention: /Edge|LWB_REMOTION_BROWSER_EXECUTABLE|反馈问题/u,
   },
   {
     name: '字幕时间轴不合规',

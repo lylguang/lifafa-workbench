@@ -23,6 +23,19 @@ async function exists(path) {
 }
 
 /**
+ * 「这台机器没有可用的 Python」的统一文案。
+ *
+ * 必须把**动作说在前面**：以前这四处写的是「请先执行『准备环境』」，而
+ * 「准备环境」这一步本身就需要系统 Python 来建 venv（见 prepareEnvironment 的注释）。
+ * 于是用户会绕圈：看到「点准备环境」→ 点了 → 撞上退出码 9009 → 才被告知要装 Python。
+ *
+ * 现在统一成一句：先说装 Python、说清 Store 版是占位程序没用，再说回来点「准备环境」。
+ * 四处共用这个常量，避免再次分叉（这类文案分叉在白板包里已经出过一次）。
+ */
+const WHITEBOARD_PYTHON_MISSING = '白板动画需要 Python 才能画，但这台电脑还没装。'
+  + '请安装 Python 3（python.org，安装时勾「Add python.exe to PATH」），装好后点「准备环境」。'
+
+/**
  * 编排层：把存储、Python 引擎与包级生命周期粘在一起。
  * 渲染是长任务，全部通过 scope.background 跟踪，卸载时会等待结算。
  */
@@ -118,7 +131,7 @@ export class WhiteboardHost {
    */
   #requirePython(env) {
     if (env.python) return env.python
-    throw fail('WHITEBOARD_ENV_MISSING', '找不到具备 OpenCV/NumPy/Pillow 的 Python 解释器，请先在「白板手绘动画」包里执行一次「准备环境」。')
+    throw fail('WHITEBOARD_ENV_MISSING', WHITEBOARD_PYTHON_MISSING)
   }
 
   /**
@@ -195,10 +208,11 @@ export class WhiteboardHost {
       const text = String(error?.message || '')
       if (/9009/u.test(text) || /ENOENT/u.test(text)) {
         throw fail('WHITEBOARD_ENGINE_MISSING',
-          '系统里找不到可用的 Python（退出码 9009）。请先安装 Python 3，'
-          + '安装时勾选「Add python.exe to PATH」；'
-          + '如果你装的是 Microsoft Store 版的 python 占位程序，它不能运行脚本，请改用 python.org 的正式安装包。'
-          + `原始输出：${text.slice(0, 300)}`)
+          '这台电脑还没装 Python，白板动画画不出来。'
+          + '请先安装 Python 3（从 python.org 下载，安装时勾选「Add python.exe to PATH」）。'
+          + 'Microsoft Store 里那个 python 是占位程序，装它没用。'
+          + '装好后回到本页点「准备环境」，再重跑这条任务。'
+          + `（原始输出：${text.slice(0, 300)}）`)
       }
       throw error
     }
@@ -282,7 +296,7 @@ export class WhiteboardHost {
     const outputPath = join(outputDir, `${imageName.replace(/\.[^.]+$/u, '')}-whiteboard.mp4`)
 
     const env = await this.#detectEnvironment()
-    if (!env.ready) throw fail('WHITEBOARD_ENV_MISSING', '找不到具备 OpenCV/NumPy/Pillow 的 Python 解释器，请先执行「准备环境」。')
+    if (!env.ready) throw fail('WHITEBOARD_ENV_MISSING', WHITEBOARD_PYTHON_MISSING)
     if (!env.scriptsReady) throw fail('WHITEBOARD_ENGINE_MISSING', '引擎脚本缺失，请重新安装能力包。')
 
     const args = [imagePath, annotationPath, outputPath]
@@ -340,7 +354,7 @@ export class WhiteboardHost {
     const output = source.output
     if (typeof output !== 'string' || !output.trim()) throw fail('WHITEBOARD_INVALID_INPUT', '缺少输出路径。')
     const env = await this.#detectEnvironment()
-    if (!env.ready) throw fail('WHITEBOARD_ENV_MISSING', '找不到具备 OpenCV/NumPy/Pillow 的 Python 解释器，请先执行「准备环境」。')
+    if (!env.ready) throw fail('WHITEBOARD_ENV_MISSING', WHITEBOARD_PYTHON_MISSING)
     const result = await this.#runPython(
       env.python,
       join(this.#engineRoot, 'scripts', 'merge_scenes.py'),
