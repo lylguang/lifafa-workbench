@@ -46,6 +46,30 @@ const PublishConnectionSettings = z.object({
  * generation, script generation and account completion each receive one
  * instance.
  */
+
+// 非结构化创作（视频导演）环节的时间预算。
+//
+// 为什么必须有：2026-10-23 实测，一条 611 秒的长片（82 条字幕）让创作 Agent
+// 在导演环节连续打磨 61 分钟仍未跑一次预检——它自己写了 audit 脚本逐幕审计，
+// 又写了 21 个 tune-*.cjs 反复微调字幕入点（±0.06s 级），事件流始终活跃，
+// 没有任何失败迹象，也就没有任何机制能拦它。maxRepairs 只管预检失败后的
+// 修复轮次，不管单轮打磨时长；awaitWithin 只用在 ASR 上。用户看到的就是
+// 「卡在 AI 导演环节 45 分钟」。
+//
+// 为什么是 35 分钟：2026-10-23 成功的长片导演用时 15 分钟（45dd5497，
+// 676 秒片长），今天成功的一条 158 秒短片用了 15 分钟。35 分钟约为实测
+// 最慢正常值的 2 倍多，正常任务不会碰到；真陷入打磨循环的任务则被及时
+// 止损，错误信息里写明可直接重跑（Agent 的阶段性产物已落盘，重跑不是
+// 从零开始）。
+//
+// 可用环境变量 LWB_VIDEO_DIRECTOR_TIMEOUT_MS 覆盖（毫秒）。设为 0 或负数
+// 表示不设限——留给确有特殊长片需求的场景，但默认必须有限。
+export function directorTimeBudget(env = process.env) {
+  const raw = Number(env.LWB_VIDEO_DIRECTOR_TIMEOUT_MS)
+  if (Number.isFinite(raw)) return raw > 0 ? raw : 0
+  return 35 * 60 * 1000
+}
+
 function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinuations = 0, continuationPrompt } = {}) {
   return async function dshExecutor({ prompt, schema, agent, onDshStarted, onDshEvent, onDshContinuation, validate, repairPrompt, onDshRepair, maxRepairs = 2 }) {
     if (agent?.workspacePath) {
@@ -118,7 +142,52 @@ function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinua
       // the audit timeline cannot miss an early turn or step before the listener observes it.
       const prefix = run.localAgent?.session ? [...run.localAgent.session.snapshotEvents()] : []
       prefix.forEach((event) => observeEvent(run.localAgent.session, event))
-      let result = await run.result
+      // 非结构化创作（视频导演）加时间预算：Agent 事件流活跃不代表在收敛，
+      // 2026-10-23 实测一条长片连续打磨 61 分钟仍未提交预检（期间写了 21 个
+      // tune 脚本），而宿主没有任何机制能拦住它。超时通过 controller.abort()
+      // 走与「能力包停止」同一条取消链路（cancelChild），子会话被有序取消，
+      // 错误信息给出可执行动作。structured 任务（选题/写稿等）不在此列——
+      // 它们有 structured_output 兜底与补交机制，节奏由模型轮次决定。
+      let directorTimer = null
+      let directorDeadlineHit = false
+      const directorTimeoutMs = structured ? 0 : directorTimeBudget()
+      // 报错里的时长要按预算的量级选择单位：默认预算是分钟级，测试与极端配置
+      // 可能是毫秒级——统一用「<60s 显示秒，其余显示分钟」。
+      const directorBudgetText = directorTimeoutMs < 60_000
+        ? `${(directorTimeoutMs / 1000).toFixed(1)} 秒`
+        : `${Math.round(directorTimeoutMs / 60000)} 分钟`
+      let result
+      try {
+        if (directorTimeoutMs > 0) {
+          directorTimer = setTimeout(() => {
+            directorDeadlineHit = true
+            controller.abort(new Error('视觉导演时间预算已到。'))
+          }, directorTimeoutMs)
+        }
+        result = await run.result
+      } catch (error) {
+        // 超时触发的取消，无论子会话以 reject 还是非 completed 收尾，都要把
+        // 「为什么停、下一步做什么」讲清楚，而不是让用户看到一句裸的取消错误。
+        if (directorDeadlineHit) {
+          throw new Error(
+            `视觉导演超过 ${directorBudgetText}仍未提交可渲染工程（Agent 一直在打磨但从未跑预检）。`
+            + '已停止本轮以止损：可直接重跑本任务，阶段产物已落盘，重跑不必从零开始；'
+            + `如确需更长创作时间，可设置环境变量 LWB_VIDEO_DIRECTOR_TIMEOUT_MS（毫秒，当前 ${directorTimeoutMs}）后重启。`,
+          )
+        }
+        throw error
+      } finally {
+        if (directorTimer) clearTimeout(directorTimer)
+      }
+      // 超时后子会话也可能「正常收尾」（cancel 的 turn/end 可能先于 abort 传播），
+      // 那时 result 存在但 stopReason 不是 completed——同样要给出超时语境。
+      if (directorDeadlineHit) {
+        throw new Error(
+          `视觉导演超过 ${directorBudgetText}仍未提交可渲染工程（Agent 一直在打磨但从未跑预检）。`
+          + '已停止本轮以止损：可直接重跑本任务，阶段产物已落盘，重跑不必从零开始；'
+          + `如确需更长创作时间，可设置环境变量 LWB_VIDEO_DIRECTOR_TIMEOUT_MS（毫秒，当前 ${directorTimeoutMs}）后重启。`,
+        )
+      }
       await traceTail
       if (continuationFailure) throw continuationFailure
       if (result.stopReason !== 'completed') {
@@ -197,7 +266,8 @@ function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinua
   }
 }
 
-function createStructuredExecutor(ctx, subagents, label) {
+// 导出仅供测试：验证 structured 任务不受导演时间预算约束。
+export function createStructuredExecutor(ctx, subagents, label) {
   return createDshExecutor(ctx, subagents, label, true)
 }
 
