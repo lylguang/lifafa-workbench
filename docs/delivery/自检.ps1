@@ -93,17 +93,47 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "        $($linkOutput -join [Environment]::NewLine)" -ForegroundColor DarkGray
 }
 
+# 渲染浏览器：判定口径必须与运行时一致，否则自检说"OK"而用户照样拿到空片。
+#
+# 2026-10-22 / 2026-10-23 两次事故的教训：
+#   - 旧写法只探 `C:\Program Files\Google\Chrome\Application\chrome.exe`（系统级安装），
+#     而 Chrome 常是**用户级安装**（在 %LOCALAPPDATA%），Program Files 下根本没有——
+#     于是自检误报「没有可用的渲染浏览器」，而运行时其实能找到。
+#   - 更糟的是 Chrome 153 与 Remotion 4.0.522 组合会**整页零像素**（成片一片纯色），
+#     而 Edge 155 正常。运行时已改为 Edge 优先（chromiumCandidates()）。
+# 所以这里必须：Edge 优先 → 用户级与系统级路径都探 → 认出「Chrome 存在但会出空片」。
 $shell = Join-Path $root '浏览器\chrome-headless-shell-win64\chrome-headless-shell.exe'
+# `ProgramFiles(x86)` 括号不能直接写进变量名，PowerShell 5.1 的解析器在
+# `Join-Path ${env:ProgramFiles(x86)} ...` 这种写法上会报语法错（实测整个脚本
+# 解析失败）。先把三个根目录取成普通变量，后面只拼字符串。
+$pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+$pf = if ($env:ProgramFiles) { $env:ProgramFiles } else { $pf86 }
+$local = $env:LOCALAPPDATA
+$edgePaths = @(
+    (Join-Path $local 'Microsoft\Edge\Application\msedge.exe'),
+    (Join-Path $pf86 'Microsoft\Edge\Application\msedge.exe'),
+    (Join-Path $pf 'Microsoft\Edge\Application\msedge.exe')
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+$chromePaths = @(
+    (Join-Path $local 'Google\Chrome\Application\chrome.exe'),
+    (Join-Path $pf 'Google\Chrome\Application\chrome.exe'),
+    (Join-Path $pf86 'Google\Chrome\Application\chrome.exe')
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+
 if (Test-Path -LiteralPath $shell) {
-    Write-Ok '渲染浏览器已就绪（高速版）'
-} else {
-    $chrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
-    if (Test-Path -LiteralPath $chrome) {
-        Write-Warn '未找到随包的渲染浏览器，将回退到系统 Chrome（渲染慢约 5 倍）'
-    } else {
-        Write-Bad '没有可用的渲染浏览器，视频渲染会失败'
-        $script:blocking += '缺少渲染浏览器'
+    Write-Ok '渲染浏览器已就绪（随包 headless-shell，最快且版本配对）'
+} elseif ($edgePaths.Count -gt 0) {
+    Write-Ok "渲染浏览器已就绪（Microsoft Edge）—— $($edgePaths[0])"
+    if ($chromePaths.Count -gt 0) {
+        Write-Warn '同时检测到 Google Chrome——它不会被选用。Chrome 153 配 Remotion 4.0.522 会整页零像素（成片一片纯色），Edge 才是本机可用的渲染器。'
     }
+} elseif ($chromePaths.Count -gt 0) {
+    # 只有 Chrome：能启动，但可能是 153 这类画不出内容的版本。
+    Write-Warn "未找到随包渲染浏览器，也未找到 Microsoft Edge；将回退到系统 Chrome：$($chromePaths[0])"
+    Write-Warn '若成片出现「一片纯色 / 整帧没有内容」，是 Chrome 与 Remotion 的兼容问题（Chrome 153 实测整页零像素）。解决办法：安装 Microsoft Edge，或执行 npx remotion browser ensure 安装配套 headless-shell。'
+} else {
+    Write-Bad '没有可用的渲染浏览器，视频渲染会失败'
+    $script:blocking += '缺少渲染浏览器'
 }
 
 # 第二个实例会以端口占用崩掉，看起来像启动失败
