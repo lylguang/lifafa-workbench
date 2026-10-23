@@ -1833,10 +1833,13 @@ test('runs the DSH Remotion creator, deterministic QC, and independent reviewer 
   const started = await host.startVideoRender(currentAgent, { projectId: project.id, expectedRevision: project.revision, visualBrief: '清晰、克制的信息视觉。', orientation: 'landscape', renderer: 'remotion', backgroundMusic, bgmVolume: 0.16 })
   assert.equal(started.input.backgroundMusic.name, '测试背景音乐.wav')
   assert.equal(started.input.bgmVolume, 0.16)
-  // 这是一条**真实 Remotion 渲染**（约 200 秒片长、--concurrency 16），
-  // 实测端到端要 593 秒。默认 90 秒超时会让它在渲染途中就被判失败，报出来的是
-  // `Visited "http://localhost:3000/index.html" but got no response`——那是
-  // 浏览器启动竞态，不是这条用例要验的东西。
+  // 这是一条**真实 Remotion 渲染**（约 200 秒片长）。
+  // 并发度现为 12（2026-10-23 实测把 16 降到 12：并发 16 在 Edge 155 上第 12 个
+  // 浏览器实例起建页无响应，签名固定为
+  // `Visited "http://localhost:3000/index.html" but got no response`，
+  // 在真实生产工程上 6/6 必败——先前注释把它当成「浏览器启动竞态」是误判）。
+  // 实测端到端要 593 秒。默认 90 秒超时会让它在渲染途中就被判失败，
+  // 报出来的是上面那个签名——那不是这条用例要验的东西。
   // 同文件 :1632 / :1890 早已为长渲染显式给 300_000 / 180_000，这里漏了。
   const finished = await waitForOperation(host, currentAgent, project.id, started.id, 900_000)
   assert.equal(finished.status, 'succeeded', finished.error)

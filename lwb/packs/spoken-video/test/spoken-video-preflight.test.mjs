@@ -309,8 +309,10 @@ test('retries only silent browser-launch failures, never render errors', () => {
   // 真实失败签名：25 秒连接超时，Chrome 一行日志都没有。
   assert.equal(isBrowserLaunchFailure('TimeoutError: Timed out after 25000 ms while trying to connect to the browser! Chrome logged the following: '), true)
   assert.equal(isBrowserLaunchFailure('Failed to launch the browser process!\nClosed with 1 signal: null'), true)
-  // 2026-10-22：dev server 起来了但页面加载无响应（render 16 路浏览器池竞态），
-  // 漏出重试网 → 整片挂掉。签名为 gotoPageOrThrow 抛的整句，必须精确匹配。
+  // 2026-10-22：dev server 起来了但页面加载无响应，漏出重试网 → 整片挂掉。
+  // 2026-10-23 订正：该签名在并发 16 下是**确定性**失败（第 12 个浏览器实例起
+  // 建页无响应，真实生产工程 6/6 必败），不是偶发竞态；并发度已降到 12。
+  // 签名为 gotoPageOrThrow 抛的整句，必须精确匹配。
   assert.equal(isBrowserLaunchFailure('Error: Visited "http://localhost:3000/index.html" but got no response.'), true)
   // 反向断言：真故障不得判成可重试，否则重试网把真因拖慢 45 秒还掩盖。
   assert.equal(isBrowserLaunchFailure('Error: The output file did not exist'), false)

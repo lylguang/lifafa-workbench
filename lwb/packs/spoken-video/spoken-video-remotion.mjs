@@ -810,10 +810,16 @@ export const RENDER_BROWSER_ATTEMPTS = 3
 const RENDER_BROWSER_RETRY_DELAY_MS = 3000
 
 // 浏览器启动失败（连接超时 / 进程拉不起来）→ 可有限重试。
-// 第三个签名是 dev server 页面加载竞态：dev server 起来了、但浏览器去访问 `localhost:3000`
+// 第三个签名是浏览器实例建页失败：dev server 起来了、但浏览器去访问 `localhost:3000`
 // 的页面时没响应（Remotion 报错 `Visited "http://localhost:3000/index.html" but got no
-// response`）。同一工程、同一个工程，renderStill 能取到页、render 在 16 路浏览器池时
-// 会中招——和前两种同源，都是「启动即静默」，应同等待重试。
+// response`）。
+//
+// 2026-10-23 实测订正：这条签名在**并发 16** 下是确定性失败（真实生产工程 6/6），
+// 失败点固定在第 12 个浏览器实例建页（`Promise.all (index 11)`）——是浏览器实例数
+// 打不开，不是偶发竞态。当时把它记成「dev server 竞态」并据此判定「真实项目不受影响」
+// 是错的，真实用户任务正死在这个签名上。并发度已降到 12（见 RENDER_CONCURRENCY），
+// 该签名随之消失；此处保留重试是合理的——12 档下若偶发，就是真的瞬态。
+//
 // 注意：签名必须精确（localhost:3000[^"]* + "but got no response"）。写成宽泛的
 // /localhost:3000/ 会把「dev server 真的起不来」（端口占用、打包失败）也重试三次，
 // 把真故障拖慢还掩盖原因。
@@ -976,19 +982,34 @@ function waitBeforeRetry(ms, signal) {
   })
 }
 
-/**
- * Remotion 的默认并发是 min(8, 核数/2)：本机 16 核时它把 16 个逻辑核只用掉 8 个，
- * 而 CPU 采样显示渲染全程只有 43% 占用、GPU 常年 1%，说明 CPU 还有一半是闲的。
- * 实测把并发提到 16，1000 帧中段画面从 25s 降到 23s（-8%）。收益不大但零风险，
- * 再往上（24）实测回到 23s，CPU 已被喂饱，所以 16 就是拐点。
- */
-// 已知限制（2026-10-22）：测试的临时工程在 --concurrency 16 下会确定性失败于
-// `Visited "http://localhost:3000/index.html" but got no response`（3 次重试同样失败，非竞态）。
-// 同机同一条命令改为 --concurrency 4 实测可跑通（同一临时工程、端口 3000 全程无监听，排除端口残留），
-// 故根因与并发度相关而非端口占用。真实项目同参数（--concurrency 16）实测可跑通（676s / 33.44 MB），
-// 因此判定为测试环境特有问题，不影响用户。根因未定位（疑似 16 路浏览器池在临时工程上的页面加载竞态，无证据），
-// 不阻塞发布；待有真实复现再处理。
-export const RENDER_CONCURRENCY = 16
+// 并发度上限：12。
+//
+// 2026-10-23 实测（真实生产工程，同机同 Edge 155，只改 --concurrency 变量，
+// 其余参数完全一致，逐档重复 3–6 次）：
+//   并发  4  → 稳定通过（10.1s）
+//   并发  8  → 稳定通过
+//   并发 12  → 稳定通过（300 帧 3/3，38.1s，高度一致）
+//   并发 16  → **确定性失败**（6/6），签名固定为
+//               `Visited "http://localhost:3000/index.html" but got no response`，
+//               失败点在 `Promise.all (index 11)`——即第 12 个浏览器实例建页时
+//               dev server 不再响应，约 3.9 秒即挂。
+//
+// 先前注释里「真实项目同参数（--concurrency 16）实测可跑通（676s / 33.44 MB），
+// 因此判定为测试环境特有问题，不影响用户」这个结论**已被证伪**：同一条真实
+// 生产工程在并发 16 下 6/6 必败。真实用户任务正是死在这个签名上
+// （2026-10-23 00:09 的任务日志写着「浏览器启动失败已重试 2 次」后仍然失败），
+// 而重试网对该签名无效——它是并发相关的确定性失败，不是瞬态竞态。
+//
+// 排除过的其他解释（都实测证伪，不要再重复排查）：
+//   - 端口耗尽：3000 端口 TIME_WAIT 仅 216/16384（1.32%），远未饱和
+//   - 磁盘不足：E: 剩 922 GB
+//   - 浏览器版本本身：Edge 155 在并发 4/8/12 全部正常
+// 结论是 Edge 同时开太多实例时资源打不开：每实例一个 DevTools 端口 + 独立
+// profile，第 12 个之后建页无响应。这与 Chrome 153「12 实例以下画不出内容」
+// 是两堵不同的墙——所以首选装配套 headless-shell（资源占用远低于完整浏览器）。
+//
+// 12 是实测最高稳定档，且 8 同样稳定，留有余量。再往上只会撞实例数上限。
+export const RENDER_CONCURRENCY = 12
 
 /** Render the already-authored Agent project through the locally pinned Remotion CLI. */
 /** Render the already-authored Agent project through the locally pinned Remotion CLI. */
@@ -1043,10 +1064,17 @@ export async function renderSpokenVideoAgentProject(workspace, { signal, onProgr
     const failureDetail = `${failure.message}\n${failure.stderr || ''}`
     const retryable = attempt < RENDER_BROWSER_ATTEMPTS && isBrowserLaunchFailure(failureDetail)
     if (!retryable) throw failure
-    // 两种瞬态原因分开报，避免文案与实际不符（监控/排查能直接定位）。
+    // 两种原因分开报，避免文案与实际不符（监控/排查能直接定位）。
+    //
+    // 注意措辞：早先这里写的是「dev server 竞态」，那是误判。2026-10-23 实测确认
+    // 该签名在并发 16 下是**确定性**失败（6/6），失败点固定在第 12 个浏览器实例
+    // 建页无响应——是浏览器实例数打不开，不是 dev server 的偶发竞态。因此重试
+    // 对它基本无效（用户 2026-10-23 00:09 的任务就是这么耗尽 3 次尝试后失败的）。
+    // 并发度已降到 12（见 RENDER_CONCURRENCY）后该签名不再出现；这里仍保留重试，
+    // 因为降到 12 之后若偶发，属于真正的瞬态，重试是对的。
     const isPageLoadRace = /Visited "http:\/\/localhost:3000[^"]*" but got no response/u.test(failureDetail)
     const reason = isPageLoadRace
-      ? `页面加载无响应（dev server 竞态，第 ${attempt}/${RENDER_BROWSER_ATTEMPTS} 次尝试），正在重试…`
+      ? `页面加载无响应（浏览器实例建页失败，第 ${attempt}/${RENDER_BROWSER_ATTEMPTS} 次尝试），正在重试…`
       : `浏览器未能在 25 秒内就绪（第 ${attempt}/${RENDER_BROWSER_ATTEMPTS} 次尝试），正在重试…`
     onProgress?.(reason)
   }
@@ -1106,9 +1134,9 @@ export async function renderSpokenVideoWithRemotion({ projectRoot, runId, audioP
   await writeFile(propsPath, json(props), { encoding: 'utf8', mode: 0o600 })
   await mkdir(dirname(outputPath), { recursive: true, mode: 0o700 })
   const temporaryOutput = `${outputPath}.partial.mp4`
-  // 与 agent 渲染路径共用同一张重试网：浏览器启动竞态 / dev server 页面加载竞态
-  // 都是瞬态，重试一次通常就好（2026-10-22 实测仍偶发）。真故障（打包失败、编码失败）
-  // 不在此列，直接抛出。
+  // 与 agent 渲染路径共用同一张重试网：浏览器启动失败 / 实例建页无响应
+  // 都是可重试的（并发度已降到 12，该签名不再稳定复现）。
+  // 真故障（打包失败、编码失败）不在此列，直接抛出。
   for (let attempt = 1; ; attempt += 1) {
     if (attempt > 1) await new Promise((resolve) => setTimeout(resolve, RENDER_BROWSER_RETRY_DELAY_MS))
     try {
