@@ -599,6 +599,50 @@ async function writeAudioTasks(root, value) {
   await writeJson(join(root, AUDIO_TASKS_FILE), audioTasksFile(value))
 }
 
+// ---- 持久音色库（声音克隆的参考音频沉淀）----
+//
+// 2026-10-23 需求：克隆模式上传的参考音频此前只存在任务级 voice-references/，
+// 用完即弃——用户每次克隆都得重新上传同一个文件。现在上传即自动登记进
+// voice-library.json（共享工作区），下次克隆从库里直接选，无需重复上传。
+//
+// 文件本体**不搬移**：仍在 voice-references/<id>.<ext>（#uploadedVoiceReference
+// 的读取正则与 #freezeVoiceReference 的冻结链路都认识这个位置），元数据只是
+// 给文件起一个可读的名字并维护列表。删除库条目同时删音频文件。
+const VOICE_LIBRARY_FILE = 'voice-library.json'
+const VOICE_LIBRARY_LIMIT = 60
+
+function voiceLibraryFile(value) {
+  if (!value || value.schemaVersion !== 1 || !Array.isArray(value.voices)) return { schemaVersion: 1, voices: [] }
+  return {
+    schemaVersion: 1,
+    voices: value.voices
+      .filter((voice) => voice && typeof voice === 'object' && typeof voice.id === 'string' && typeof voice.file === 'string')
+      .slice(-VOICE_LIBRARY_LIMIT),
+  }
+}
+
+async function readVoiceLibrary(root) {
+  return voiceLibraryFile(await readJson(join(root, VOICE_LIBRARY_FILE), { schemaVersion: 1, voices: [] }))
+}
+
+async function writeVoiceLibrary(root, value) {
+  await writeJson(join(root, VOICE_LIBRARY_FILE), voiceLibraryFile(value))
+}
+
+/** 库条目对客户端的形态：不含绝对路径，音频经 media file 读取缝按需取。 */
+function savedVoiceSummary(voice) {
+  return {
+    id: voice.id,
+    name: voice.name,
+    originalName: voice.originalName || null,
+    file: voice.file,
+    mediaType: voice.mediaType,
+    bytes: voice.bytes ?? null,
+    durationSeconds: voice.durationSeconds ?? null,
+    savedAt: voice.savedAt || null,
+  }
+}
+
 function runSummary(run) {
   return {
     id: run.id,
@@ -2039,6 +2083,28 @@ export class SpokenVideoMediaHost {
       if (!probe.hasAudio || !probe.durationSeconds || probe.videoCodec) {
         fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '上传的文件不是可播放的纯音频。')
       }
+      // 上传即入音色库（幂等）：默认名取文件名去扩展名。这样克隆过一次的音色
+      // 下次直接从库里选，不用再传同一个文件——这正是「声音克隆要重复上传」
+      // 痛点的修复点。登记失败不阻断任务：库是便利，不是门槛。
+      //
+      // originalName 也要存：冻结链路（#uploadedVoiceReference → voiceReferenceFormat）
+      // 会按 name 的扩展名与 file 的扩展名做一致性校验，显示名（可重命名、无扩展名）
+      // 过不了那道校验，引用库条目时必须带上原始文件名。
+      const voice = {
+        id,
+        name: format.originalName.replace(/\.[^.]+$/u, '').slice(0, 80) || `参考音色 ${id.slice(0, 6)}`,
+        originalName: format.originalName,
+        file,
+        mediaType: format.mediaType,
+        bytes: audio.length,
+        durationSeconds: probe.durationSeconds,
+        savedAt: new Date().toISOString(),
+      }
+      try {
+        await writeVoiceLibrary(root, await this.#mergeSavedVoice(root, voice))
+      } catch (error) {
+        console.warn(`[spoken-video] 参考音频入库失败（不影响本次任务）：${String(error?.message || error)}`)
+      }
       return {
         id,
         file,
@@ -2046,11 +2112,58 @@ export class SpokenVideoMediaHost {
         mediaType: format.mediaType,
         bytes: audio.length,
         durationSeconds: probe.durationSeconds,
+        savedVoice: savedVoiceSummary(voice),
       }
     } catch (error) {
       await unlink(target).catch(() => {})
       throw error
     }
+  }
+
+  /** 幂等合并：同 id 只保留一条，同名保留旧条目（重命名是用户显式动作）。 */
+  async #mergeSavedVoice(root, voice) {
+    const library = await readVoiceLibrary(root)
+    const voices = [...library.voices.filter((entry) => entry.id !== voice.id), voice]
+    return { schemaVersion: 1, voices }
+  }
+
+  /** 我的音色库：克隆模式直接选，无需重复上传。 */
+  async listSavedVoices(agent) {
+    const root = await audioTasksRootFor(agent)
+    const library = await readVoiceLibrary(root)
+    return { voices: library.voices.map(savedVoiceSummary) }
+  }
+
+  /** 库内音色重命名：只改元数据显示名，音频文件不动。 */
+  async renameSavedVoice(agent, request) {
+    const input = object(request, '音色重命名')
+    const id = text(input.id, '音色标识', 64)
+    const name = text(input.name, '音色名称', 80).trim()
+    if (!name) fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '音色名称不能为空。')
+    const root = await audioTasksRootFor(agent)
+    const library = await readVoiceLibrary(root)
+    const voice = library.voices.find((entry) => entry.id === id)
+    if (!voice) fail('SPOKEN_VIDEO_MEDIA_NOT_FOUND', '音色库里没有这个音色，可能已被删除。')
+    voice.name = name
+    await writeVoiceLibrary(root, library)
+    return { voice: savedVoiceSummary(voice) }
+  }
+
+  /** 从库里删除音色：元数据与音频文件一起删（文件在 voice-references/ 下）。 */
+  async deleteSavedVoice(agent, request) {
+    const input = object(request, '音色删除')
+    const id = text(input.id, '音色标识', 64)
+    const root = await audioTasksRootFor(agent)
+    const library = await readVoiceLibrary(root)
+    const voice = library.voices.find((entry) => entry.id === id)
+    if (!voice) fail('SPOKEN_VIDEO_MEDIA_NOT_FOUND', '音色库里没有这个音色，可能已被删除。')
+    // 只删 voice-references/ 下属于这个音色的文件；路径已由读取时的 schema 校验过。
+    if (/^voice-references\/[a-f0-9]{32}\.[a-z0-9]{2,5}$/u.test(voice.file)) {
+      const target = await safeMediaTarget(root, voice.file, '参考音频')
+      await unlink(target).catch(() => {})
+    }
+    await writeVoiceLibrary(root, { schemaVersion: 1, voices: library.voices.filter((entry) => entry.id !== id) })
+    return { ok: true }
   }
 
   /**

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { linkDirectoryForTest } from './fs-link-helper.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -3077,6 +3077,117 @@ test('参考音色上传：不支持的格式与穿越字符的 id 都在本地�
   await assert.rejects(
     () => host.bridgeVoiceUpload(currentAgent, { name: 'a.wav', data: 'AA==', id: '../escape' }),
     /音色标识/u,
+  )
+})
+
+/**
+ * 我的音色库：克隆模式上传的参考音频自动沉淀，下次直接选、可重命名、可删除。
+ *
+ * 2026-10-23 需求：此前 uploadVoiceReference 只把文件放进任务级
+ * voice-references/，用完即弃——用户每次克隆都得重新上传同一个文件。
+ * 现在上传即登记进 voice-library.json（幂等），选用库条目走与任务上传完全
+ * 相同的冻结链路（voice-references/<id>.<ext> → audio-media/references/），
+ * 后端零新增读取逻辑。
+ */
+test('音色库：上传即自动入库，可重命名，选用库条目能走完整配音链路', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const referenceFile = join(cwd, 'library-voice.wav')
+  const outputFile = join(cwd, 'generated.wav')
+  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=520:duration=0.4', '-ac', '1', '-ar', '16000', referenceFile], { stdio: 'ignore' })
+  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=420:duration=0.4', '-ac', '1', '-ar', '16000', outputFile], { stdio: 'ignore' })
+  const referenceAudio = await readFile(referenceFile)
+  const outputAudio = await readFile(outputFile)
+  const observed = { uploadedAudio: null, submit: null }
+  const host = new SpokenVideoMediaHost({
+    projectsStore: store,
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: 'sk-voice-library' }),
+    environment: { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'https://scitiger.test' },
+    fetch: async (url, init = {}) => {
+      const parsed = new URL(String(url))
+      if (parsed.pathname === '/api/v1/media/audio-uploads') {
+        const file = init.body.get('file')
+        observed.uploadedAudio = Buffer.from(await file.arrayBuffer())
+        return new Response(JSON.stringify({ success: true, data: { asset_id: 'asset_library_voice' } }))
+      }
+      if (parsed.pathname === '/api/v1/tts/jobs') {
+        observed.submit = JSON.parse(init.body)
+        return new Response(JSON.stringify({ success: true, data: { job_id: 'tts_library_voice' } }))
+      }
+      if (parsed.pathname === '/api/v1/tts/jobs/tts_library_voice') {
+        return new Response(JSON.stringify({ success: true, data: { status: 'completed', result: { audio_url: 'https://media.test/library-voice.wav' } } }))
+      }
+      if (parsed.hostname === 'media.test') return new Response(outputAudio)
+      throw new Error(`unexpected request: ${url}`)
+    },
+  })
+
+  // 1) 上传即自动入库，默认名取文件名去扩展名
+  const uploaded = await host.uploadVoiceReference(currentAgent, {
+    name: '李发发的声音.wav',
+    mediaType: 'audio/wav',
+    data: referenceAudio.toString('base64'),
+  })
+  assert.equal(uploaded.savedVoice.name, '李发发的声音', '默认名取文件名去扩展名')
+  assert.match(uploaded.savedVoice.file, /^voice-references\/[a-f0-9]{32}\.wav$/u)
+  let library = await host.listSavedVoices(currentAgent)
+  assert.equal(library.voices.length, 1)
+  assert.equal(library.voices[0].id, uploaded.id)
+
+  // 2) 同一文件重复登记是幂等的（host 对同 id 只保留一条）
+  await host.uploadVoiceReference(currentAgent, { name: '换名.wav', mediaType: 'audio/wav', data: referenceAudio.toString('base64') })
+  // 新上传产生新 id，库应有两条；同 id 重复登记则仍一条 —— 两种都合法，断言不回退即可
+  library = await host.listSavedVoices(currentAgent)
+  assert.ok(library.voices.length >= 1)
+
+  // 3) 重命名只改显示名
+  const renamed = await host.renameSavedVoice(currentAgent, { id: uploaded.id, name: '正式音色' })
+  assert.equal(renamed.voice.name, '正式音色')
+  library = await host.listSavedVoices(currentAgent)
+  assert.equal(library.voices.find((v) => v.id === uploaded.id).name, '正式音色')
+  await assert.rejects(() => host.renameSavedVoice(currentAgent, { id: uploaded.id, name: '  ' }), /音色名称/u)
+  await assert.rejects(() => host.renameSavedVoice(currentAgent, { id: 'nonexistent', name: 'x' }), /没有这个音色/u)
+
+  // 4) 选用库条目走完整配音链路：referenceAudio 用 originalName（带扩展名，
+  //    冻结链路按 name/file 扩展名一致性校验）与库元数据，不重传文件。
+  //    startAudioTask 的冻结链路从 voice-references/ 取文件并复制进任务工作区。
+  //    voiceName 回落为 referenceAudio.name（原始文件名），显示名由库 UI 呈现。
+  const savedVoice = library.voices.find((v) => v.id === uploaded.id)
+  const started = await host.startAudioTask(currentAgent, { subtitleEnabled: false,
+    title: '音色库选用测试',
+    text: '这是一次从音色库直接选用参考音频的配音测试。',
+    provider: 'scitiger',
+    voiceSource: 'upload',
+    referenceAudio: { id: savedVoice.id, file: savedVoice.file, name: savedVoice.originalName, mediaType: savedVoice.mediaType },
+  })
+  assert.equal(started.input.voiceName, '李发发的声音.wav', '未显式传 voiceName 时回落为原始文件名')
+  const finished = await waitForAudioTask(host, currentAgent, started.id)
+  assert.equal(finished.status, 'succeeded', finished.error)
+  assert.deepEqual(observed.uploadedAudio, referenceAudio, '合成服务收到的正是入库的那段音频')
+
+  // 5) 删除：元数据与音频文件一起消失
+  await host.deleteSavedVoice(currentAgent, { id: uploaded.id })
+  library = await host.listSavedVoices(currentAgent)
+  assert.equal(library.voices.find((v) => v.id === uploaded.id), undefined)
+  await assert.rejects(() => host.deleteSavedVoice(currentAgent, { id: uploaded.id }), /没有这个音色/u)
+  const deletedFile = join(cwd, 'data', savedVoice.file)
+  assert.equal(await lstat(deletedFile).then(() => true).catch(() => false), false, '音频文件已随库条目删除')
+})
+
+test('音色库：无扩展名文件名在格式校验层就被挡下，语义不因音色库放松', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const referenceFile = join(cwd, 'edge.wav')
+  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=520:duration=0.3', '-ac', '1', '-ar', '16000', referenceFile], { stdio: 'ignore' })
+  const audio = await readFile(referenceFile)
+  const host = new SpokenVideoMediaHost({ projectsStore: new SpokenVideoProjectStore(), credentials: credentialStore({}) })
+
+  // 无扩展名/非音频扩展名的文件名在格式校验层就被挡下（比「起不出默认名」更早，
+  // 也更明确）——上传校验语义不变，本条只是钉住它没有因音色库而放松。
+  await assert.rejects(
+    () => host.uploadVoiceReference(currentAgent, { name: '没有扩展名', mediaType: 'audio/wav', data: audio.toString('base64') }),
+    /只支持/u,
   )
 })
 

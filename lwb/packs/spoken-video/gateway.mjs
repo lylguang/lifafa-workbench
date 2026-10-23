@@ -99,6 +99,9 @@ export class SpokenVideoGateway extends TypertRemoteService {
   listVideoTasks(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.listVideoTasks(context, request)) }
   deleteMediaTasks(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.deleteTasks(context, request)) }
   uploadVoiceReference(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.uploadVoiceReference(context, request)) }
+  listSavedVoices() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.listSavedVoices(context)) }
+  renameSavedVoice(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.renameSavedVoice(context, request)) }
+  deleteSavedVoice(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.deleteSavedVoice(context, request)) }
   bridgeVoiceoverInfo() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.bridgeVoiceoverInfo(context)) }
   bridgeControl() { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.bridgeControl(context)) }
   bridgeEngineAction(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.bridgeEngineAction(context, request)) }
@@ -195,6 +198,9 @@ decorateRemote(SpokenVideoGateway.prototype, 'listAudioTasks', 'listAudioTasks')
 decorateRemote(SpokenVideoGateway.prototype, 'listVideoTasks', 'listVideoTasks')
 decorateRemote(SpokenVideoGateway.prototype, 'deleteMediaTasks', 'deleteMediaTasks')
 decorateRemote(SpokenVideoGateway.prototype, 'uploadVoiceReference', 'uploadVoiceReference')
+decorateRemote(SpokenVideoGateway.prototype, 'listSavedVoices', 'listSavedVoices')
+decorateRemote(SpokenVideoGateway.prototype, 'renameSavedVoice', 'renameSavedVoice')
+decorateRemote(SpokenVideoGateway.prototype, 'deleteSavedVoice', 'deleteSavedVoice')
 decorateRemote(SpokenVideoGateway.prototype, 'bridgeVoiceoverInfo', 'bridgeVoiceoverInfo')
 decorateRemote(SpokenVideoGateway.prototype, 'bridgeControl', 'bridgeControl')
 decorateRemote(SpokenVideoGateway.prototype, 'bridgeEngineAction', 'bridgeEngineAction')

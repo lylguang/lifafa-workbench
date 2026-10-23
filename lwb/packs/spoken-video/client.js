@@ -344,6 +344,20 @@ window.__ModuleLoader__.load({
       .sv-audio-subtitle-option span { display:grid; gap:5px; }
       .sv-audio-subtitle-option strong { font-size:14px; }
       .sv-audio-subtitle-option small { color:var(--lwb-muted); line-height:1.7; }
+      /* ---- 我的音色库：克隆模式上传过的参考音频自动沉淀，点选即用 ---- */
+      .sv-voice-library { display:grid; gap:8px; padding:11px; border:1px dashed var(--lwb-line); border-radius:10px; background:var(--lwb-surface); }
+      .sv-voice-library-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+      .sv-voice-library-list { display:grid; gap:6px; max-height:220px; overflow-y:auto; }
+      .sv-voice-library-item { display:flex; align-items:center; gap:8px; padding:6px 8px; border:1px solid var(--lwb-line); border-radius:8px; }
+      .sv-voice-library-item[data-selected="true"] { border-color:var(--sv-accent); background:var(--sv-accent-soft); }
+      .sv-voice-library-pick { flex:1; display:grid; gap:2px; padding:4px 6px; border:0; background:transparent; text-align:left; cursor:pointer; border-radius:6px; }
+      .sv-voice-library-pick:hover:not(:disabled) { background:var(--sv-accent-soft); }
+      .sv-voice-library-pick:disabled { opacity:.5; cursor:not-allowed; }
+      .sv-voice-library-name { font-size:14px; font-weight:700; color:var(--lwb-ink); }
+      .sv-voice-library-meta { font-size:12px; color:var(--lwb-muted); }
+      .sv-voice-library-actions { display:flex; gap:4px; flex-shrink:0; }
+      .sv-voice-library-delete { color:#b3372f; }
+      .sv-voice-library-delete:hover:not(:disabled) { text-decoration:underline; }
       /* ---- 内容安排专属：执行日/整点 chip + 深度档 + 警示条 + 运行历史 + 视频条目 + 生命线（accent 由 data-accent=sky 驱动）---- */
       .sv-as-chips { display:flex; flex-wrap:wrap; gap:6px; }
       .sv-as-chip { display:inline-flex; align-items:center; min-height:30px; padding:0 11px; border:1px solid var(--lwb-line); border-radius:999px; color:var(--lwb-ink); background:var(--lwb-surface); font-size:var(--lwb-text-base,14px); cursor:pointer; transition:border-color .15s,background .15s,color .15s; }
@@ -3659,6 +3673,26 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 音色库条目 → 任务 referenceAudio 入参。
+     *
+     * name 必须带扩展名：冻结链路（#uploadedVoiceReference → voiceReferenceFormat）
+     * 按 name 的扩展名与 file 的扩展名做一致性校验，显示名（用户可重命名成任何
+     * 文字、没有扩展名）过不了那道校验，所以引用库条目时用原始上传文件名；
+     * 老条目没有 originalName 时用显示名拼上 file 的扩展名兜底。
+     */
+    function savedVoiceReference(voice) {
+      return {
+        id: voice.id,
+        file: voice.file,
+        name: voice.originalName || `${voice.name}${String(voice.file || '').match(/(\.[a-z0-9]+)$/iu)?.[1] || '.wav'}`,
+        mediaType: voice.mediaType,
+        bytes: voice.bytes,
+        durationSeconds: voice.durationSeconds,
+        savedVoiceId: voice.id,
+      };
+    }
+
+    /**
      * 把方括号标签插进正文的光标处，并重新聚焦回文本框。
      *
      * 追加到末尾会让「[叹气]放在这段前面」变成「放在全文最前面」，语气完全不是
@@ -4099,6 +4133,17 @@ window.__ModuleLoader__.load({
       const [confirmNode, ask] = useSvConfirm();
       const [voiceRefBusy, setVoiceRefBusy] = React.useState(false);
       const [voiceRefError, setVoiceRefError] = React.useState('');
+      // 音色库（与音频页共享同一份）：克隆模式点选即用，无需重复上传。
+      // 按账号 Tab 各存一份加载结果，切 Tab 不重复拉取。
+      const [scheduleVoicesByForm, setScheduleVoicesByForm] = React.useState({});
+      const refreshScheduleSavedVoices = React.useCallback(async () => {
+        try {
+          const next = await remoteStatic('listSavedVoices');
+          const voices = Array.isArray(next?.voices) ? next.voices : [];
+          setScheduleVoicesByForm((prev) => ({ ...prev, [activeTab]: voices }));
+        } catch { /* 库不可用时静默：克隆仍可手动上传 */ }
+      }, [activeTab]);
+      React.useEffect(() => { void refreshScheduleSavedVoices(); }, [refreshScheduleSavedVoices]);
       const fail = React.useCallback((message) => { setError(message); }, [setError]);
 
       // 上一次已知的轮次状态，用来发现「刚刚落到终态」这件事。放在 ref 而不是
@@ -4337,10 +4382,38 @@ window.__ModuleLoader__.load({
             data,
           });
           patchForm((current) => ({ ...current, voiceReference: uploaded }));
+          // 上传即已自动入音色库——刷新让新音色在库列表里出现。
+          void refreshScheduleSavedVoices();
         } catch (cause) {
           setVoiceRefError(`上传失败：${cause.message}`);
           patchForm((current) => ({ ...current, voiceReference: null }));
         } finally { setVoiceRefBusy(false); }
+      };
+      /** 定时任务表单也能直接从音色库选：与音频页同一份库、同一个冻结链路。 */
+      const scheduleSavedVoices = scheduleVoicesByForm[activeTab] || [];
+      const pickScheduleSavedVoice = (voice) => {
+        setVoiceRefError('');
+        patchForm((current) => ({ ...current, voiceReference: savedVoiceReference(voice) }));
+      };
+      const renameScheduleSavedVoice = async (voice) => {
+        const next = window.prompt('修改音色名称', voice.name || '');
+        if (next === null) return;
+        const name = String(next).trim();
+        if (!name) { setVoiceRefError('音色名称不能为空。'); return; }
+        setVoiceRefBusy(true);
+        try { await remoteStatic('renameSavedVoice', { id: voice.id, name }); await refreshScheduleSavedVoices(); }
+        catch (cause) { setVoiceRefError(`重命名失败：${cause.message}`); }
+        finally { setVoiceRefBusy(false); }
+      };
+      const deleteScheduleSavedVoice = async (voice) => {
+        if (!window.confirm(`从音色库删除「${voice.name}」？音频文件会一并删除，已生成的配音与已保存的任务预设不受影响。`)) return;
+        setVoiceRefBusy(true);
+        try {
+          await remoteStatic('deleteSavedVoice', { id: voice.id });
+          patchForm((current) => current.voiceReference?.savedVoiceId === voice.id ? { ...current, voiceReference: null } : current);
+          await refreshScheduleSavedVoices();
+        } catch (cause) { setVoiceRefError(`删除失败：${cause.message}`); }
+        finally { setVoiceRefBusy(false); }
       };
 
       const publicCards = (board?.sources || []).filter((card) => card.id !== 'ai-daily-import');
@@ -4619,9 +4692,23 @@ window.__ModuleLoader__.load({
             : form.voiceSource === 'upload'
               ? h('div', { className: 'sv-as-field sv-as-field-wide' },
                 h('span', { className: 'sv-as-label' }, '参考音频（必填）'),
+                scheduleSavedVoices.length ? h('div', { className: 'sv-voice-library' },
+                  h('div', { className: 'sv-voice-library-head' },
+                    h('span', { className: 'sv-meta' }, `我的音色库（${scheduleSavedVoices.length}）— 点选即用，每轮都用它`)),
+                  h('div', { className: 'sv-voice-library-list' }, scheduleSavedVoices.map((voice) => {
+                    const selected = form.voiceReference?.savedVoiceId === voice.id;
+                    return h('div', { key: voice.id, className: 'sv-voice-library-item', 'data-selected': selected ? 'true' : 'false' },
+                      h('button', { type: 'button', className: 'sv-voice-library-pick', disabled: Boolean(busy), onClick: () => pickScheduleSavedVoice(voice), title: `选用「${voice.name}」` },
+                        h('span', { className: 'sv-voice-library-name' }, voice.name),
+                        h('span', { className: 'sv-voice-library-meta' }, [voice.durationSeconds ? formatMediaDuration(voice.durationSeconds) : null, formatMediaBytes(voice.bytes)].filter(Boolean).join(' · '))),
+                      h('span', { className: 'sv-voice-library-actions' },
+                        h('button', { type: 'button', className: 'lwb-plain-button', disabled: voiceRefBusy, onClick: () => { void renameScheduleSavedVoice(voice); }, title: '重命名' }, '重命名'),
+                        h('button', { type: 'button', className: 'lwb-plain-button sv-voice-library-delete', disabled: voiceRefBusy, onClick: () => { void deleteScheduleSavedVoice(voice); }, title: '从音色库删除' }, '删除')));
+                  }))) : null,
                 h('input', { className: 'sv-input', type: 'file', accept: SV_CLONE_ACCEPT, disabled: Boolean(voiceRefBusy || busy), onChange: (event) => { void pickScheduleVoiceReference(event.target.files?.[0] || null); event.target.value = ''; } }),
+                h('p', { className: 'sv-note' }, scheduleSavedVoices.length ? '上面选一个每轮固定用它，或从下面再传新音色（上传后自动存进音色库）。' : '上传过的参考音频会自动存进音色库，下次建任务直接选。'),
                 voiceRefBusy ? h('p', { className: 'sv-note' }, '正在读取并上传参考音频…')
-                  : form.voiceReference ? h('p', { className: 'sv-note' }, `已上传：${form.voiceReference.name}。换一个文件会重新上传。`)
+                  : form.voiceReference ? h('p', { className: 'sv-note' }, `已选用：${form.voiceReference.name}。换一个文件或库条目会切换音色。`)
                     : h('p', { className: 'sv-note' }, '只支持 wav 和 mp3；m4a / aac 等格式需要先转成 wav，否则合成会失败。'),
                 voiceRefError ? h('p', { className: 'sv-error', role: 'alert' }, voiceRefError) : null)
               : h('label', { className: 'sv-as-field sv-as-field-wide' }, h('span', { className: 'sv-as-label' }, '音色'), svVoiceSelect({ value: form.voiceId, disabled: busy, onChange: (voiceId) => patchForm((current) => ({ ...current, voiceId })), options: Array.isArray(runtime?.media?.mimoVoices) && runtime.media.mimoVoices.length ? runtime.media.mimoVoices : SV_MIMO_BUILTIN_VOICES, include: form.voiceId })),
@@ -5426,6 +5513,20 @@ window.__ModuleLoader__.load({
       const [voiceReference, setVoiceReference] = React.useState(null);
       const [voiceReferenceBusy, setVoiceReferenceBusy] = React.useState(false);
       const [voiceReferenceError, setVoiceReferenceError] = React.useState('');
+      // 我的音色库：克隆模式上传过的参考音频自动沉淀在这里，下次直接选不用重传。
+      // 结构与任务上传的 voiceReference 一致（id/file/name/mediaType），选中后走
+      // 同一条冻结链路（voice-references/<id>.<ext> → audio-media/references/）。
+      const [savedVoices, setSavedVoices] = React.useState([]);
+      const [savedVoicesLoaded, setSavedVoicesLoaded] = React.useState(false);
+      const [savedVoiceBusy, setSavedVoiceBusy] = React.useState(false);
+      const refreshSavedVoices = React.useCallback(async () => {
+        try {
+          const next = await remoteStatic('listSavedVoices');
+          setSavedVoices(Array.isArray(next?.voices) ? next.voices : []);
+          setSavedVoicesLoaded(true);
+        } catch { /* 库不可用时静默：克隆仍可手动上传 */ }
+      }, []);
+      React.useEffect(() => { void refreshSavedVoices(); }, [refreshSavedVoices]);
       // 换模式时把上一个模式的专属输入清掉：留着 design 描述切回 preset，
       // 用户会以为那段描述还在生效。
       React.useEffect(() => {
@@ -5446,6 +5547,8 @@ window.__ModuleLoader__.load({
             data,
           });
           setVoiceReference(uploaded);
+          // 上传即已自动入音色库（host 侧幂等登记）——刷新列表让新音色立刻可选。
+          void refreshSavedVoices();
           setError(null);
         } catch (cause) {
           // 上传本身失败（过大、解码不了、磁盘满）要和「格式不支持」分开说，
@@ -5453,6 +5556,37 @@ window.__ModuleLoader__.load({
           setVoiceReferenceError(`上传失败：${cause.message}`);
           setVoiceReference(null);
         } finally { setVoiceReferenceBusy(false); }
+      };
+      /** 从音色库直接选：文件已在 voice-references/，走同一条冻结链路，无需重传。 */
+      const pickSavedVoice = (voice) => {
+        setVoiceReferenceError('');
+        setVoiceReference(savedVoiceReference(voice));
+      };
+      /** 库内重命名：只改显示名，音频不动。 */
+      const renameSavedVoice = async (voice) => {
+        const next = window.prompt('修改音色名称', voice.name || '');
+        if (next === null) return;
+        const name = String(next).trim();
+        if (!name) { setError('音色名称不能为空。'); return; }
+        setSavedVoiceBusy(true);
+        try {
+          await remoteStatic('renameSavedVoice', { id: voice.id, name });
+          await refreshSavedVoices();
+          setError(null);
+        } catch (cause) { setError(`重命名失败：${cause.message}`); }
+        finally { setSavedVoiceBusy(false); }
+      };
+      /** 从库里删除：元数据与音频文件一起删；若当前选中正引用它，一并清掉。 */
+      const deleteSavedVoice = async (voice) => {
+        if (!window.confirm(`从音色库删除「${voice.name}」？音频文件会一并删除，已生成的配音不受影响。`)) return;
+        setSavedVoiceBusy(true);
+        try {
+          await remoteStatic('deleteSavedVoice', { id: voice.id });
+          setVoiceReference((current) => current?.savedVoiceId === voice.id ? null : current);
+          await refreshSavedVoices();
+          setError(null);
+        } catch (cause) { setError(`删除失败：${cause.message}`); }
+        finally { setSavedVoiceBusy(false); }
       };
 
       const refreshService = React.useCallback(async () => {
@@ -5560,7 +5694,7 @@ window.__ModuleLoader__.load({
       /** 每个模式自己那条「还差什么才能生成」，说清下一步去哪填。 */
       const voiceMissingOf = () => {
         if (voiceSource === 'design' && !voiceDesignText.trim()) return '音色设计模式要先写一段声音描述才能生成——年龄、声线、语速、气质写得越具体，出来的音色越接近。';
-        if (voiceSource === 'upload' && !voiceReference) return voiceReferenceError || '声音克隆模式要先上传一段参考音频（只支持 wav / mp3），才能生成。';
+        if (voiceSource === 'upload' && !voiceReference) return voiceReferenceError || '声音克隆模式要先上传一段参考音频（只支持 wav / mp3），或从「我的音色库」里直接选一个，才能生成。';
         return '';
       };
       const createAudioTask = async () => {
@@ -5760,9 +5894,24 @@ window.__ModuleLoader__.load({
           : voiceSource === 'upload'
             ? h('div', { className: 'sv-media-field sv-media-field-wide' },
               h('span', null, '参考音频（必填）'),
+              savedVoices.length ? h('div', { className: 'sv-voice-library' },
+                h('div', { className: 'sv-voice-library-head' },
+                  h('span', { className: 'sv-meta' }, `我的音色库（${savedVoices.length}）— 点选即用，无需重新上传`),
+                  h('button', { type: 'button', className: 'lwb-plain-button', disabled: savedVoiceBusy || savedVoicesLoaded === false, onClick: () => { void refreshSavedVoices(); } }, '刷新')),
+                h('div', { className: 'sv-voice-library-list' }, savedVoices.map((voice) => {
+                  const selected = voiceReference?.savedVoiceId === voice.id;
+                  return h('div', { key: voice.id, className: 'sv-voice-library-item', 'data-selected': selected ? 'true' : 'false' },
+                    h('button', { type: 'button', className: 'sv-voice-library-pick', disabled: Boolean(submitting), onClick: () => pickSavedVoice(voice), title: `选用「${voice.name}」` },
+                      h('span', { className: 'sv-voice-library-name' }, voice.name),
+                      h('span', { className: 'sv-voice-library-meta' }, [voice.durationSeconds ? formatMediaDuration(voice.durationSeconds) : null, formatMediaBytes(voice.bytes)].filter(Boolean).join(' · '))),
+                    h('span', { className: 'sv-voice-library-actions' },
+                      h('button', { type: 'button', className: 'lwb-plain-button', disabled: savedVoiceBusy, onClick: () => { void renameSavedVoice(voice); }, title: '重命名' }, '重命名'),
+                      h('button', { type: 'button', className: 'lwb-plain-button sv-voice-library-delete', disabled: savedVoiceBusy, onClick: () => { void deleteSavedVoice(voice); }, title: '从音色库删除' }, '删除')));
+                }))) : null,
               h('input', { className: 'sv-input', type: 'file', accept: SV_CLONE_ACCEPT, disabled: Boolean(voiceReferenceBusy || submitting), onChange: (event) => { void pickVoiceReference(event.target.files?.[0] || null); event.target.value = ''; } }),
+              h('p', { className: 'sv-meta' }, savedVoices.length ? '上面选一个直接用，或从下面再传新音色（上传后自动存进音色库）。' : '上传过的参考音频会自动存进音色库，下次直接选，不用重复上传。'),
               voiceReferenceBusy ? h('p', { className: 'sv-note' }, '正在读取并上传参考音频…')
-                : voiceReference ? h('p', { className: 'sv-note' }, `已上传：${voiceReference.name}（${formatMediaBytes(voiceReference.bytes)}${voiceReference.durationSeconds ? ` · ${formatMediaDuration(voiceReference.durationSeconds)}` : ''}）。换一个文件会重新上传。`)
+                : voiceReference ? h('p', { className: 'sv-note' }, `已选用：${voiceReference.name}（${formatMediaBytes(voiceReference.bytes)}${voiceReference.durationSeconds ? ` · ${formatMediaDuration(voiceReference.durationSeconds)}` : ''}）。换一个文件或库条目会切换音色。`)
                   : h('p', { className: 'sv-note' }, '只支持 wav 和 mp3；m4a / aac 等格式需要先转成 wav，否则合成会失败。'),
               voiceReferenceError ? h('p', { className: 'sv-error', role: 'alert' }, voiceReferenceError) : null)
             : h(React.Fragment, null,
