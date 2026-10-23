@@ -63,9 +63,32 @@ test('checkSpokenDelivery counts written-language signals without blocking', () 
   const body = '这是第一、第二、第三、第四，不是A而是B，不是C而是D，不是E而是F。' + 'a'.repeat(0) + 'ABC DEF GHI JKL MNO'.toLowerCase()
   const diagnostic = checkSpokenDelivery('这个句子非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常非常长，超过六十个字用来触发长句统计。')
   assert.equal(diagnostic.longSentenceCount, 1)
-  assert.ok(diagnostic.advisories.some((item) => item.includes('超长句')))
+  assert.ok(diagnostic.advisories.some((item) => item.includes('长句')))
   const numbered = checkSpokenDelivery(body)
   assert.ok(numbered.numberedMarkerCount >= 3)
+})
+
+/**
+ * 2026-10-23 校准（60 → 25 字）：盲听实验（同稿三版 A/B/C，用户实测判定直读
+ * 基调正确）之后对真实稿件做朗读体检——15 处单句超 25 字（最长 59 字），59 字
+ * 的那处在旧阈值下漏网，正是「配音生硬」的实测主因。校准后与写稿提示词的
+ * 「朗读适配」守则同口径。
+ */
+test('checkSpokenDelivery flags a 25-59 char sentence the old threshold missed, and names the worst sentence', () => {
+  // 33 字单句：旧阈值（≥60）漏网，新阈值命中（取自真实稿件体检的命中形态）
+  const thirtyThree = '第一次跟老板一对一，你把进度念了二十分钟，他只回了三个字说知道了。'
+  assert.ok(Array.from(thirtyThree.replace(/\s+/g, '')).length >= 25 && Array.from(thirtyThree.replace(/\s+/g, '')).length < 60, '测试前置：这句在 25-59 字区间')
+  const diagnostic = checkSpokenDelivery(thirtyThree)
+  assert.equal(diagnostic.longSentenceCount, 1)
+  assert.equal(diagnostic.longSentenceThreshold, 25)
+  assert.ok(diagnostic.advisories.some((item) => item.includes('长句') && item.includes('最长')))
+  // 最长句要被点名（润色的人不用自己找）
+  assert.ok(diagnostic.advisories.some((item) => item.includes('第一次跟老板一对一')))
+  // 24 字句子：贴着阈值之下，不得命中
+  const fineText = '这句话在呼吸位以内，念起来没有压力正好。'
+  assert.ok(Array.from(fineText.replace(/\s+/g, '')).length < 25, '测试前置：这句不超过 24 字')
+  const fineDiagnostic = checkSpokenDelivery(fineText)
+  assert.equal(fineDiagnostic.longSentenceCount, 0)
 })
 
 test('compareSimilarity detects near-duplicate corpus entries', () => {

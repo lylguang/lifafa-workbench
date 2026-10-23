@@ -225,7 +225,14 @@ export function checkStructure(body) {
 /**
  * Rule-based written-language diagnostic signals (advisory only, never
  * blocking). Ported from my-agent `spokenDeliveryDiagnosticSignals`.
+ *
+ * 2026-10-23 校准 longSentenceThreshold 60 → 25：盲听实验（同稿三版 A/B/C）
+ * 证明直读基调是对的、生硬感来自长句——真实稿件体检 15 处单句超 25 字（最长
+ * 59 字），与写稿提示词的「朗读适配」守则同口径（那 59 字在旧阈值下漏网）。
+ * advisory 不阻断，只进 recommendations 让润色有靶子。
  */
+export const SPOKEN_LONG_SENTENCE_CHARS = 25
+
 export function checkSpokenDelivery(body) {
   const normalized = normalizeWhitespace(body)
   const sentences = normalized.split(/[。！？!?]+/u).map((sentence) => sentence.replace(/\s+/g, '')).filter(Boolean)
@@ -234,10 +241,15 @@ export function checkSpokenDelivery(body) {
   const acronymTokens = latinTokens.filter((token) => /^[A-Z][A-Z0-9+._/\-]{1,}$/u.test(token))
   const numberedMarkers = normalized.match(/(?:第[一二三四五六七八九十\d]+|[一二三四五六七八九十\d]+、)/gu) || []
   const contrastMarkers = normalized.match(/不是.{0,36}?而是/gu) || []
-  const longSentenceCount = sentenceLengths.filter((length) => length >= 60).length
+  const longSentenceCount = sentenceLengths.filter((length) => length >= SPOKEN_LONG_SENTENCE_CHARS).length
 
   const advisories = []
-  if (longSentenceCount > 0) advisories.push(`${longSentenceCount} 个超长句（≥60 字），口播建议拆短`)
+  if (longSentenceCount > 0) {
+    // 给出最长句，让润色一眼看到最该改哪里——只报数量的话，改的人还得自己找。
+    const maxIndex = sentenceLengths.indexOf(Math.max(...sentenceLengths))
+    const worst = sentences[maxIndex] ? Array.from(sentences[maxIndex]).slice(0, 20).join('') : ''
+    advisories.push(`${longSentenceCount} 个长句（≥${SPOKEN_LONG_SENTENCE_CHARS} 字，单句一口气念完），口播建议用逗号切出呼吸位；最长 ${Math.max(...sentenceLengths)} 字：「${worst}…」`)
+  }
   if (numberedMarkers.length >= 3) advisories.push(`枚举结构 ${numberedMarkers.length} 处，连续堆叠会显得书面化`)
   if (contrastMarkers.length >= 3) advisories.push(`「不是…而是…」结构 ${contrastMarkers.length} 处，注意重复句式`)
   if (acronymTokens.length >= 5) advisories.push(`英文缩写 ${acronymTokens.length} 处，口播中先解释再使用`)
@@ -245,6 +257,7 @@ export function checkSpokenDelivery(body) {
   return {
     sentenceCount: sentences.length,
     longSentenceCount,
+    longSentenceThreshold: SPOKEN_LONG_SENTENCE_CHARS,
     maxSentenceChars: sentenceLengths.length ? Math.max(...sentenceLengths) : 0,
     latinTokenCount: latinTokens.length,
     acronymTokenCount: acronymTokens.length,
@@ -483,6 +496,11 @@ export function buildScriptPrompt({ input, topic, signals, profile, currentBody 
   const rules = [
     `正文目标字数（不含空白）：${tierContract(input.tier)} 字（${input.tier} 档）。字数是稿件门槛，不要用猜测的时长秒数压缩或拉长稿件。`,
     '口播语气：清晰、口语化、具体、严谨；每句话只承载一个主要意思；避免学术腔和空泛的 AI 套话；避免连续堆叠「第一、第二、第三」枚举。',
+    // 朗读适配守则（2026-10-23 盲听实验结论：直读基调是对的，生硬感来自长句——
+    // 一篇 733 字真实稿件 15 处单句超 25 字，最长 59 字一口气念完）。这不是
+    // 配音环节能补救的：标点必须在稿面上。判据与 checkSpokenDelivery 的
+    // longSentenceThreshold 严格同口径（25 字），写稿时守规则、质检时同一把尺。
+    '朗读适配：单句不超过 25 字（按句号/问号/叹号计）。更长的语义单元用逗号切开，给配音留呼吸位；数字后面要有标点或量词（如「10月17日，」），不要让数字和后面的词粘连；英文缩写或术语首次出现前后留标点，避免贴着汉字念。',
     '结构：强钩子开场 → 快速承诺讲清什么 → 分层讲机制 → 生动但原创的例子 → 有风险意识的收尾。',
     // 钩子写法约束。历史成片的首条字幕中位数 2.62 秒、最长约 5 秒，
     // 所以「钩子」就是第一句话本身——没有空间另加铺垫或自我介绍。
