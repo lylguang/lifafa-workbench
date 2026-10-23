@@ -65,8 +65,8 @@ rem    Skipped when 8199 already answers. Standard-edition deliveries ship
 rem    without the bridge folder, so skip it there instead of failing.
 curl -s -o NUL --noproxy 127.0.0.1 --max-time 2 http://127.0.0.1:8199/health >NUL 2>&1
 if errorlevel 1 (
-    if exist "%~dp0..\本地媒体桥接\bridge.mjs" (
-        start "local-media-bridge" /min /D "%~dp0..\本地媒体桥接" cmd /c "node bridge.mjs"
+    if exist "%~dp0media-bridge\bridge.mjs" (
+        start "local-media-bridge" /min /D "%~dp0media-bridge\" cmd /c "node bridge.mjs"
         rem `ping` sleep: `timeout /t` fails when stdin is redirected.
         ping -n 3 127.0.0.1 >NUL
     ) else (
@@ -89,7 +89,6 @@ if exist "%~dp0浏览器\chrome-headless-shell-win64\chrome-headless-shell.exe" (
     rem back (see remotion ensure-browser.js). Leaving the variable unset lets the
     rem app probe LOCALAPPDATA / Program Files / Edge itself.
     set "LWB_REMOTION_BROWSER_EXECUTABLE="
-)
 )
 rem Let the launcher pick the scratch drive itself when it has not been told.
 set "LWB_SCRATCH_ROOT=%LWB_SCRATCH_ROOT%"
