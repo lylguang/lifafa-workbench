@@ -5,7 +5,7 @@ import { assertObjectJsonSchema } from '@deepseek-ai/dsh-tools'
 import SpokenVideoGateway from './gateway.mjs'
 import { SpokenVideoProjectStore } from './spoken-video-store.mjs'
 import { SpokenVideoContentStore } from './spoken-video-content-store.mjs'
-import { SpokenVideoMediaHost } from './spoken-video-media-host.mjs'
+import { SpokenVideoMediaHost, sweepStaleTempDirectories } from './spoken-video-media-host.mjs'
 import { SpokenVideoPublishHost } from './spoken-video-publish-host.mjs'
 import { SpokenVideoScheduleHost } from './spoken-video-schedule-host.mjs'
 import { registerSpokenVideoMediaTools } from './spoken-video-media-tools.mjs'
@@ -517,6 +517,9 @@ export async function apply(ctx, config = {}) {
     accountExecutor: config.accountExecutor || createStructuredExecutor(ctx, ctx.subagents, 'spoken-video-account'),
     projectsStore: projects,
   })
+  // 清掉上次进程被硬杀时留下的暂存目录（整段配音音频，会把系统盘吃掉）。
+  // 失败不阻断加载：清理是维护动作，不该让能力包起不来。
+  void sweepStaleTempDirectories().catch(() => {})
   const media = new SpokenVideoMediaHost({
     background: scope.background, fetch: scope.fetch, signal: scope.signal,
     projectsStore: projects,

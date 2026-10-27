@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { appendFileSync } from 'node:fs'
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdir, mkdtemp, open, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { execFile, spawn } from 'node:child_process'
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -658,6 +658,69 @@ async function writeJson(path, value) {
     await unlink(temporary).catch(() => {})
     throw error
   }
+}
+
+/**
+ * 原子写一个媒体文件：同目录临时文件 → fsync → rename。
+ *
+ * 为什么媒体也要走这条路：成片与配音是预览页直接读的路径。
+ * 旧实现里 ffmpeg 直接写目标路径、copyFile 覆盖目标路径，都没有中间态保护——
+ * 写到一半被 1.5 秒一次的轮询读到，前端 video 元素就报解码错误；
+ * 进程被硬杀还会留下半个 mp4，且 #writeAt 用 flag:'wx' 时下次直接 EEXIST
+ * 报「媒体文件已存在」，无法自愈，必须人工删文件。
+ *
+ * fsync 是另一层：rename 原子不等于内容落盘，断电后可能出现「文件在但 0 字节」。
+ */
+async function writeFileAtomic(path, content, { mode = 0o600 } = {}) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+  const temporary = join(dirname(path), `.${randomUUID()}.tmp`)
+  const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content)
+  let handle = null
+  try {
+    handle = await open(temporary, 'wx', mode)
+    await handle.writeFile(bytes)
+    await handle.sync()
+    await handle.close()
+    handle = null
+    for (let attempt = 0; ; attempt++) {
+      try { await rename(temporary, path); break }
+      catch (error) {
+        if ((error?.code !== 'EPERM' && error?.code !== 'EBUSY') || attempt >= 6) throw error
+        await new Promise((resolve) => setTimeout(resolve, [50, 120, 280, 600, 1200, 2400, 4000][attempt]))
+      }
+    }
+  } catch (error) {
+    if (handle) await handle.close().catch(() => {})
+    await unlink(temporary).catch(() => {})
+    throw error
+  }
+  return path
+}
+
+/**
+ * 清理上次进程被硬杀时留下的暂存目录。
+ *
+ * 正常路径下 mkdtemp 目录都在 finally 里删掉了；但任务管理器结束进程、
+ * 断电、蓝屏时 finally 不会执行。这些目录里是整段配音音频与参考音频，
+ * 会安静地把系统盘吃掉。只在启动时扫一次，只删 7 天前的。
+ */
+const STALE_TEMP_PREFIXES = ['lwb-spoken-video-bailian-', 'lwb-spoken-video-mimo-', 'lwb-spoken-video-mimo-ref-']
+const STALE_TEMP_AGE_MS = 7 * 24 * 60 * 60 * 1000
+
+async function sweepStaleTempDirectories(now = Date.now()) {
+  const base = tmpdir()
+  const entries = await readdir(base, { withFileTypes: true }).catch(() => [])
+  let removed = 0
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !STALE_TEMP_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) continue
+    const path = join(base, entry.name)
+    const info = await lstat(path).catch(() => null)
+    if (!info || !info.isDirectory() || info.isSymbolicLink()) continue
+    if (now - info.mtimeMs < STALE_TEMP_AGE_MS) continue
+    await rm(path, { recursive: true, force: true }).catch(() => {})
+    removed += 1
+  }
+  return removed
 }
 
 async function readJson(path, fallback) {
@@ -1750,6 +1813,8 @@ export function isCredentialRejection(status) {
   return status === 401 || status === 403
 }
 
+export { sweepStaleTempDirectories, writeFileAtomic }
+
 export class SpokenVideoMediaHost {
   constructor({ background = (work) => work, signal, projectsStore, credentials, connectionSettings, videoCreator, videoReviewer, fetch = globalThis.fetch, environment = process.env } = {}) {
     if (!projectsStore) throw new Error('SpokenVideoMediaHost requires projectsStore.')
@@ -2236,7 +2301,7 @@ export class SpokenVideoMediaHost {
     const file = `voice-references/${id}.${format.extension}`
     const target = await safeMediaTarget(root, file, '参考音频', true)
     try {
-      await writeFile(target, audio, { mode: 0o600, flag: 'wx' })
+      await writeFileAtomic(target, audio)
       let probe
       try { probe = await this.#probe(target) }
       catch { fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '上传的参考音频无法解码。') }
@@ -2344,7 +2409,7 @@ export class SpokenVideoMediaHost {
     const extension = extname(uploaded.file).slice(1).toLowerCase()
     const file = `audio-media/references/${uploaded.id}.${extension}`
     const target = await safeMediaTarget(projectRoot, file, '任务音色参考音频', true)
-    await writeFile(target, uploaded.audio, { mode: 0o600 })
+    await writeFileAtomic(target, uploaded.audio)
     return { id: uploaded.id, file, name: uploaded.name, mediaType: uploaded.mediaType }
   }
 
@@ -2358,7 +2423,7 @@ export class SpokenVideoMediaHost {
     const file = `media/bgm-uploads/${uploadId}.${format.extension}`
     const target = await safeMediaTarget(root, file, '背景音乐', true)
     try {
-      await writeFile(target, audio, { mode: 0o600, flag: 'wx' })
+      await writeFileAtomic(target, audio)
       let probe
       try { probe = await this.#probe(target) }
       catch { fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '上传的背景音乐无法解码。') }
@@ -3082,9 +3147,14 @@ export class SpokenVideoMediaHost {
   async #writeAudioTaskFile(root, relativePath, content) {
     const normalized = this.#audioTaskRelativePath(relativePath, '音频任务媒体')
     const target = await safeMediaTarget(root, normalized, '音频任务媒体', true)
-    try { await writeFile(target, content, { mode: 0o600, flag: 'wx' }) }
-    catch (error) { if (error?.code === 'EEXIST') fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '音频任务媒体文件已存在。'); throw error }
-    return target
+    const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content)
+    const info = await lstat(target).catch(() => null)
+    if (info?.isFile() && !info.isSymbolicLink()) {
+      // 内容相同就复用（重试/续跑会重复写同一产物），不同则拒绝覆盖。
+      if (info.size === bytes.length && (await readFile(target)).equals(bytes)) return target
+      fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '音频任务媒体文件已存在且内容不同，未覆盖原文件。')
+    }
+    return writeFileAtomic(target, bytes)
   }
 
   async #writeAudioTaskVoiceover(root, taskId, bytes, format, settings, applySettings) {
@@ -4327,13 +4397,15 @@ async #mimoReferenceDataUrl(root, input) {
 
   async #writeAt(root, relativePath, content, label) {
     const target = await safeMediaTarget(root, relativePath, label, true)
-    try {
-      await writeFile(target, content, { mode: 0o600, flag: 'wx' })
-    } catch (error) {
-      if (error?.code === 'EEXIST') fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '媒体文件已存在。')
-      throw error
+    const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content)
+    // 先看目标是否已存在且内容一致：重试/续跑时会重复写同一个产物，
+    // 内容相同就复用，不因为 EEXIST 直接失败。
+    const existing = await lstat(target).catch(() => null)
+    if (existing?.isFile() && !existing.isSymbolicLink()) {
+      if (existing.size === bytes.length && (await readFile(target)).equals(bytes)) return target
+      fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '媒体文件已存在且内容不同，未覆盖原文件。')
     }
-    return target
+    return writeFileAtomic(target, bytes)
   }
 
   async #write(root, relativePath, content) {
@@ -4343,15 +4415,12 @@ async #mimoReferenceDataUrl(root, input) {
   async #writeSyncedMedia(root, relativePath, content) {
     const target = await safeMediaTarget(root, mediaPath(relativePath, '同步媒体文件'), '同步媒体文件', true)
     const bytes = Buffer.isBuffer(content) ? content : Buffer.from(content)
-    try { await writeFile(target, bytes, { mode: 0o600, flag: 'wx' }) }
-    catch (error) {
-      if (error?.code !== 'EEXIST') throw error
-      const info = await lstat(target)
-      if (!info.isFile() || info.isSymbolicLink() || info.size !== bytes.length || !(await readFile(target)).equals(bytes)) {
-        fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '已有媒体文件与任务产物不一致，未覆盖原文件。')
-      }
+    const info = await lstat(target).catch(() => null)
+    if (info?.isFile() && !info.isSymbolicLink()) {
+      if (info.size === bytes.length && (await readFile(target)).equals(bytes)) return target
+      fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '已有媒体文件与任务产物不一致，未覆盖原文件。')
     }
-    return target
+    return writeFileAtomic(target, bytes)
   }
 
   async #writeVoiceoverAudio(root, runId, bytes, outputFormat, settings, applySettings) {
@@ -4363,10 +4432,20 @@ async #mimoReferenceDataUrl(root, input) {
     const source = await this.#write(root, sourcePath, bytes)
     const output = await safeMediaTarget(root, relativePath, '配音文件', true)
     try {
-      await execFileAsync('ffmpeg', [
-        '-y', '-i', source, '-filter:a', `atempo=${settings.rate},volume=${settings.volume}`,
-        output,
-      ], { signal: this.signal, maxBuffer: 1024 * 1024 * 4 })
+      // 同样先写 .partial：配音文件是预览页与下游渲染的输入，
+      // 半成品被读到会直接让下游失败。
+      const partial = `${output}.partial`
+      try {
+        // 同上：`.partial` 后缀无法推断封装格式，按目标扩展名显式指定。
+        const format = extensionForFormat(outputFormat)
+        await execFileAsync('ffmpeg', [
+          '-y', '-i', source, '-filter:a', `atempo=${settings.rate},volume=${settings.volume}`,
+          '-f', format === 'm4a' ? 'mp4' : format, partial,
+        ], { signal: this.signal, maxBuffer: 1024 * 1024 * 4 })
+        await rename(partial, output)
+      } finally {
+        await unlink(partial).catch(() => {})
+      }
       await chmod(output, 0o600)
       const info = await stat(output)
       if (!info.isFile() || info.size < 1 || info.size > MAX_MEDIA_BYTES) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '处理后的配音文件无效或超出 80 MiB 限制。')
@@ -5055,7 +5134,19 @@ async #mimoReferenceDataUrl(root, input) {
         ...(subtitleEnabled ? ['-vf', ffmpegSubtitleFilter(subtitlePath)] : []), '-map', '0:v:0', '-map', '1:a:0',
         '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-shortest', '-movflags', '+faststart', videoPath,
       ]
-      await execFileAsync('ffmpeg', ffmpegArgs, { signal: this.signal, maxBuffer: 1024 * 1024 * 4 })
+      // 先渲染到 .partial，成功后再 rename 到业务路径。
+      // 否则渲染中途失败/被取消会在 media/videos/<runId>.mp4 留下半个 mp4，
+      // 而预览页直接读这个路径，用户看到的是「成片打不开」。
+      const partial = `${videoPath}.partial`
+      // ffmpeg 按扩展名推断封装格式，`.partial` 会让它直接报
+      // "Unable to choose an output format"。必须显式给 -f。
+      const args = ffmpegArgs.slice(0, -1).concat('-f', 'mp4', partial)
+      try {
+        await execFileAsync('ffmpeg', args, { signal: this.signal, maxBuffer: 1024 * 1024 * 4 })
+        await rename(partial, videoPath)
+      } finally {
+        await unlink(partial).catch(() => {})
+      }
     } catch (error) {
       throw commandError(error, '本机视频渲染')
     }

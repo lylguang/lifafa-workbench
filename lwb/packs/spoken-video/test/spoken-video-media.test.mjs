@@ -3187,3 +3187,49 @@ test('取消与超时都是终态，不会在恢复逻辑里被当成「还在�
   const source = await readFile(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
   assert.match(source, /MEDIA_OPERATION_STATES\.includes\(run\.status\)/u, '读盘时必须按枚举校验状态')
 })
+
+// ── 媒体文件原子写入 ────────────────────────────────────────────────────────
+//
+// 成片与配音是预览页直接读的路径。旧实现里 ffmpeg 直写目标路径、copyFile 覆盖
+// 目标路径，都没有中间态保护：写到一半被 1.5 秒一次的轮询读到，前端 video 元素
+// 就报解码错误；进程被硬杀还会留下半个 mp4，下次 EEXIST 无法自愈。
+// 这组断言钉住「先写临时文件、fsync、再 rename」这条路径存在且被真正使用。
+
+test('媒体产物走 tmp → fsync → rename，不留半成品在业务路径上', async () => {
+  const source = await readFile(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  assert.match(source, /async function writeFileAtomic\(path, content, \{ mode = 0o600 \} = \{\}\)/u, '需要统一的原子写函数')
+  assert.match(source, /await handle\.sync\(\)/u, 'rename 原子不等于落盘，必须 fsync')
+  assert.match(source, /await rename\(temporary, path\)/u, '最终要通过 rename 落地')
+  // #writeAt 与 #writeSyncedMedia 都必须走它，不能退回裸 writeFile。
+  // #writeAt 与 #writeSyncedMedia 都必须走它，不能退回裸 writeFile 直写业务路径。
+  assert.doesNotMatch(source, /await writeFile\(target,/u, '媒体写入不能再用裸 writeFile 直写目标路径')
+  // 内容一致时复用、不一致时拒绝覆盖——否则重试/续跑会被 EEXIST 卡死。
+  assert.match(source, /媒体文件已存在且内容不同，未覆盖原文件/u, '内容不同时必须拒绝覆盖而不是静默覆盖')
+})
+
+test('ffmpeg 渲染与配音处理先写 .partial 再 rename', async () => {
+  const source = await readFile(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  // .partial 后缀无法让 ffmpeg 推断封装格式，必须显式 -f；这条曾经真的炸过。
+  assert.match(source, /'-f', 'mp4', partial/u, '成片 partial 必须显式指定 mp4 封装')
+  assert.match(source, /await rename\(partial, videoPath\)/u, '成片渲染成功后要 rename 到业务路径')
+  assert.match(source, /await rename\(partial, output\)/u, '配音处理成功后要 rename 到业务路径')
+  // 失败路径必须清掉 partial，否则磁盘上会堆半成品。
+  assert.match(source, /await unlink\(partial\)\.catch\(\(\) => \{\}\)/u, '失败时要清理 partial 文件')
+})
+
+test('启动时清理被硬杀留下的暂存目录', async () => {
+  const { sweepStaleTempDirectories } = await import('../spoken-video-media-host.mjs')
+  const { mkdtemp, mkdir, utimes } = await import('node:fs/promises')
+  const base = await mkdtemp(join(tmpdir(), 'lwb-spoken-video-mimo-'))
+  // 造一个「8 天前」的目录：会被清。
+  const stale = join(base, 'stale')
+  await mkdir(stale)
+  const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000)
+  await utimes(base, eightDaysAgo, eightDaysAgo)
+  // 造一个「刚刚」的目录：不能清（可能正被别的进程使用）。
+  const fresh = await mkdtemp(join(tmpdir(), 'lwb-spoken-video-mimo-'))
+  const removed = await sweepStaleTempDirectories()
+  assert.ok(removed >= 1, '应当清理掉 8 天前的暂存目录')
+  assert.ok(existsSync(fresh), '刚创建的暂存目录不能被误删')
+  await rm(fresh, { recursive: true, force: true }).catch(() => {})
+})
