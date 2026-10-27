@@ -125,6 +125,10 @@ export class SpokenVideoGateway extends TypertRemoteService {
   startSubtitles(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startSubtitles(context, request)) }
   startVideoRender(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startVideoRender(context, request)) }
   startTechnicalQc(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startTechnicalQc(context, request)) }
+  /** 中止一条正在跑的媒体任务：ffmpeg 与请求会真的停下来，不只是改界面状态。 */
+  cancelMediaRun(request) { return this.ctx.spokenVideoScope.request(() => this.ctx.spokenVideoMedia.cancelRun(null, request)) }
+  /** 续跑一条被重启中断的媒体任务，已完成的阶段不重做。 */
+  resumeMediaRun(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.resumeRun(context, request)) }
   /** 人工放行审片否决的成片（受控路径，客户端不能直接 commit qc）。 */
   releaseRejectedCut(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.releaseRejectedCut(context, request)) }
   readMedia(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.readMedia(context, request)) }
@@ -223,6 +227,8 @@ decorateRemote(SpokenVideoGateway.prototype, 'startVoiceover', 'startVoiceover')
 decorateRemote(SpokenVideoGateway.prototype, 'startSubtitles', 'startSubtitles')
 decorateRemote(SpokenVideoGateway.prototype, 'startVideoRender', 'startVideoRender')
 decorateRemote(SpokenVideoGateway.prototype, 'startTechnicalQc', 'startTechnicalQc')
+decorateRemote(SpokenVideoGateway.prototype, 'cancelMediaRun', 'cancelMediaRun')
+decorateRemote(SpokenVideoGateway.prototype, 'resumeMediaRun', 'resumeMediaRun')
 decorateRemote(SpokenVideoGateway.prototype, 'releaseRejectedCut', 'releaseRejectedCut')
 decorateRemote(SpokenVideoGateway.prototype, 'readMedia', 'readMedia')
 decorateRemote(SpokenVideoGateway.prototype, 'publishStatus', 'publishStatus')

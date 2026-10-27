@@ -734,7 +734,16 @@ test('audio and video cards can delete a finished task after a danger confirmati
     // 走同一个后端入口，任务类型区分配音与视频。
     assert.match(page, new RegExp(`remote\\(packId, '${call}', \\{ taskType: '${name}', ids: targets\\.map\\(\\(task\\) => task\\.id\\) \\}\\)`, 'u'), `${name} delete must go through ${call}`)
     // 只给终态卡片显示删除，运行中的不显示（避免用户以为能删正在跑的）。
-    assert.match(page, /\['succeeded', 'failed'\]\.includes\(task\.status\) \? h\('button', \{ type: 'button', className: 'lwb-danger-button'/u, `${name} delete button is terminal-only`)
+    //
+    // 2026-10-27：视频任务多了 cancelled 终态（停止按钮的产物），它同样是终态，
+    // 因此和 succeeded/failed 一样可以删除。这里允许可选地多一个 'cancelled'，
+    // 同时钉住两条反向约束：running / interrupted 绝不能出现在可删集合里——
+    // interrupted 是可续跑的，删掉它等于把能恢复的进度丢了。
+    assert.match(page, /\['succeeded', 'failed'(?:, 'cancelled')?\]\.includes\(task\.status\) \? h\('button', \{ type: 'button', className: 'lwb-danger-button'/u, `${name} delete button is terminal-only`)
+    const deleteGate = page.match(/\[([^\]]*)\]\.includes\(task\.status\) \? h\('button', \{ type: 'button', className: 'lwb-danger-button'/u)
+    assert.ok(deleteGate, `${name} delete must be gated on a status list`)
+    assert.doesNotMatch(deleteGate[1], /'running'|'queued'/u, `${name} must not offer delete on a live task`)
+    assert.doesNotMatch(deleteGate[1], /'interrupted'/u, `${name} must not offer delete on a resumable interrupted task`)
     // 破坏性操作必须走 danger 二次确认。
     assert.match(page, /confirm: '确认删除', danger: true/u, `${name} delete asks for a danger confirmation`)
     assert.match(page, /删除后无法恢复/u, `${name} delete warns that it cannot be undone`)

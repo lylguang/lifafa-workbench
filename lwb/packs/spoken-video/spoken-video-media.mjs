@@ -3,7 +3,7 @@ import { countInlineAudioTags } from './spoken-video-media-mimo.mjs'
 import { measureNarrativeRhythm, measureSceneTimeline } from './spoken-video-rhythm.mjs'
 
 export const MEDIA_OPERATION_TYPES = Object.freeze(['voiceover', 'subtitles', 'video', 'qc'])
-export const MEDIA_OPERATION_STATES = Object.freeze(['queued', 'running', 'succeeded', 'failed'])
+export const MEDIA_OPERATION_STATES = Object.freeze(['queued', 'running', 'succeeded', 'failed', 'cancelled'])
 export const MEDIA_PROVIDERS = Object.freeze(['bailian', 'scitiger', 'legacy', 'mimo'])
 export const MEDIA_CONNECTION_PROVIDERS = Object.freeze(['bailian', 'scitiger', 'mimo'])
 export const VIDEO_ORIENTATIONS = Object.freeze(['portrait', 'landscape'])

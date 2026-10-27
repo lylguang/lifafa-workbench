@@ -1612,7 +1612,13 @@ test('rejects manual video production and manual technical-qc submissions', asyn
   )
 })
 
-test('marks media runs interrupted by a host restart as failed', async (t) => {
+// 2026-10-27 行为变更：重启后不再一律判死。
+//
+// 旧语义是 running → failed +「请重新提交」。视频渲染一轮 20–40 分钟、
+// 配音 8 段十几分钟，重启一次全部归零，这是「一重启就白干」的直接来源。
+// 新语义是 running → interrupted + resumeFrom，由用户点「从断点继续」，
+// 已落盘的阶段产物会被跳过。这条测试钉住新语义，防止回退。
+test('marks media runs interrupted by a host restart as resumable instead of dead', async (t) => {
   const cwd = await workspace(t)
   const store = new SpokenVideoProjectStore()
   const currentAgent = agent(cwd)
@@ -1622,8 +1628,9 @@ test('marks media runs interrupted by a host restart as failed', async (t) => {
   await writeFile(join(mediaRoot, 'runs.json'), `${JSON.stringify({ schemaVersion: 1, runs: [{ id: 'interrupted-1', type: 'voiceover', status: 'running', projectId: project.id, expectedRevision: project.revision, createdAt: new Date(Date.now() - 5_000).toISOString() }] })}\n`)
   const host = new SpokenVideoMediaHost({ projectsStore: store })
   const [run] = await host.operations(currentAgent, { projectId: project.id })
-  assert.equal(run.status, 'failed')
-  assert.match(run.error, /主机在任务完成前已重启/u)
+  assert.equal(run.status, 'interrupted', '重启中断的任务必须可续跑，而不是直接判死')
+  assert.match(run.error, /主机在任务完成前重启/u)
+  assert.match(run.error, /断点续跑/u, '文案要告诉用户能续跑，而不是让人重新提交')
 })
 
 test('refuses preview media reached through a symlinked project directory', async (t) => {
@@ -3132,4 +3139,51 @@ test('质检提交接受与抽帧硬上限等量的抽帧文件，不会因为�
     }),
     (error) => error instanceof SpokenVideoStoreError && new RegExp(`质检抽帧最多包含 ${REVIEW_FRAME_HARD_LIMIT} 项`, 'u').test(error.message),
   )
+})
+
+// ── 任务可中止与阶段预算 ────────────────────────────────────────────────────
+//
+// 2026-10-27：这一组守的是「经常出问题」的第一根因。旧实现里所有 ffmpeg 与
+// fetch 只挂能力包生命周期信号，于是取消按钮停不掉正在跑的 ffmpeg，
+// 单条卡死还会把同类型队列永久堵住。这些断言不驱动真实媒体链路，
+// 只钉住「超时与中止的能力确实存在」这一结构约束。
+
+test('媒体任务带独立中止开关与阶段预算，取消能真的停下来', async () => {
+  const source = await readFile(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  assert.match(source, /const runContext = new AsyncLocalStorage\(\)/u, '需要按任务传递中止信号')
+  assert.match(source, /this\.runAborts = new Map\(\)/u, '需要按 run 记录中止开关')
+  assert.match(source, /STAGE_TIMEOUTS_MS/u, '需要阶段时间预算')
+  assert.match(source, /AbortSignal\.timeout\(STAGE_TIMEOUTS_MS\[run\.type\]/u, '每个 run 必须挂上自己的预算')
+  assert.match(source, /async cancelRun\(agent, request\)/u, '需要可调用的取消入口')
+  assert.match(source, /abort\.abort\(new Error\('cancelled by user'\)\)/u, '取消必须真的 abort，而不是只改状态')
+  // 取消后要落成 cancelled，而不是伪装成 failed —— 界面文案与续跑判定都依赖它。
+  assert.match(source, /cancelled \? 'cancelled' : 'failed'/u, '取消要落成 cancelled 状态')
+})
+
+test('ffmpeg / ffprobe 有超时，且超时后不放弃杀进程', async () => {
+  const source = await readFile(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  assert.match(source, /FFPROBE_TIMEOUT_MS = 30 \* 1000/u, 'ffprobe 要有 30 秒上限')
+  assert.match(source, /FFMPEG_TIMEOUT_MS = 30 \* 60 \* 1000/u, 'ffmpeg 要有上限')
+  // execFile 的 timeout 只发 SIGTERM；忽略该信号的 ffmpeg 会让 close 永不触发，
+  // 于是 Promise 永不 settle、租约永不释放。必须有 SIGKILL 兜底。
+  assert.match(source, /result\.child\.kill\('SIGKILL'\)/u, '超时后要能强杀子进程')
+})
+
+test('所有出网请求都有超时，轮询不会因单次请求挂住而无限等待', async () => {
+  const source = await readFile(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  assert.match(source, /HTTP_TIMEOUT_MS = 120 \* 1000/u, 'HTTP 要有单次上限')
+  assert.match(source, /async #fetchWithTimeout\(url, init = \{\}\)/u, '需要统一的带超时 fetch')
+  // 关键回归：下载与 SciTiger 轮询过去完全不带 signal，
+  // 导致「15 分钟上限」在单次请求挂住时形同虚设。
+  assert.doesNotMatch(source, /response = await this\.fetch\(boundedHttpUrl\(url, label\), \{ method: 'GET', headers \}\)/u, '下载必须走带超时的 fetch')
+  assert.doesNotMatch(source, /response = await this\.fetch\(url, init\)/u, '外部 JSON 请求必须走带超时的 fetch')
+})
+
+test('取消与超时都是终态，不会在恢复逻辑里被当成「还在跑」', async () => {
+  const { MEDIA_OPERATION_STATES } = await import('../spoken-video-media.mjs')
+  assert.ok(MEDIA_OPERATION_STATES.includes('cancelled'), 'cancelled 必须是被承认的终态')
+  // 反向守：如果哪天有人把 cancelled 从枚举里删掉，readRuns 会静默丢弃这条记录，
+  // 任务从界面上直接消失——比报错更难查。
+  const source = await readFile(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  assert.match(source, /MEDIA_OPERATION_STATES\.includes\(run\.status\)/u, '读盘时必须按枚举校验状态')
 })

@@ -381,7 +381,7 @@ async function writeSfxKit(publicDir) {
   }
 }
 
-export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title, script, audioPath, durationSeconds, subtitles, subtitleSrt = '', subtitleEnabled, orientation = 'landscape', visualBrief, bgmPath = null, backgroundMusic = null, bgmVolume = null }) {
+export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title, script, audioPath, durationSeconds, subtitles, subtitleSrt = '', subtitleEnabled, orientation = 'landscape', visualBrief, bgmPath = null, backgroundMusic = null, bgmVolume = null, resume = false }) {
   if (!await remotionRendererAvailable()) throw new Error('当前安装未包含 Remotion 渲染器。')
   const projectDir = join(projectRoot, 'media', 'video-agent', runId)
   const srcDir = join(projectDir, 'src')
@@ -456,7 +456,11 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
     writeFile(join(srcDir, 'index.ts'), entry, { encoding: 'utf8', mode: 0o600 }),
     writeFile(join(srcDir, 'Root.tsx'), root, { encoding: 'utf8', mode: 0o600 }),
     writeFile(join(srcDir, 'DeterministicSrtSubtitles.tsx'), captions, { encoding: 'utf8', mode: 0o600 }),
-    writeFile(join(srcDir, 'CreativeVideo.tsx'), creative, { encoding: 'utf8', mode: 0o600 }),
+    // 续跑时必须保留导演已写好的组件：其余文件都是确定性的，重写无害；
+    // 只有 CreativeVideo.tsx 是 Agent 的产物，用占位源盖掉它等于把导演的活白干。
+    ...(resume && await exists(join(srcDir, 'CreativeVideo.tsx'))
+      ? []
+      : [writeFile(join(srcDir, 'CreativeVideo.tsx'), creative, { encoding: 'utf8', mode: 0o600 })]),
     writeFile(join(publicDir, 'task-props.json'), json(props), { encoding: 'utf8', mode: 0o600 }),
     writeFile(join(inputsDir, 'draft.json'), json({ title, body: script }), { encoding: 'utf8', mode: 0o600 }),
     writeFile(join(inputsDir, 'subtitles.srt'), subtitleSrtText(subtitleSrt, subtitles), { encoding: 'utf8', mode: 0o600 }),

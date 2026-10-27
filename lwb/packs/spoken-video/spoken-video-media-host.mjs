@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { appendFileSync } from 'node:fs'
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -45,11 +46,70 @@ import { buildVideoCreatorPrompt, buildVideoCreatorRepairPrompt, buildVideoEdito
 import { DEFAULT_LOCAL_QC_THRESHOLDS, judgeLocalQc, parseBlackDetect, parseFreezeDetect, parseSilenceDetect, parseVolumeDetect } from './spoken-video-local-qc.mjs'
 
 const execFilePromise = promisify(execFile)
-async function execFileAsync(...args) {
-  const result = execFilePromise(...args)
+
+/**
+ * 当前任务的运行上下文。
+ *
+ * 为什么要有这一层：
+ * 旧实现里所有 ffmpeg / fetch 调用都只挂 `scope.signal`（能力包生命周期）。
+ * 那个信号只在「卸载能力包 / 关闭工作台」时才 abort，于是：
+ *   · 用户点取消，正在跑的 ffmpeg 照旧跑完、继续写业务文件；
+ *   · 单条 ffmpeg 卡死，队列按类型串行，该类型后面所有任务永久排队；
+ *   · 界面只有一个「处理中」，用户只能看着转圈。
+ *
+ * 这里给每个 run 一个自己的 AbortController + 阶段预算，用 AsyncLocalStorage
+ * 传递，所以 run 内部读取的 signal 自动是「当前任务信号」——
+ * 既有调用点不用逐个改参数。
+ */
+const runContext = new AsyncLocalStorage()
+
+/** 各阶段的时间预算。数值来自实测耗时上限，留 2–3 倍余量。 */
+const STAGE_TIMEOUTS_MS = Object.freeze({
+  voiceover: 30 * 60 * 1000,
+  subtitles: 20 * 60 * 1000,
+  video: 60 * 60 * 1000,
+  'technical-qc': 15 * 60 * 1000,
+})
+const DEFAULT_STAGE_TIMEOUT_MS = 30 * 60 * 1000
+/** 单条 ffprobe 的上限：读元数据不该超过 30 秒。 */
+const FFPROBE_TIMEOUT_MS = 30 * 1000
+/** 单条 ffmpeg 的上限：超过这个时长基本可以判定卡死。 */
+const FFMPEG_TIMEOUT_MS = 30 * 60 * 1000
+/** 单次 HTTP 请求上限，避免 TCP 半开 / 代理黑洞把轮询挂死。 */
+const HTTP_TIMEOUT_MS = 120 * 1000
+
+function currentRunSignal() {
+  return runContext.getStore()?.signal ?? null
+}
+
+/** 把「当前任务信号」和「调用方信号」合并成一个。 */
+function composeSignal(explicit) {
+  const scoped = currentRunSignal()
+  if (!scoped) return explicit || undefined
+  if (!explicit) return scoped
+  if (explicit === scoped) return scoped
+  try { return AbortSignal.any([scoped, explicit]) } catch { return scoped }
+}
+
+async function execFileAsync(file, args, options = {}) {
+  const { timeout: explicitTimeout, signal: explicitSignal, ...rest } = options
+  const signal = composeSignal(explicitSignal)
+  const timeout = explicitTimeout
+    ?? (file === 'ffprobe' ? FFPROBE_TIMEOUT_MS : FFMPEG_TIMEOUT_MS)
+  const result = execFilePromise(file, args, { ...rest, ...(signal ? { signal } : {}), ...(timeout ? { timeout } : {}) })
   // AbortError may reject before the child has exited. Keep the workspace
   // lease until close, so reset cannot race the child's final file writes.
-  const closed = new Promise((resolvePromise) => result.child.once('close', resolvePromise))
+  //
+  // 超时/中止后子进程若忽略 SIGTERM，`close` 可能永不触发，所以这里再给一个
+  // 等待上限：宁可让租约早一点释放，也不要让 Promise 永不 settle。
+  const closed = new Promise((resolvePromise) => {
+    const grace = setTimeout(() => {
+      try { result.child.kill('SIGKILL') } catch { /* 已经退出 */ }
+      resolvePromise()
+    }, 10_000)
+    grace.unref?.()
+    result.child.once('close', () => { clearTimeout(grace); resolvePromise() })
+  })
   try { return await result } finally { await closed }
 }
 const PROJECT_ID = /^[a-f0-9-]{36}$/iu
@@ -685,6 +745,23 @@ function savedVoiceSummary(voice) {
   }
 }
 
+/**
+ * 中断后该从哪个阶段续跑。
+ *
+ * 只看 pipeline 里已经落盘的阶段标记——没标记的一律从头，
+ * 宁可多算一步，也不要拿半成品去冒充已完成。
+ */
+function resumeStageOf(run) {
+  if (!run || run.type !== 'video') return null
+  const pipeline = run.pipeline && typeof run.pipeline === 'object' ? run.pipeline : null
+  if (!pipeline) return null
+  const stages = pipeline.stages && typeof pipeline.stages === 'object' ? pipeline.stages : {}
+  // 导演工程已就绪且预检通过 → 不必再花一次模型往返重写 tsx。
+  if (stages.preflight?.status === 'succeeded') return 'rendering'
+  if (stages.directing?.status === 'succeeded') return 'preflight'
+  return null
+}
+
 function runSummary(run) {
   return {
     id: run.id,
@@ -697,6 +774,8 @@ function runSummary(run) {
     completedAt: run.completedAt || null,
     phase: run.phase || null,
     error: run.error || null,
+    resumeFrom: run.resumeFrom || null,
+    resumedAt: run.resumedAt || null,
     result: run.result || null,
     pipeline: run.type === 'video' && run.pipeline && typeof run.pipeline === 'object' ? run.pipeline : null,
     // 「已渲染但被审片否决」的成片。它不在 result 里（result 只在完全通过时才有），
@@ -1676,6 +1755,9 @@ export class SpokenVideoMediaHost {
     if (!projectsStore) throw new Error('SpokenVideoMediaHost requires projectsStore.')
     this.background = background
     this.signal = signal
+    // 当前任务的独立中止开关。见文件头 runContext 的注释：
+    // 它让用户在界面上点「取消」时，正在跑的 ffmpeg / fetch 真的停下来。
+    this.runAborts = new Map()
     this.projectsStore = projectsStore
     this.credentials = credentials || null
     this.connectionSettings = connectionSettings || null
@@ -3292,11 +3374,20 @@ export class SpokenVideoMediaHost {
       const stillEnteringQueue = Number.isFinite(submittedAtMs) && nowMs - submittedAtMs < RUN_RECOVERY_GRACE_MS
       if (['queued', 'running'].includes(run.status) && !stillEnteringQueue && !this.queues.has(queueKey) && !this.activeRunIds.has(run.id)) {
         changed = true
+        // 2026-10-27：重启后不再一律判死。
+        //
+        // 旧行为是把「queued/running」直接写成 failed 并让用户「重新提交」。
+        // 视频渲染一轮 20–40 分钟，配音 8 段要十几分钟，重启一次全部归零，
+        // 这是用户感受里「一重启就白干」的直接来源。
+        //
+        // 现在改为 interrupted（可续跑）+ resumeFrom（断点阶段）。
+        // 已经落盘的阶段产物（导演工程、已渲染成片）由续跑时复查，能跳过就跳过。
         return {
           ...run,
-          status: 'failed',
-          completedAt: new Date().toISOString(),
-          error: '媒体主机在任务完成前已重启。请在当前项目版本上重新提交任务。',
+          status: 'interrupted',
+          interruptedAt: new Date().toISOString(),
+          resumeFrom: resumeStageOf(run),
+          error: '媒体主机在任务完成前重启。可以点「继续」从断点续跑，已完成的阶段不会重做。',
         }
       }
       return run
@@ -3307,28 +3398,105 @@ export class SpokenVideoMediaHost {
     return next
   }
 
+  /**
+   * 续跑一条被中断的媒体任务。
+   *
+   * 语义与定时任务的 resumeRun 对齐：只接受 interrupted，续跑时按
+   * resumeFrom 复查已完成阶段，能跳过就跳过。
+   */
+  async resumeRun(agent, request) {
+    const id = text(request?.runId, '任务 id', 80)
+    const projectIdValue = projectId(request?.projectId)
+    const root = await projectRootFor(agent, projectIdValue)
+    const runs = await readRuns(root)
+    const index = runs.runs.findIndex((run) => run.id === id)
+    if (index < 0) fail('SPOKEN_VIDEO_NOT_FOUND', '该任务不存在。')
+    const run = runs.runs[index]
+    if (run.status !== 'interrupted') fail('SPOKEN_VIDEO_TASK_BUSY', '只有被中断的任务可以继续。')
+    const queueKey = `${root}\u0000${run.type}`
+    if (this.queues.has(queueKey)) fail('SPOKEN_VIDEO_TASK_BUSY', '同一类型的任务正在运行，请等待它结束后再继续。')
+    const revived = await this.#mutateRun(root, id, (current) => ({
+      ...current,
+      status: 'queued',
+      resumeFrom: current.resumeFrom || resumeStageOf(current),
+      resumedAt: new Date().toISOString(),
+      error: null,
+    }))
+    this.activeRunIds.add(revived.id)
+    const previous = this.queues.get(queueKey) || Promise.resolve()
+    const work = this.background(previous.then(() => this.#run(agent, root, revived)).catch(() => {}))
+    this.queues.set(queueKey, work)
+    void work.finally(() => {
+      this.activeRunIds.delete(revived.id)
+      if (this.queues.get(queueKey) === work) this.queues.delete(queueKey)
+    })
+    return { ...runSummary(revived), resumed: true }
+  }
+
   async #run(agent, root, queued) {
     const run = await this.#mutateRun(root, queued.id, (current) => ({ ...current, status: 'running', startedAt: new Date().toISOString() }))
+    // 每个 run 一个独立的中止开关，并带上阶段预算。
+    //
+    // 两层信号取并集：用户点取消（runAborts）或阶段超时（budget）都能真的
+    // 停掉正在跑的 ffmpeg / fetch；能力包被卸载（this.signal）仍然生效。
+    const abort = new AbortController()
+    const budget = AbortSignal.timeout(STAGE_TIMEOUTS_MS[run.type] ?? DEFAULT_STAGE_TIMEOUT_MS)
+    const signals = [abort.signal, budget]
+    if (this.signal) signals.push(this.signal)
+    let combined
+    try { combined = AbortSignal.any(signals) } catch { combined = abort.signal }
+    this.runAborts.set(run.id, abort)
+    const onAbort = () => { void this.#markRunAborted(root, run.id, budget.aborted) }
+    combined.addEventListener('abort', onAbort, { once: true })
     try {
-      await this.#prepareRunCredentials(run)
-      let result
-      if (run.type === 'voiceover') result = await this.#generateVoiceover(agent, root, run)
-      else if (run.type === 'subtitles') result = await this.#generateSubtitles(agent, root, run)
-      else if (run.type === 'video') result = await this.#renderVideo(agent, root, run)
-      else result = await this.#technicalQc(agent, root, run)
-      await this.#mutateRun(root, run.id, (current) => ({ ...current, status: 'succeeded', completedAt: new Date().toISOString(), result }))
+      await runContext.run({ signal: combined, runId: run.id }, async () => {
+        await this.#prepareRunCredentials(run)
+        let result
+        if (run.type === 'voiceover') result = await this.#generateVoiceover(agent, root, run)
+        else if (run.type === 'subtitles') result = await this.#generateSubtitles(agent, root, run)
+        else if (run.type === 'video') result = await this.#renderVideo(agent, root, run)
+        else result = await this.#technicalQc(agent, root, run)
+        await this.#mutateRun(root, run.id, (current) => ({ ...current, status: 'succeeded', completedAt: new Date().toISOString(), result }))
+      })
     } catch (error) {
-      const message = mediaErrorMessage(error)
+      const message = budget.aborted
+        ? `任务超过阶段时间预算（${Math.round((STAGE_TIMEOUTS_MS[run.type] ?? DEFAULT_STAGE_TIMEOUT_MS) / 60000)} 分钟）已自动停止。请检查网络与媒体服务后重试。`
+        : mediaErrorMessage(error)
+      const cancelled = abort.signal.aborted && !budget.aborted
       await this.#mutateRun(root, run.id, (current) => {
         const completedAt = new Date().toISOString()
         const pipeline = current.type === 'video' && current.pipeline && typeof current.pipeline === 'object'
           ? { ...current.pipeline, phase: 'failed', completedAt, error: message.slice(0, 2000), stages: { ...(current.pipeline.stages || {}), ...(current.phase ? { [current.phase]: { ...(current.pipeline.stages?.[current.phase] || {}), status: 'failed', completedAt, error: message.slice(0, 1000) } } : {}) } }
           : current.pipeline
-        return { ...current, status: 'failed', phase: current.type === 'video' ? 'failed' : current.phase, completedAt, error: message.slice(0, 2000), ...(pipeline ? { pipeline } : {}) }
+        return { ...current, status: cancelled ? 'cancelled' : 'failed', phase: current.type === 'video' ? 'failed' : current.phase, completedAt, error: message.slice(0, 2000), ...(pipeline ? { pipeline } : {}) }
       })
     } finally {
+      combined.removeEventListener('abort', onAbort)
+      this.runAborts.delete(run.id)
       this.runSecrets.delete(run.id)
     }
+  }
+
+  /** 中止信号先落地，让界面在 ffmpeg 退出前就能看到「正在停止」。 */
+  async #markRunAborted(root, runId, timedOut) {
+    await this.#mutateRun(root, runId, (current) => {
+      if (current.status !== 'running') return current
+      return {
+        ...current,
+        error: timedOut
+          ? '任务超过阶段时间预算，正在停止。'
+          : '任务已取消，正在停止。',
+      }
+    }).catch(() => {})
+  }
+
+  /** 用户主动取消一条媒体任务。 */
+  async cancelRun(agent, request) {
+    const id = text(request?.runId, '任务 id', 80)
+    const abort = this.runAborts.get(id)
+    if (!abort) fail('SPOKEN_VIDEO_NOT_FOUND', '该任务已结束，或不在当前主机上运行。')
+    abort.abort(new Error('cancelled by user'))
+    return { runId: id, cancelled: true }
   }
 
   #legacyConfig() {
@@ -3398,7 +3566,7 @@ export class SpokenVideoMediaHost {
   async #externalJson(url, init, label) {
     let response
     try {
-      response = await this.fetch(url, init)
+      response = await this.#fetchWithTimeout(url, init)
     } catch (error) {
       throw new SpokenVideoMediaError('SPOKEN_VIDEO_MEDIA_SERVICE_UNREACHABLE', `${label}不可访问：${error instanceof Error ? error.message : String(error)}`)
     }
@@ -3415,10 +3583,27 @@ export class SpokenVideoMediaHost {
     return body
   }
 
+  /**
+   * 带超时的 fetch。
+   *
+   * 旧实现里 #downloadData 与 #scitigerJson 完全不带 signal：
+   * 一次 TCP 半开或代理黑洞就能让 `#scitigerPoll` 的「15 分钟上限」永不生效，
+   * 因为循环条件根本没机会再被判断一次。这里给每次请求一个硬上限。
+   */
+  async #fetchWithTimeout(url, init = {}) {
+    const callerSignal = composeSignal(init?.signal)
+    const timeout = AbortSignal.timeout(HTTP_TIMEOUT_MS)
+    let signal = timeout
+    if (callerSignal) {
+      try { signal = AbortSignal.any([callerSignal, timeout]) } catch { signal = callerSignal }
+    }
+    return this.fetch(url, { ...init, signal })
+  }
+
   async #downloadData(url, label, headers = {}) {
     let response
     try {
-      response = await this.fetch(boundedHttpUrl(url, label), { method: 'GET', headers })
+      response = await this.#fetchWithTimeout(boundedHttpUrl(url, label), { method: 'GET', headers })
     } catch (error) {
       throw new SpokenVideoMediaError('SPOKEN_VIDEO_MEDIA_SERVICE_UNREACHABLE', `${label}下载失败：${error instanceof Error ? error.message : String(error)}`)
     }
@@ -4541,36 +4726,54 @@ async #mimoReferenceDataUrl(root, input) {
       projectRoot: root, runId: run.id, title: detail.title, script, audioPath, durationSeconds,
       subtitles: cues, subtitleSrt: subtitleEnabled ? subtitles.srt : '', subtitleEnabled, orientation, visualBrief: run.input.visualBrief,
       bgmPath, backgroundMusic: run.input.backgroundMusic, bgmVolume: run.input.bgmVolume,
+      // 续跑：导演工程已通过预检时不再重写 CreativeVideo.tsx，否则等于把导演的活白干。
+      resume: Boolean(run.resumeFrom),
     })
     await this.#setVideoPhase(root, run.id, 'directing', { workspaceDir: workspace.relativeProjectDir })
-    await this.videoCreator({
-      prompt: buildVideoCreatorPrompt({ runDir: workspace.projectDir }),
-      agent,
-      validate: async () => {
-        this.signal?.throwIfAborted()
-        const report = await inspectSpokenVideoAgentProject(workspace)
-        if (report.passed) await mergeRuntimeEvalFailure(report, workspace, this.signal)
-        await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: report.passed, failures: report.failures, findings: report.findings, creativeBytes: report.creativeBytes } })
-        return report
-      },
-      repairPrompt: (input) => buildVideoCreatorRepairPrompt({ runDir: workspace.projectDir, ...input }),
-      maxRepairs: 2,
-      onDshRepair: async ({ attempt, maximum, failures }) => {
-        await this.#runEvent(root, run.id, `工程预检修复 ${attempt}/${maximum}`, failures.join('\n'))
-        await this.#setVideoPhase(root, run.id, 'directing', { repair: { attempt, maximum, failures } })
-      },
-      onDshStarted: (started) => this.#recordRunDshStarted(root, run.id, 'creator', '视觉导演', started),
-      onDshEvent: (event) => this.#recordRunDshEvent(root, run.id, 'creator', event),
-      onDshContinuation: ({ attempt, maximum }) => this.#setVideoPhase(root, run.id, 'directing', {
-        continuation: { reason: 'max-tokens', attempt, maximum },
-      }),
-    })
+    // 续跑时跳过导演阶段：预检已通过的工程不需要再花一次模型往返重写。
+    const resumeAtRender = run.resumeFrom === 'rendering'
+    // preflight 必须在 if 块外声明：修复轮（repairAttempt > 0）会原地更新它，
+    // 后面写 pipeline 时要用。放进 if 里会变成块级变量，块外引用直接 ReferenceError。
+    let preflight = null
+    if (!resumeAtRender) {
+      await this.videoCreator({
+        prompt: buildVideoCreatorPrompt({ runDir: workspace.projectDir }),
+        agent,
+        validate: async () => {
+          this.signal?.throwIfAborted()
+          const report = await inspectSpokenVideoAgentProject(workspace)
+          if (report.passed) await mergeRuntimeEvalFailure(report, workspace, this.signal)
+          await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: report.passed, failures: report.failures, findings: report.findings, creativeBytes: report.creativeBytes } })
+          return report
+        },
+        repairPrompt: (input) => buildVideoCreatorRepairPrompt({ runDir: workspace.projectDir, ...input }),
+        maxRepairs: 2,
+        onDshRepair: async ({ attempt, maximum, failures }) => {
+          await this.#runEvent(root, run.id, `工程预检修复 ${attempt}/${maximum}`, failures.join('\n'))
+          await this.#setVideoPhase(root, run.id, 'directing', { repair: { attempt, maximum, failures } })
+        },
+        onDshStarted: (started) => this.#recordRunDshStarted(root, run.id, 'creator', '视觉导演', started),
+        onDshEvent: (event) => this.#recordRunDshEvent(root, run.id, 'creator', event),
+        onDshContinuation: ({ attempt, maximum }) => this.#setVideoPhase(root, run.id, 'directing', {
+          continuation: { reason: 'max-tokens', attempt, maximum },
+        }),
+      })
 
-    await this.#setVideoPhase(root, run.id, 'preflight')
-    const inspected = await inspectSpokenVideoAgentProject(workspace)
-    const preflight = { passed: inspected.passed, failures: inspected.failures, findings: inspected.findings, creativeBytes: inspected.creativeBytes }
-    await this.#setVideoPhase(root, run.id, 'preflight', { preflight })
-    if (!inspected.passed) fail('SPOKEN_VIDEO_VIDEO_AGENT_INVALID', `视频 Agent 产物未通过渲染前检查：${inspected.failures.join(' ')}`)
+      await this.#setVideoPhase(root, run.id, 'preflight')
+      const inspected = await inspectSpokenVideoAgentProject(workspace)
+      preflight = { passed: inspected.passed, failures: inspected.failures, findings: inspected.findings, creativeBytes: inspected.creativeBytes }
+      await this.#setVideoPhase(root, run.id, 'preflight', { preflight })
+      if (!inspected.passed) fail('SPOKEN_VIDEO_VIDEO_AGENT_INVALID', `视频 Agent 产物未通过渲染前检查：${inspected.failures.join(' ')}`)
+    } else {
+      // 续跑：工程已在上一轮通过预检。仍再查一次，防止磁盘上的文件已被改动。
+      await this.#runEvent(root, run.id, '续跑：跳过视觉导演', '上一轮已通过预检，直接进入渲染阶段。')
+      const inspected = await inspectSpokenVideoAgentProject(workspace)
+      if (!inspected.passed) {
+        await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: false, failures: inspected.failures, findings: inspected.findings, creativeBytes: inspected.creativeBytes } })
+        fail('SPOKEN_VIDEO_VIDEO_AGENT_INVALID', `续跑前的工程复查未通过：${inspected.failures.join(' ')}。请重新提交任务让视觉导演重写。`)
+      }
+      preflight = { passed: inspected.passed, failures: inspected.failures, findings: inspected.findings, creativeBytes: inspected.creativeBytes }
+    }
 
     const subtitleDisplayLimit = orientation === 'landscape' ? 56 : 44
     // 字数口径必须与 splitLongCues 的 cueChars 一致（不计空白）：2026-10-17 晚报实测，
@@ -4586,16 +4789,27 @@ async #mimoReferenceDataUrl(root, input) {
       await this.#setVideoPhase(root, run.id, 'rendering', {
         editorialRepair: { attempts: repairAttempt, maxAttempts: VIDEO_EDITORIAL_REPAIR_MAX_ATTEMPTS, history: editorialRepairHistory },
       })
-      const renderedPath = await renderSpokenVideoAgentProject(workspace, {
-        signal: this.signal,
-        onProgress: (message) => {
-          this.#runEvent(root, run.id, repairAttempt ? `修复后渲染 ${repairAttempt}/${VIDEO_EDITORIAL_REPAIR_MAX_ATTEMPTS}` : '渲染输出', message)
-          // Remotion 会打印 "Rendered 5/8873, time remaining: 35m 52s"。
-          // 这是真实进度而非估算，抽出来供任务列表显示。
-          const parsed = parseRemotionRenderProgress(message)
-          if (parsed) void this.#setVideoRenderProgress(root, run.id, parsed)
-        },
-      })
+      // 续跑时若上一轮已渲染出成片（且不是修复轮），直接复用它。
+      // 注意只在 repairAttempt === 0 且首次续跑时生效：修复轮的成片已经被审片否决过，
+      // 复用它会得到同一个结果。
+      const reusableCut = repairAttempt === 0 && run.resumeFrom === 'rendering'
+        ? await stat(workspace.outputPath).catch(() => null)
+        : null
+      const renderedPath = reusableCut?.isFile() && reusableCut.size >= 1024
+        ? workspace.outputPath
+        : await renderSpokenVideoAgentProject(workspace, {
+          signal: this.signal,
+          onProgress: (message) => {
+            this.#runEvent(root, run.id, repairAttempt ? `修复后渲染 ${repairAttempt}/${VIDEO_EDITORIAL_REPAIR_MAX_ATTEMPTS}` : '渲染输出', message)
+            // Remotion 会打印 "Rendered 5/8873, time remaining: 35m 52s"。
+            // 这是真实进度而非估算，抽出来供任务列表显示。
+            const parsed = parseRemotionRenderProgress(message)
+            if (parsed) void this.#setVideoRenderProgress(root, run.id, parsed)
+          },
+        })
+      if (reusableCut) {
+        await this.#runEvent(root, run.id, '续跑：复用已渲染成片', '上一轮已渲染出成片，直接进入质检与审片，不重新渲染。')
+      }
       const renderedInfo = await stat(renderedPath)
       if (!renderedInfo.isFile() || renderedInfo.size < 1024) fail('SPOKEN_VIDEO_MEDIA_COMMAND_FAILED', 'Remotion 没有生成有效成片。')
       if (renderedInfo.size > MAX_MEDIA_BYTES) fail('SPOKEN_VIDEO_MEDIA_FILE_TOO_LARGE', 'Remotion 成片超过 80 MiB，无法提交或在工作台预览。请缩短稿件后重新生成。')
