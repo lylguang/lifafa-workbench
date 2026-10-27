@@ -545,15 +545,70 @@ test('douyin uploads the portrait cover before the landscape one', () => {
   assert.equal(plan[1][2], boxes.landscape, '横那行必须用横方块坐标')
 })
 
-test('douyin warns when a cover is wildly off the slot ratio, before uploading it', () => {
+test('封面上传前要尝试切到竖封面标签（双标签弹窗时）', async () => {
+  // 2026-10-25 用户在发布页实测发现：竖封面槽位里的图左右被裁，「别再开」变成
+  // 「再开」。根因之一是抖音弹窗有「设置横封面 / 设置竖封面」两个标签时默认
+  // 停在横封面，竖图被塞进 4:3 画布。
+  //
+  // 注意这里锁的是「尝试」而不是「必须成功」：实测弹窗还有单标签形态，
+  // 强制要求切换成功会导致封面被整体跳过（第一版就丢了两个封面）。
+  const source = await readFile(new URL('../publisher-adapter-douyin.mjs', import.meta.url), 'utf8')
+  assert.match(source, /async function ensurePortraitTabIfSwitcherPresent\(/u, '必须有切标签的实现')
+  assert.match(source, /await ensurePortraitTabIfSwitcherPresent\(page\)/u, '竖封面上传前要调用它')
+  // 只有两种标签都在时才切——单标签弹窗不动。
+  assert.match(source, /const hasBoth = state\.some\(\(t\) => t\.label === '设置横封面'\) && state\.some\(\(t\) => t\.label === '设置竖封面'\)/u)
+})
+
+test('话题标签必须走「输入井号 + 选建议」的交互，不能直接粘贴', async () => {
+  // 2026-10-25 用户实测：发布页描述里仍是占位符「#添加话题」，8 个标签一个都没生效。
+  // 旧实现是 insertText('\n#a #b ...') ——抖音把 # 当话题触发符，需要从建议列表
+  // 里选中才会生成话题；一次性粘一串只落在正文里，平台不认。
+  const source = await readFile(new URL('../publisher-adapter-douyin.mjs', import.meta.url), 'utf8')
+  assert.match(source, /async function fillTopicTags\(/u, '必须有专门的话题填充实现')
+  assert.match(source, /await fillTopicTags\(page, tags\)/u, '调用点必须用它')
+  // 不能再出现「一次性粘贴整串话题」的老写法。
+  assert.doesNotMatch(source, /insertText\(`\\n\$\{tags\.map/u, '禁止再把一串 #标签 直接粘进正文')
+  // 必须先打井号触发建议列表。
+  assert.match(source, /insertText\('#'\)/u, '必须逐字输入井号以触发建议列表')
+  // 没有候选时只删一个井号（不能留下 `#回#本#副...` 那种残渣）。
+  assert.match(source, /没有建议浮层/u, '无候选要能被识别出来并干净跳过')
+})
+
+test('话题上限是 5 个，与平台限制一致', async () => {
+  // 2026-10-25 实测：抖音描述框弹「最多可添加5个话题」，超出的被拒。
+  // 旧上限 10 是凭空写的，多写的几个只会在正文里留半截乱码。
+  const source = await readFile(new URL('../publisher-adapter-douyin.mjs', import.meta.url), 'utf8')
+  assert.match(source, /\.slice\(0, 5\)/u, '话题最多 5 个')
+})
+
+test('竖封面切标签是尽力而为，绝不能因此放弃上传', async () => {
+  // 第一版把「切不到目标标签」当成失败直接 return false，结果两个封面都没传上去。
+  // 封面能补，正文和视频不能重来；宁可回到旧行为也不能丢封面。
+  const source = await readFile(new URL('../publisher-adapter-douyin.mjs', import.meta.url), 'utf8')
+  assert.match(source, /ensurePortraitTabIfSwitcherPresent/u, '必须用不阻断的切标签函数')
+  // 该函数的 catch 分支必须返回 false（=不切），而不是抛错或中断上传。
+  const fn = source.slice(source.indexOf('async function ensurePortraitTabIfSwitcherPresent'))
+  assert.ok(fn.includes('} catch {'), '切标签必须自己吞掉异常')
+  assert.doesNotMatch(fn.slice(0, fn.indexOf('async function', 10)), /throw /u, '切标签不允许抛错中断上传')
+})
+
+test('douyin warns when a cover is off the slot ratio, before uploading it', () => {
   // 实测：比例明显不符的平台会直接判「封面不任」，而那种失败在发布记录里看不出
   // 是素材问题。这里在上传前就量一次，把话说清楚。
   //
-  // 关键：容差必须放宽。2026-10-11 真机实测，项目里的横封面 1280x720（16:9）
-  // 与竖封面 1088x1440 平台都照收——「横封面4:3 / 竖封面3:4」是抖音展示时的框，
-  // 不是素材硬要求。严抠 4:3 会对正常素材误报，那比不报更糟。
-  assert.equal(coverRatioWarning(1280, 720, 'landscape'), null, '16:9 横封面实测可用')
-  assert.equal(coverRatioWarning(1088, 1440, 'portrait'), null, '1088x1440 竖封面实测可用')
+  // 2026-10-25 收紧判据。原注释说「16:9 平台也照收，容差要放宽到 ±0.45」，
+  // 但那个绝对容差让这条检查形同虚设：正方形 1000x1000（1.00）对横版 4:3
+  // （1.33）只差 0.33，也被放行。现在封面生图那一层已严格按 4:3 / 3:4 出图
+  // 并做服务端比例兜底，正常素材必然精确命中，所以改成相对偏差 8%。
+  assert.equal(coverRatioWarning(1440, 1080, 'landscape'), null, '4:3 横封面（现行规格）必须放行')
+  assert.equal(coverRatioWarning(1080, 1440, 'portrait'), null, '3:4 竖封面（现行规格）必须放行')
+  // 轻微偏差仍在容差内（1400x1080 ≈ 1.296，偏差 2.8%）。
+  assert.equal(coverRatioWarning(1400, 1080, 'landscape'), null, '轻微偏差不该误报')
+  // 16:9 是旧实现的产物，现在必须报警——传上去会被裁掉上下约 25%。
+  assert.ok(coverRatioWarning(1280, 720, 'landscape'), '16:9 横封面必须报警')
+  // 正方形塞进任何槽位都不对。
+  assert.ok(coverRatioWarning(1000, 1000, 'landscape'), '正方形不能当横封面')
+  assert.ok(coverRatioWarning(1000, 1000, 'portrait'), '正方形不能当竖封面')
   assert.ok(coverRatioWarning(1088, 1440, 'landscape'), '把竖版塞进横槽必须报警')
   assert.match(coverRatioWarning(1088, 1440, 'landscape'), /封面不任/u)
   assert.ok(coverRatioWarning(1920, 200, 'landscape'), '极端长条必须报警')

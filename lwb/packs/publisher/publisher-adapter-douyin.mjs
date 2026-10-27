@@ -252,7 +252,81 @@ function normalizeTags(tags) {
   return (Array.isArray(tags) ? tags : [])
     .map((tag) => String(tag).replace(/^#/u, '').trim())
     .filter(Boolean)
-    .slice(0, 10)
+    // 2026-10-25 实测：抖音描述框硬上限就是 5 个话题，超出的会被平台弹
+    // 「最多可添加5个话题」并拒收。旧上限 10 是凭空写的，实际做不到，
+    // 多出来的那几个只会在正文里留下半截乱码。
+    .slice(0, 5)
+}
+
+/**
+ * 把话题标签真正写进抖音的描述框。
+ *
+ * 2026-10-25 用户实测反馈：描述里显示的还是占位符「#添加话题」，标签完全没生效。
+ * 旧实现是 `insertText('\n#a #b …')` ——抖音把 `#` 当话题触发符，需要从建议
+ * 列表里选中才会生成话题；一次性粘一串只会落在正文里，平台不认。
+ *
+ * 第一版改法（先打 ' #' 再点建议项）实测更糟：点不中就留下一堆空井号
+ * `# #### ##`，把描述弄脏了。教训是**绝不能在没选中的情况下留下裸井号**。
+ *
+ * 现在逐个标签做「输入 # + 关键词 → 等建议列表 → 用键盘选中」：
+ *   · 打出 `#标签` 让平台自己过滤出候选；
+ *   · 等建议列表真的出现（有「#xxx 数字」形态的行）；
+ *   · 出现就 ArrowDown + Enter 选中，变成话题 chip；
+ *   · 没出现就把刚打的 `#标签` 用退格删掉，正文回到干净状态。
+ * 每步都以「正文长度变化」校验，任何异常立即停止，绝不把正文写坏。
+ *
+ * 返回真正写进去的标签，调用方把「写了几个」记进发布记录。
+ */
+async function fillTopicTags(page, tags) {
+  const applied = []
+  const textLen = () => page.evaluate(() => {
+    const el = document.activeElement
+    return el && 'value' in el ? el.value.length : (el?.innerText || '').length
+  }).catch(() => 0)
+
+  // 抖音会在输入 `#` 后弹出建议浮层；浮层里按 Escape 关掉，避免它截获后续按键。
+  const closeSuggest = async () => {
+    await page.keyboard.press('Escape').catch(() => {})
+    await page.waitForTimeout(250)
+  }
+
+  for (const tag of tags) {
+    await page.keyboard.insertText(' ')
+    const before = await textLen()
+    // 只打 `#` 一个字符就等浮层：先确认「这个平台此刻会不会给建议」，
+    // 会才继续打关键词。这样不会出现「打了半截关键词、浮层没来、又删不干净」
+    // 的状态（2026-10-25 实测就是这么把 `#回本测算` 写成 `#回#本#副...` 的）。
+    await page.keyboard.insertText('#')
+    await page.waitForTimeout(800)
+    const hasList = await page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll('div,li,span'))
+        .filter((el) => el.offsetParent)
+        .map((el) => (el.innerText || '').trim())
+        .filter((t) => t.startsWith('#') && t.length > 2 && t.length < 40)
+      return rows.length > 0
+    }).catch(() => false)
+    if (!hasList) {
+      // 没有建议浮层：删掉这个 `#`，一个字符，绝不留下残留。
+      await page.keyboard.press('Backspace').catch(() => {})
+      await page.waitForTimeout(200)
+      const after = await textLen()
+      if (after > before) break
+      continue
+    }
+    // 有建议：补全关键词让平台过滤出目标话题，再键盘选中。
+    await page.keyboard.insertText(tag)
+    await page.waitForTimeout(900)
+    await page.keyboard.press('ArrowDown')
+    await page.waitForTimeout(250)
+    await page.keyboard.press('Enter')
+    await page.waitForTimeout(600)
+    const after = await textLen()
+    // 选中成功后正文长度会明显变化（chip 替换了输入的文本）。
+    if (after > before) applied.push(tag)
+    else break
+    await closeSuggest()
+  }
+  return applied
 }
 
 /**
@@ -397,6 +471,50 @@ async function openCoverDialog(page, point, { timeout = 12_000, expectTitle = nu
  * 绝不再退回隐藏 input 兜底，因为那条路会被平台判成「截屏封面」而拒收，
  * 却让调用方以为成功。第二版的误报就是这么来的。
  */
+
+/**
+ * 竖封面上传前，若弹窗确实是「双标签」形态且停在横封面，就切到竖封面。
+ *
+ * 2026-10-25 真机复现：带两个标签的弹窗默认停在「设置横封面」，竖图被塞进
+ * 4:3 画布，最终竖槽里显示的是被裁切的横图（「3:4 不匹配、字被切掉」）。
+ *
+ * 设计原则是**绝不阻断上传**：找不到标签、认不出激活态、点击没生效——一律
+ * 直接往下走，交给原逻辑上传。宁可回到「可能被裁」的旧行为，也不能像第一版
+ * 那样因为切不到标签就放弃上传，把两封面都弄丢。
+ */
+async function ensurePortraitTabIfSwitcherPresent(page) {
+  try {
+    const state = await page.evaluate(() => {
+      const out = []
+      for (const el of document.querySelectorAll('div,span,button')) {
+        if (!el.offsetParent) continue
+        const label = (el.innerText || el.textContent || '').trim().replace(/\s+/g, '')
+        if (label !== '设置横封面' && label !== '设置竖封面') continue
+        const r = el.getBoundingClientRect()
+        if (r.width < 20 || r.height < 10) continue
+        const bg = getComputedStyle(el).backgroundColor || ''
+        const hasBg = bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent' && bg !== 'rgb(255, 255, 255)'
+        out.push({ label, x: r.x + r.width / 2, y: r.y + r.height / 2, hasBg })
+      }
+      return out
+    })
+    // 必须**两种标签都在**才算双标签形态；只有一个说明是单标签弹窗，不用切。
+    const hasBoth = state.some((t) => t.label === '设置横封面') && state.some((t) => t.label === '设置竖封面')
+    if (!hasBoth) return false
+    const active = state.find((t) => t.hasBg)
+    // 已经停在竖封面，或者认不出激活态，就不动。
+    if (!active || active.label === '设置竖封面') return false
+    const target = state.find((t) => t.label === '设置竖封面' && !t.hasBg)
+    if (!target) return false
+    await page.mouse.click(target.x, target.y).catch(() => {})
+    await page.waitForTimeout(1200)
+    return true
+  } catch {
+    // 任何异常都当作「不需要切」，继续原流程。
+    return false
+  }
+}
+
 /**
  * 封面上传顺序（**竖先横后**）。
  *
@@ -412,11 +530,32 @@ export function coverUploadPlan(coverBoxes) {
   ]
 }
 
-async function uploadCoverInDialog(page, coverPath) {
-  // 这里**不再切标签**：竖封面靠主页面上的第二个方块打开另一个弹窗，而那个弹窗
-  // 一打开就已经是竖封面通道了。在弹窗内找「设置竖封面」标签是上一版的错误——
-  // 实测那一版的弹窗只有「设置横封面」一个标签，找不到就等于白找，结果把横版图
-  // 传了两遍、竖槽里装的其实是横图。
+/**
+ * 在已打开的封面弹窗里上传一张图。
+ *
+ * 判据只有一个：filechooser 真的弹出来了。没弹出来就明确返回 false——
+ * 绝不再退回隐藏 input 兜底，因为那条路会被平台判成「截屏封面」而拒收，
+ * 却让调用方以为成功。第二版的误报就是这么来的。
+ *
+ * `kind` 决定上传前要停在哪个标签页。2026-10-25 之前这里刻意不切标签
+ * （当时的弹窗只有一个标签，切了也没用），但现在弹窗是横/竖两个标签并存、
+ * 且默认停在横封面——不切就会把竖图塞进横画布，这正是「3:4 不匹配、字被裁」
+ * 的成因。
+ */
+async function uploadCoverInDialog(page, coverPath, kind = null) {
+  if (kind === 'portrait') {
+    // 只对**竖封面**做一次「尽力而为」的标签切换。
+    //
+    // 2026-10-25 两轮真机实测：抖音弹窗有两种形态且不固定——
+    //   A. 顶部有「设置横封面 / 设置竖封面」两个标签，默认停在横封面。
+    //      此时竖图会被塞进 4:3 画布，最终竖槽里是裁坏的横图（用户看到的
+    //      「3:4 不匹配、字被切」就是这个）。
+    //   B. 只有一个「设置横封面」标题，但弹窗内容其实是竖通道。
+    // 所以这里**只在明确看到两个标签、且激活的是横封面时**才切换到竖，
+    // 其余情况一律按原逻辑直接上传——绝不因为切换失败就放弃上传，
+    // 那会把一个本来能用的封面弄丢（第一版就是这么丢的）。
+    await ensurePortraitTabIfSwitcherPresent(page)
+  }
   // 监听必须在点击之前：系统选择器一闪而过，顺序反了必然接不到。
   const chooserPromise = page.waitForEvent('filechooser', { timeout: 8000 }).catch(() => null)
   const point = await clickCoverUploadButton(page)
@@ -507,14 +646,23 @@ export function coverRatioWarning(width, height, kind) {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null
   const ratio = width / height
   const want = kind === 'portrait' ? 3 / 4 : 4 / 3
-  // 容差取到 ±0.45 而不是严抠 4:3 —— 2026-10-11 真机实测：项目里的横封面是
-  // 1280x720（16:9 = 1.78），竖封面 1088x1440（0.76），平台都照收并在 4:3 的
-  // 缩略图框里裁切显示。所以「横封面4:3 / 竖封面3:4」是抖音**展示时的框**，
-  // 不是素材的硬要求；严抠反而会对正常素材误报。
-  const tolerance = 0.45
-  if (Math.abs(ratio - want) <= tolerance) return null
+  // 容差按**相对偏差**算，不按绝对差值。
+  //
+  // 2026-10-25 改了这里的判据：原来是绝对差值 ±0.45，结果 1000x1000（1.00）
+  // 对横版 4:3（1.33）只差 0.33，落在容差内，等于这条检查完全失效——正方形
+  // 素材也会被放行。改成相对偏差 8%：
+  //   · 4:3 目标 1.3333，容许 1.227–1.440（1440x1080 = 1.3333 ✅）
+  //   · 3:4 目标 0.7500，容许 0.690–0.810（1080x1440 = 0.7500 ✅）
+  //   · 16:9 的 1.7778 会对横版报警（超出 33%）——这正是要拦的那类
+  //   · 正方形 1.0 会对横版报警（低 25%）
+  //
+  // 为什么可以收紧了：封面生图那一层现在严格按 4:3 / 3:4 出图，并在服务端做
+  // 过比例兜底裁切（#fitCoverAspect），正常产物必然落在容差内。以前那 0.45
+  // 是为了容忍「平台照收 16:9」的历史素材，现在素材已经统一，宽容差只剩副作用。
+  const tolerance = 0.08
+  if (Math.abs(ratio - want) / want <= tolerance) return null
   const dir = ratio > want ? '过宽' : '过高'
-  return `${kind === 'portrait' ? '竖封面 3:4' : '横封面 4:3'}素材比例偏离：${width}×${height}（${ratio.toFixed(2)}）${dir}，抖音可能判「封面不任」`
+  return `${kind === 'portrait' ? '竖封面 3:4' : '横封面 4:3'}素材比例偏离：${width}×${height}（${ratio.toFixed(2)}，目标 ${want.toFixed(2)}）${dir}，抖音可能判「封面不任」`
 }
 
 /**
@@ -660,7 +808,12 @@ export const douyinAdapter = {
       await page.keyboard.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A')
       await page.keyboard.insertText(combined)
       if (tags.length) {
-        await page.keyboard.insertText(`\n${tags.map((tag) => `#${tag}`).join(' ')}`)
+        // 话题必须走「输入 # → 选中建议」的交互才会变成平台话题；
+        // 直接粘贴一串 `#xx` 只会是普通文本，发布后一个话题都不生效。
+        const appliedTags = await fillTopicTags(page, tags)
+        if (appliedTags.length < tags.length) {
+          await onStep('tags-partial', `话题只写入了 ${appliedTags.length}/${tags.length} 个（其余没等到平台建议列表），描述正文未受影响`)
+        }
       }
       await page.waitForTimeout(600)
     }
@@ -738,7 +891,8 @@ export const douyinAdapter = {
           await onStep('cover-missing', `${ratioLabel}弹窗未能打开（抖音页面结构可能已调整）`)
         } else {
           await onStep('cover-dialog', `${ratioLabel}弹窗已打开`)
-          covered = await uploadCoverInDialog(page, coverPath)
+          covered = await uploadCoverInDialog(page, coverPath, kind)
+          if (!covered) await onStep('cover-tab', `${ratioLabel}无法切到目标标签页，已放弃本次上传以免写进错误槽位`)
         }
         if (covered) {
           // 弹窗底部「完成」常是 div 假按钮，用精确文本匹配。
@@ -767,6 +921,37 @@ export const douyinAdapter = {
         await onStep('cover-skipped', `${ratioLabel}未自动设置（未捕获到文件选择器），请在窗口中人工选择，或采用平台推荐封面`)
       }
     }
+    // 横封面上传完成后，抖音会自动「基于横封面生成竖封面」，把我们刚传的竖封面
+    // 覆盖掉——2026-10-25 实测，封面区就挂着「已基于横封面为你生成竖封面」气泡，
+    // 竖槽里于是变成被竖槽比例裁切的横图（用户看到的「3:4 不匹配、字被切掉」）。
+    //
+    // 修法：所有封面传完之后，如果竖封面是成功过的，**再补传一次竖封面**，让它
+    // 成为最后一次写入。补传失败不影响主流程（横封面和已上传的竖封面仍在）。
+    if (coverPaths.portrait && coverApplied.some((label) => label.includes('竖封面'))) {
+      try {
+        await onStep('cover-reassert', '重新覆盖竖封面，避免被平台按横封面自动重算')
+        const again = await locateCoverBoxes(page)
+        const point = again.portrait || coverBoxes.portrait
+        if (point) {
+          const opened = await openCoverDialog(page, point)
+          if (opened) {
+            const ok = await uploadCoverInDialog(page, coverPaths.portrait, 'portrait')
+            if (ok) {
+              for (let attempt = 0; attempt < 3; attempt += 1) {
+                const confirm = await firstMatch(page, ['text="完成"'])
+                if (!confirm) break
+                await confirm.click().catch(() => {})
+                await page.waitForTimeout(2500)
+              }
+              await onStep('cover-reasserted', '竖封面已重新覆盖')
+            }
+          }
+        }
+      } catch {
+        // 补传是增强，失败不回滚前面已成功的封面。
+        await onStep('cover-reassert-skipped', '竖封面补传未成功，保留平台当前结果')
+      }
+    }
     if (coverApplied.length) {
       await onStep('cover-summary', `封面已设置：${coverApplied.join('、')}`)
     }
@@ -782,23 +967,38 @@ export const douyinAdapter = {
      * 让人在窗口里自己点。
      */
     await onStep('declaration', '选择自制声明（内容由AI生成）')
-    let declarationSelected = true
-    const declarationTrigger = await firstMatch(page, SELECTORS.declaration)
-    if (declarationTrigger) {
+    /**
+     * 回读声明是否真的设置成功。判据：页面出现「作者声明：内容由AI生成」——
+     * 2026-10-24 真机验证：选完并确认后，声明控件区域会显示这行字。
+     * 之前的代码只信 pickOptionByText 的返回值，而它可能点错行或点空；
+     * trigger 找不到时还直接把 declarationSelected 初始化成 true，造成
+     * 「没选也报已选」，用户在窗口里看到声明空着，发布出去对平台做了不实陈述。
+     */
+    const declarationApplied = async () => page.evaluate((wanted) => {
+      const text = document.body?.innerText || ''
+      return text.includes(`作者声明：${wanted}`) || text.includes(`作者声明:${wanted}`)
+    }, declaration).catch(() => false)
+    let declarationSelected = false
+    for (let attempt = 0; attempt < 3 && !declarationSelected; attempt += 1) {
+      if (await declarationApplied()) { declarationSelected = true; break }
+      const declarationTrigger = await firstMatch(page, SELECTORS.declaration)
+      if (!declarationTrigger) break
       await declarationTrigger.click().catch(() => {})
       await page.waitForTimeout(1000)
-      declarationSelected = await pickOptionByText(page, declaration)
-      // 选完必须关掉模态：真机截图里选项已经填上了（预览区显示
-      // 「作者声明：内容由AI生成」），但弹窗仍盖在页面上——不点确定，
-      // 后面的封面与提交都会被这层遮罩挡住。
-      if (declarationSelected) {
+      if (await pickOptionByText(page, declaration)) {
+        // 选完必须关掉模态：真机截图里选项已经填上了（预览区显示
+        // 「作者声明：内容由AI生成」），但弹窗仍盖在页面上——不点确定，
+        // 后面的封面与提交都会被这层遮罩挡住。
         const confirm = await firstMatch(page, SELECTORS.declarationConfirm)
         if (confirm) {
           await confirm.click().catch(() => {})
           await page.waitForTimeout(1500)
         }
-        await onStep('declaration-confirmed', '自制声明已保存')
+        declarationSelected = await declarationApplied()
       }
+    }
+    if (declarationSelected) {
+      await onStep('declaration-confirmed', '自制声明已保存（页面已显示作者声明）')
     }
     if (!declarationSelected && submitMode === 'auto') {
       const error = new Error(`抖音「自制声明」未能自动选择「${declaration}」；该字段必填，请在任务内容里配置 declaration，或改用「发布前确认」模式人工选择。`)

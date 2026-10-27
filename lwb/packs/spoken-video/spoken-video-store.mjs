@@ -551,11 +551,6 @@ function producedStageData(stage, payload, source) {
     const plan = visualPlan(input.visualPlan)
     const planSource = optionalText(input.visualPlanSource, '视觉方案来源', 40)
     if (planSource && !['dsh', 'deterministic-fallback'].includes(planSource)) throw failure('SPOKEN_VIDEO_INVALID_INPUT', '视觉方案来源无效。')
-    const whiteboardInput = input.whiteboard === undefined || input.whiteboard === null ? null : object(input.whiteboard, '白板渲染信息')
-    const whiteboard = whiteboardInput ? {
-      scenes: optionalInteger(whiteboardInput.scenes, '白板渲染幕数', 1, 200) ?? 1,
-      lineArtDir: text(whiteboardInput.lineArtDir, '白板线稿目录', 200),
-    } : null
     const fallback = input.fallback === undefined || input.fallback === null ? null : object(input.fallback, '渲染降级信息')
     const remotion = input.remotion === undefined || input.remotion === null ? null : object(input.remotion, 'Remotion Agent 产物')
     const preflight = remotion?.preflight === undefined || remotion?.preflight === null ? null : object(remotion.preflight, 'Remotion 预检')
@@ -584,7 +579,6 @@ function producedStageData(stage, payload, source) {
       } : null,
       bgmVolume: backgroundMusic ? optionalNumber(input.bgmVolume, 'BGM 音量', 0, 0.5) ?? 0.12 : null,
       ...(plan ? { visualPlan: plan } : {}), ...(planSource ? { visualPlanSource: planSource } : {}),
-      ...(whiteboard ? { whiteboard } : {}),
       ...(fallback ? { fallback: { from: text(fallback.from, '渲染降级来源', 40), reason: text(fallback.reason, '渲染降级原因', 500) } } : {}),
       ...(remotion?.projectDir ? { remotion: {
         projectDir: agentWorkspacePath(remotion.projectDir, 'Remotion 项目目录'),
@@ -623,20 +617,44 @@ function producedStageData(stage, payload, source) {
     const issues = messages(technical.issues, '技术质检问题', 40)
     const warnings = messages(technical.warnings, '技术质检警告', 40)
     const userOverride = input.userOverride === true
-    if ((technical.passed === true) !== passed) {
-      throw failure('SPOKEN_VIDEO_QC_FAILED', '技术质检结论与通过状态不一致。')
+    const review = input.review === undefined || input.review === null ? null : videoReview(input.review)
+    // 「整体通过」必须同时满足技术质检与独立审片。所以合法的组合有四种：
+    //   technical ✓ + review ✓  → passed 必须 true
+    //   technical ✓ + review ✗  → passed 必须 false（审片否决，2026-10-26 补）
+    //   technical ✗ + review ✓  → passed 必须 false
+    //   technical ✗ + review ✗  → passed 必须 false
+    // 原来这条只比 technical.passed，于是「技术过了、审片没过」这种真实形态会被
+    // 判成「结论与通过状态不一致」——审片否决的成片连提交都提交不了。
+    const technicalPassed = technical.passed === true
+    const reviewPassed = review ? review.passed === true : true
+    const shouldPass = technicalPassed && reviewPassed
+    if (shouldPass !== passed) {
+      throw failure('SPOKEN_VIDEO_QC_FAILED', passed
+        ? '技术质检或独立审片未通过时不能标记质检通过。'
+        : '技术质检与独立审片都通过时必须标记为通过。')
     }
     if (passed && issues.length) {
       throw failure('SPOKEN_VIDEO_QC_FAILED', '存在技术质检问题时不能标记为通过。')
     }
-    // 人工放行只在「确有质检问题」时允许；没有 issues 就是无病放行，拒绝。
+    // 人工放行只在「确实有一条没过」时允许；什么结论都没有就是无病放行，拒绝。
     // assessed===false（片长<4秒）时 passed 恒 true、不会产生 issues，天然被这一条挡住，
     // 不需要额外判断——但依赖关系写在这里，免得下一个人看不出。
-    if (userOverride && !issues.length) {
+    //
+    // 2026-10-26 修正：原来只认「技术质检 issues」。但技术质检和独立审片是**两道独立
+    // 的门**，任一不过都会让成片进不了发布页，所以放行也必须覆盖两种情形：
+    //   · 技术质检没过（有 issues）—— 画面/音轨/字幕确有硬问题；
+    //   · 技术质检过了、审片没过（有 findings）—— 成片能播，但审片认为画面有缺陷。
+    // 后者此前**完全没有出口**：成片已渲染、技术质检通过，却因为审片否决被整轮判死，
+    // 盘上的成片连提交都没提交（实测 2026-10-26 两条：79 分的排版问题、550 秒的长片）。
+    // 用户只能看到「全部失败」，而实际上有可用的成片。
+    // review.findings 是对象数组（{severity, category, message}），不是字符串数组，
+    // 所以不能用 messages() 解析——只数条数即可。
+    const reviewFindings = review && Array.isArray(review.findings) ? review.findings : []
+    const hasBlockingReview = review ? review.passed !== true && reviewFindings.length > 0 : false
+    if (userOverride && !issues.length && !hasBlockingReview) {
       throw failure('SPOKEN_VIDEO_QC_FAILED', '没有质检问题，不需要人工放行。')
     }
     const mode = text(input.mode, '质检模式', 40)
-    const review = input.review === undefined || input.review === null ? null : videoReview(input.review)
     if (mode === 'ai-director' && !review) throw failure('SPOKEN_VIDEO_QC_FAILED', 'AI 视频质检缺少独立审片报告。')
     if (passed && review && !review.passed) throw failure('SPOKEN_VIDEO_QC_FAILED', '独立审片未通过时不能标记质检通过。')
     const variationInput = technical.variation === undefined || technical.variation === null ? null : object(technical.variation, '主画面变化报告')

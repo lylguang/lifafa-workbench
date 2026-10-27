@@ -17,6 +17,16 @@ vendor/
 **/.tmp-*/
 .tmp/
 .dsh-tmp/
+.tmp-*.png
+
+# 本地调试草稿目录（含浏览器 profile、Remotion 缓存、npm 缓存，实测 8.3GB）
+# 2026-10-27 补入：此前未忽略，git add -A 会试图收录全部运行时缓存。
+lifa-scratch/
+video-check/
+
+# Windows 保留设备名残留。该文件会让全仓 grep/rg 直接报 os error 1，
+# 中断任何按目录递归的搜索。
+nul
 
 # Runtime state and local credentials
 .dsh/
@@ -39,3 +49,5 @@ local
 # 测试输出与临时产物，不进仓库
 test-run*.log
 *.log
+*.partial.*
+review-frames/

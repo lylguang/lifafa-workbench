@@ -43,6 +43,9 @@ rem back here. It must not live under TEMP: PowerShell's $env:TEMP and cmd's
 rem %TEMP% can differ as strings (8.3 short path vs long path).
 set "LWB_SCRATCH_RELAY=%~dp0.lwb-scratch-root.txt"
 for /f "usebackq delims=" %%F in ("%LWB_SCRATCH_RELAY%") do set "LWB_SCRATCH_ROOT=%%F"
+rem 2026-10-24 迁移：暂存目录固定到 D 盘工作区内（原 E:\lifa-scratch 已迁出）。
+rem 放在 relay 读取之后，显式指定总是优先于自动选盘。
+if exist "%~dp0lifa-scratch" set "LWB_SCRATCH_ROOT=%~dp0lifa-scratch"
 if not exist "%LWB_SCRATCH_ROOT%" (
     echo [ERROR] Could not determine the scratch directory.
     pause

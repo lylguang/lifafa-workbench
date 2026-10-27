@@ -24,6 +24,7 @@ import {
   publishImageConfig,
   publishImageCredentialRef,
   publishImageRequest,
+  customAsyncImageRequest,
   SpokenVideoPublishError,
 } from './spoken-video-publish.mjs'
 
@@ -41,6 +42,20 @@ const TASKS_FILE = 'publish-tasks.json'
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024
 const MAX_ASSET_BYTES = 80 * 1024 * 1024
 const execFileAsync = promisify(execFile)
+
+/**
+ * 抖音封面规格：严格 4:3（横）与 3:4（竖）。
+ *
+ * 这两个值同时用于三处，必须保持一致，所以收敛成一处常量：
+ *   1. 提交生图请求时传的 size；
+ *   2. 生图返回后按这个比例做兜底裁切（模型不一定尊重 size）；
+ *   3. 上传/校验时判断方向是否合规（宽>高 / 高>宽）。
+ * 数值取长边 1440：4:3 → 1440x1080，3:4 → 1080x1440，两者清晰度对等。
+ */
+const COVER_SIZE = Object.freeze({
+  landscape: { width: 1440, height: 1080, ratio: 4 / 3 },
+  portrait: { width: 1080, height: 1440, ratio: 3 / 4 },
+})
 
 function fail(code, message) { throw new SpokenVideoPublishError(code, message) }
 // 成片放行判定：质检通过 或 用户已人工放行。两处字段名（qc.data.passed /
@@ -531,9 +546,19 @@ export class SpokenVideoPublishHost {
     const resolved = await this.#credentials().resolve(publishImageCredentialRef(provider))
     const label = PROVIDER_LABEL[provider] || '封面生成服务'
     if (!resolved?.value && provider !== 'custom') fail('SPOKEN_VIDEO_PUBLISH_CREDENTIAL_REQUIRED', `${label}尚未保存 API Key。`)
-    // 竖版用 3:4 而不是 9:16：抖音、小红书的信息流封面都按 3:4 展示，9:16 生成的
-    // 上下会被裁掉约 25%，主体很容易被切到。按展示形态生成，主体天然落在必留区里。
-    const size = kind === 'landscape' ? '1280*720' : '1080*1440'
+    // 封面尺寸必须严格等于抖音的上传规格，否则平台侧会居中裁切，主体和标题
+    // 很容易被切掉。
+    //
+    // 2026-10-25 用户实测反馈：横版封面比例不对。原来的 1280*720 是 16:9，
+    // 而抖音创作者后台的封面模板是 4:3（横）与 3:4（竖）——16:9 传上去会被裁掉
+    // 上下约 25%。这里改成与展示规格完全一致的 4:3 / 3:4：
+    //   横版 1440x1080 = 4:3
+    //   竖版 1080x1440 = 3:4
+    // 两边都用长边 1440，保证两种方向清晰度一致；且都是 4 的倍数，编码器友好。
+    // 各渠道的请求体要的是 `宽*高` 这种字符串（OpenAI 那样用 x 的由
+    // customOpenAiImageRequest 转换），所以这里取的是格式化后的尺寸串。
+    const coverSize = kind === 'landscape' ? COVER_SIZE.landscape : COVER_SIZE.portrait
+    const size = `${coverSize.width}*${coverSize.height}`
     let result
     let pollUrl = null
     if (provider === 'custom') {
@@ -580,7 +605,7 @@ export class SpokenVideoPublishHost {
         result = await this.#json(submitUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders },
-          body: JSON.stringify(publishImageRequest({ model: task.imageProvider.model, prompt, negativePrompt, size })),
+          body: JSON.stringify(customAsyncImageRequest({ model: task.imageProvider.model, prompt, negativePrompt, size })),
           // 异步协议只是提交，应当很快返回；给它 60 秒足够，超出说明服务端有问题。
           signal: AbortSignal.timeout(60_000),
         }, label)
@@ -590,6 +615,18 @@ export class SpokenVideoPublishHost {
           pollUrl = /^\//u.test(String(result?.output?.task_url || ''))
             ? `${custom.baseUrl}${result.output.task_url}`
             : `${custom.baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`
+          // 2026-10-26：有些聚合服务把「查任务」放在**提交端点本身**旁边，
+          // 而且用查询参数而不是路径段——实测 lk888 是
+          //   POST /v1/media/generate  →  GET /v1/media/status?task_id={id}
+          // 而不是 /api/v1/tasks/{id}。后者在它上面是 404，于是轮询永远拿不到图。
+          //
+          // 所以这里多认一条「查询参数形态」：提交路径是 .../media/generate 时，
+          // 轮询地址就是同级的 .../media/status?task_id=。可用配置里的 path
+          // 显式指定轮询地址（自定义生图表单里的 path 字段就是提交地址，
+          // 这里按它推导同级 status 端点）。
+          if (custom.path && /\/media\/generate\/?$/u.test(custom.path)) {
+            pollUrl = `${custom.baseUrl}${custom.path.replace(/\/generate\/?$/u, '/status')}?task_id=${encodeURIComponent(taskId)}`
+          }
         }
       }
       const url = customOpenAiImageUrl(result) || extractPublishImageUrl(result)
@@ -615,7 +652,10 @@ export class SpokenVideoPublishHost {
         if (this.pollIntervalMs > 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, this.pollIntervalMs))
         result = await this.#json(pollUrl, { method: 'GET', headers: authHeaders }, '封面生成任务')
         const state = imageTaskState(result)
-        if (['FAILED', 'CANCELED', 'CANCELLED', 'UNKNOWN'].includes(state)) fail('SPOKEN_VIDEO_PUBLISH_SERVICE_FAILED', '封面生成任务失败。')
+        // 失败态的名字各家不一样：百炼/SciTiger 用 FAILED/CANCELED，
+        // 聚合服务（lk888）用 failed/canceled/expired。少认一个就等于
+        // 「任务失败了但我们一直等下去」——等到超时才报一个含混的错。
+        if (['FAILED', 'CANCELED', 'CANCELLED', 'UNKNOWN', 'EXPIRED', 'ERROR', 'TIMEOUT'].includes(state)) fail('SPOKEN_VIDEO_PUBLISH_SERVICE_FAILED', `封面生成任务失败（${state}）。${typeof result?.error === 'string' && result.error.trim() ? result.error.trim() : ''}`)
         // 自定义的通用异步协议未必用百炼那套 choices 结构，取图地址要再解一次。
         const customUrl = provider === 'custom' ? customOpenAiImageUrl(result) : null
         if (customUrl) {
@@ -645,8 +685,8 @@ export class SpokenVideoPublishHost {
       }
       if (!bytes.length) fail('SPOKEN_VIDEO_PUBLISH_IMAGE_INVALID', '封面生图服务返回了空的内联图片。')
       if (bytes.length > MAX_IMAGE_BYTES) fail('SPOKEN_VIDEO_PUBLISH_FILE_TOO_LARGE', '生成的封面超过 20 MiB。')
-      const inlineInspected = inspectPublishImage(bytes)
-      const inlineTitled = await this.#overlayCoverTitle(agent, task, kind, bytes, inlineInspected)
+      const inlineFitted = await this.#fitCoverAspect(kind, bytes, inspectPublishImage(bytes))
+      const inlineTitled = await this.#overlayCoverTitle(agent, task, kind, inlineFitted.bytes, inlineFitted.inspected)
       return this.#freezeCover(agent, task.projectId, kind, inlineTitled.bytes, inlineTitled.inspected, 'generated')
     }
     let response
@@ -657,10 +697,55 @@ export class SpokenVideoPublishHost {
     const bytes = Buffer.from(await response.arrayBuffer())
     if (bytes.length > MAX_IMAGE_BYTES) fail('SPOKEN_VIDEO_PUBLISH_FILE_TOO_LARGE', '生成的封面超过 20 MiB。')
     const inspected = inspectPublishImage(bytes)
+    // 生图模型不保证尊重 size，先按抖音规格做比例兜底，再叠标题。
+    const fitted = await this.#fitCoverAspect(kind, bytes, inspected)
     // 叠中文标题：底图由生图模型出（它写汉字必然乱码），标题由 ffmpeg drawtext 渲染。
     // 失败不阻断——底图本身已是可用封面，标题只是增强。
-    const titled = await this.#overlayCoverTitle(agent, task, kind, bytes, inspected)
+    const titled = await this.#overlayCoverTitle(agent, task, kind, fitted.bytes, fitted.inspected)
     return this.#freezeCover(agent, task.projectId, kind, titled.bytes, titled.inspected, 'generated')
+  }
+
+  /**
+   * 把生图结果规整成抖音封面规格（严格 4:3 / 3:4）。
+   *
+   * 为什么必须在服务端兜底，而不是只把 size 传给生图模型：OpenAI 兼容的生图
+   * 端点对 size 的遵循程度并不可靠——不少中转/聚合服务会忽略它，或只接受自己
+   * 的白名单档位（1024x1024 等），最终返回的宽高比和目标对不上。2026-10-25
+   * 用户实测横版封面比例不对，就是这条链路上游不受控的结果。
+   *
+   * 策略：比例已经正确（容差 1.5%）就原样返回，不损失画质；否则按目标比例
+   * 居中裁切——**裁切而不是拉伸**，拉伸会让主体变形、文字糊掉；居中裁切只是
+   * 去掉边缘，封面主体通常在中央，代价最小。裁完再等比缩放到目标分辨率。
+   *
+   * 失败时返回原图和原 inspected：封面可以先补，整轮任务不该因为裁切失败而挂掉。
+   */
+  async #fitCoverAspect(kind, bytes, inspected) {
+    const target = COVER_SIZE[kind]
+    if (!target || !inspected?.width || !inspected?.height) return { bytes, inspected }
+    const actual = inspected.width / inspected.height
+    if (Math.abs(actual - target.ratio) / target.ratio <= 0.015) return { bytes, inspected }
+    let dir
+    try {
+      dir = await mkdtemp(join(tmpdir(), 'lwb-cover-fit-'))
+      const source = join(dir, `source.${inspected.extension || 'png'}`)
+      const output = join(dir, `fitted.${inspected.extension === 'jpg' ? 'jpg' : 'png'}`)
+      await writeFile(source, bytes)
+      // 先按目标比例居中裁切，再缩放到目标分辨率。
+      // crop 的 w/h 用 min() 保证不越界（窄边不足时退化为等比缩放）。
+      const filter = [
+        `crop='min(iw,ih*${target.ratio.toFixed(6)})':'min(ih,iw/${target.ratio.toFixed(6)})'`,
+        `scale=${target.width}:${target.height}`,
+      ].join(',')
+      await execFileAsync('ffmpeg', ['-v', 'error', '-y', '-i', source, '-vf', filter, '-frames:v', '1', output], { timeout: 60_000 })
+      const fitted = await readFile(output)
+      if (!fitted.length || fitted.length > MAX_IMAGE_BYTES) return { bytes, inspected }
+      return { bytes: fitted, inspected: inspectPublishImage(fitted) }
+    } catch {
+      // 缺 ffmpeg、超时、解码失败都退回原图——封面可人工补，不阻断发布。
+      return { bytes, inspected }
+    } finally {
+      if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
   }
 
   /**
@@ -793,6 +878,13 @@ export class SpokenVideoPublishHost {
     if (!['landscape', 'portrait'].includes(kind)) fail('SPOKEN_VIDEO_PUBLISH_INVALID_INPUT', '封面方向无效。')
     const prompt = text(input.prompt, '封面提示词', 3000)
     const negativePrompt = typeof input.negativePrompt === 'string' ? input.negativePrompt.slice(0, 1000) : ''
+    // 用户在「重新生成封面」里填的是主题/画面描述，不该要求他自己记住比例。
+    // 这里统一把规格前置到提示词最前面：比例是硬约束，写在哪都不如写在开头
+    // 对生图模型有效，而且用户在界面上改提示词时也不会无意中把规格删掉。
+    const spec = kind === 'portrait'
+      ? '画面比例必须是竖版 3:4（宽:高 = 3:4，推荐 1080x1440 像素），严格按此比例构图。'
+      : '画面比例必须是横版 4:3（宽:高 = 4:3，推荐 1440x1080 像素），严格按此比例构图。'
+    const promptWithSpec = `${spec}\n${prompt}`.slice(0, 3000)
     const settings = await this.status()
     if (settings.configured !== true) fail('SPOKEN_VIDEO_PUBLISH_CONNECTION_UNAVAILABLE', '请先在「封面生图」里保存当前渠道的 API Key。')
     const detail = await this.projectsStore.get(agent, { projectId: id })
@@ -802,7 +894,7 @@ export class SpokenVideoPublishHost {
     const root = await publishRootFor(agent)
     const task = {
       id: randomUUID(), projectId: id, projectTitle: detail.title, account: detail.account || null,
-      status: 'queued', phase: 'covers', coverKind: kind, prompt, negativePrompt, error: null, expectedRevision,
+      status: 'queued', phase: 'covers', coverKind: kind, prompt: promptWithSpec, negativePrompt, error: null, expectedRevision,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null,
       imageProvider: { provider: settings.provider, model: settings.model }, coverErrors: {},
       dsh: dshTrace(),

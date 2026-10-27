@@ -33,6 +33,22 @@ test('projects only safe DSH execution facts and discards model text and raw too
   assert.equal(JSON.stringify(trace).includes('secret result body'), false)
 })
 
+test('额度兜底换模型的事件要说清是换模型，而不是原地重试', () => {
+  // 2026-10-26 实测：默认模型额度耗尽后换模型重跑。如果这里复用
+  // 「模型重试步骤结束」，用户会以为原地重试能解决——而额度耗尽恰恰是
+  // 原地重试永远解决不了的。
+  const at = '2026-10-26T11:12:00.000Z'
+  const projected = projectDshSessionEvent({
+    seq: 9,
+    time: Date.parse(at),
+    type: 'quota/fallback',
+    data: { reason: { kind: 'quota-fallback', message: '当前模型额度已耗尽，改用 workbuddy-ai/deepseek-v4.1-flash 重试一次' } },
+  }, at)
+  assert.equal(projected.status, 'running')
+  assert.match(projected.label, /额度/u, '必须说清是额度问题')
+  assert.match(projected.label, /换/u, '必须说清是换模型重跑')
+})
+
 test('repairs a legacy generation record with an empty DSH trace', () => {
   const record = {}
   const trace = ensureDshTrace(record)

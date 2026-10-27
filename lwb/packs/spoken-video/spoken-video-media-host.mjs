@@ -8,7 +8,6 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { spokenVideoDataPath } from './spoken-video-paths.mjs'
 import { guardSubtitleTimeline, decodePcmMono8k, speechIntervalsFromPcm } from './spoken-video-subtitle-align.mjs'
-import { buildLineArtPlanPrompt, checkImageEngine, generateLineArtImage, LINE_ART_PLAN_SCHEMA, normalizeLineArtPlan, whiteboardBridgeUrl } from './spoken-video-whiteboard-art.mjs'
 import { executionEvent, executionTransition } from './spoken-video-execution.mjs'
 import { MimoClient, MimoError, MimoThrottle, MIMO_CLONE_MIME, MIMO_CLONE_TRANSCODE, MIMO_VOICES } from './spoken-video-media-mimo.mjs'
 import WebSocket from 'ws'
@@ -43,6 +42,7 @@ import {
 } from './spoken-video-remotion.mjs'
 import { cueChars, splitLongCues, validateSrt } from './spoken-video-subtitles.mjs'
 import { buildVideoCreatorPrompt, buildVideoCreatorRepairPrompt, buildVideoEditorialRepairPrompt, buildVideoReviewerPrompt, normalizeVideoReview, VIDEO_REVIEW_SCHEMA } from './spoken-video-video-agent.mjs'
+import { DEFAULT_LOCAL_QC_THRESHOLDS, judgeLocalQc, parseBlackDetect, parseFreezeDetect, parseSilenceDetect, parseVolumeDetect } from './spoken-video-local-qc.mjs'
 
 const execFilePromise = promisify(execFile)
 async function execFileAsync(...args) {
@@ -220,10 +220,44 @@ async function timelineSrtInner(timeline, referenceText, audioPath) {
   }
 
   // 原稿按同一分句正则切句，与时间轴逐序号配对。
+  //
+  // 配对按「无空白字符序列」比较，且要求**逐句对上**：原稿里手写的换行会被 replace
+  // 成空格，句子只在空白处与时间轴文本不同（2026-10-24「读完就忘」稿实测）；而原稿
+  // 句数少于时间轴（26:27）是因为该稿被 splitTtsText 按 400 字上限切分段时，一刀落在
+  // 句子中间，把原稿一句劈成了时间轴两句——两句拼起来必须恰好等于原稿那句。所以
+  // 用双指针顺序配对：能一对一就对上；对不上时，允许时间轴侧把下一条与当前条拼接
+  // （跨段被劈开的情形），拼后逐字一致才算匹配。真改稿拼不上，仍然返回 null。
   const SENTENCE_SPLIT = /(?<=[。！？!?；;\n])/
+  const compact = (s) => String(s).replace(/\s+/gu, '')
   const source = String(referenceText || '').replace(/\s+/g, ' ')
   const sourceSentences = source.split(SENTENCE_SPLIT).map((s) => s.trim()).filter(Boolean)
   const entries = timeline.segments.flatMap((seg) => seg.sentences || [])
+  // 返回每个原稿句覆盖的时间轴条目数，全部为 1 或「拼多合一时为 2+」；配不上 → null。
+  const pairWithTimeline = () => {
+    const spans = []
+    let j = 0
+    for (let i = 0; i < sourceSentences.length; i += 1) {
+      const want = compact(sourceSentences[i])
+      if (j >= entries.length) return null
+      // 一对一
+      if (compact(entries[j]?.text) === want) { spans.push(1); j += 1; continue }
+      // 拼接：时间轴侧这一句是被段切分劈开的，往后拼到非空白内容一致为止
+      let merged = compact(entries[j]?.text || '')
+      let used = 1
+      while (merged.length < want.length && j + used < entries.length) {
+        merged += compact(entries[j + used]?.text || '')
+        used += 1
+        if (merged === want) break
+        if (merged.length > want.length || want.length && !want.startsWith(merged)) return null
+      }
+      if (merged !== want) return null
+      spans.push(used)
+      j += used
+    }
+    return j === entries.length ? spans : null
+  }
+  const sentenceSpans = pairWithTimeline()
+  if (!sentenceSpans) return null
 
 // 逐段：把段内语音 runs 归并成与句数相同的组。
   //
@@ -263,22 +297,30 @@ async function timelineSrtInner(timeline, referenceText, audioPath) {
     }
   }
 
-  // 每句一条 cue；**超长句在标点处二分**（字幕单行 ≤28 字、两行约 ≤42 字的规范）。
-  //
-  // 2026-10-11 修正的关键约束：二分只影响**排版**，不影响**时间边界**。
-  // 此前每片按字数瓜分整句时长，而最终 end 取「下一 cue 开始 −0.06s」——于是第一句
-  // （45 字、含一处自然停顿）没找到合适切点、保持单片时，它的 end 被下一句的 8.32s
-  // 顶到 8.26s，**多显示了 0.4 秒**；而那 0.4 秒里音频已经在念第二句了
-  // （用户在 7 秒听到「大部分人看到的是车」，画面与字幕却仍停在第一句）。
-  //
-  // 所以每片 end 必须夹在**本句真实语音窗口** [entry.start, entry.start+dur] 内：
-  // 早于下一条 cue，但绝不超过本句语音末尾。
+  // 把「原稿句 → 时间轴条目（1 条或多条拼合）」展开成逐条目的 cue 源：拼合的条目
+  // 仍按各自语音窗口出独立 cue，文本在拼接边界处按字符占比劈开原稿句。
   const pronounced = (t) => (t.match(/[^\s]/g) || []).length || 1
+  const cueSources = []
+  for (let i = 0, j = 0; i < sourceSentences.length; i += 1) {
+    const used = sentenceSpans[i]
+    const total = sentenceWindows.slice(j, j + used).reduce((n, w) => n + w.durMs, 0) || 1
+    let text = sourceSentences[i]
+    for (let k = 0; k < used; k += 1) {
+      const window = sentenceWindows[j + k]
+      const share = window.durMs / total
+      let piece = text
+      if (k < used - 1) {
+        const cut = Math.max(1, Math.round(text.length * share))
+        piece = text.slice(0, cut)
+        text = text.slice(cut)
+      }
+      cueSources.push({ text: piece, window })
+    }
+    j += used
+  }
   const cues = []
-  for (let i = 0; i < entries.length; i += 1) {
-    const entry = sentenceWindows[i]
-    const text = sourceSentences[i]
-    if (!text) return null
+  for (let i = 0; i < cueSources.length; i += 1) {
+    const { text, window: entry } = cueSources[i]
     const pieces = []
     if (pronounced(text) > 42) {
       // 找最接近中点的逗号/顿号切一刀；切不开就按中点硬切。
@@ -657,6 +699,9 @@ function runSummary(run) {
     error: run.error || null,
     result: run.result || null,
     pipeline: run.type === 'video' && run.pipeline && typeof run.pipeline === 'object' ? run.pipeline : null,
+    // 「已渲染但被审片否决」的成片。它不在 result 里（result 只在完全通过时才有），
+    // 前端靠这个字段判断要不要给人工放行入口。没有就是 null。
+    rejectedCut: run.type === 'video' && run.rejectedCut && typeof run.rejectedCut === 'object' ? run.rejectedCut : null,
     input: run.input ? {
       provider: run.input.provider || null,
       voiceSource: run.input.voiceSource || null,
@@ -771,6 +816,40 @@ function requestId() {
 
 function delay(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds))
+}
+
+/**
+ * 限并发地按序处理一组条目，结果**按输入顺序**返回。
+ *
+ * 配音分段天然可并行（每段是独立的 TTS 请求，音色/语速在循环外已固定），
+ * 但拼接和时间轴都依赖段序，所以结果必须按索引回填，不能按完成先后 push。
+ *
+ * 失败语义与串行版一致：任一分支抛出即整体失败，且不再启动后续条目。
+ * 已发出的请求不强行中断——它们的结果会被丢弃，与串行时「后面根本不发」
+ * 在用户可见行为上等价（都是整轮失败），但不会留下写了一半的段文件。
+ */
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length)
+  let cursor = 0
+  let failed = null
+  const width = Math.max(1, Math.min(Math.floor(Number(limit) || 1), items.length || 1))
+  const runners = Array.from({ length: width }, async () => {
+    for (;;) {
+      if (failed) return
+      const index = cursor
+      cursor += 1
+      if (index >= items.length) return
+      try {
+        results[index] = await worker(items[index], index)
+      } catch (error) {
+        if (!failed) failed = error
+        return
+      }
+    }
+  })
+  await Promise.all(runners)
+  if (failed) throw failed
+  return results
 }
 
 async function awaitWithin(promise, milliseconds, code, message) {
@@ -1593,7 +1672,7 @@ export function isCredentialRejection(status) {
 }
 
 export class SpokenVideoMediaHost {
-  constructor({ background = (work) => work, signal, projectsStore, credentials, connectionSettings, videoCreator, videoReviewer, lineArtPlanner, fetch = globalThis.fetch, environment = process.env } = {}) {
+  constructor({ background = (work) => work, signal, projectsStore, credentials, connectionSettings, videoCreator, videoReviewer, fetch = globalThis.fetch, environment = process.env } = {}) {
     if (!projectsStore) throw new Error('SpokenVideoMediaHost requires projectsStore.')
     this.background = background
     this.signal = signal
@@ -1602,7 +1681,6 @@ export class SpokenVideoMediaHost {
     this.connectionSettings = connectionSettings || null
     this.videoCreator = typeof videoCreator === 'function' ? videoCreator : null
     this.videoReviewer = typeof videoReviewer === 'function' ? videoReviewer : null
-    this.lineArtPlanner = typeof lineArtPlanner === 'function' ? lineArtPlanner : null
     this.fetch = fetch
     this.environment = environment
     this.queues = new Map()
@@ -1653,7 +1731,7 @@ export class SpokenVideoMediaHost {
       },
       connection,
       renderer: 'remotion',
-      renderers: { remotion: remotionAvailable, 'local-ffmpeg': true, whiteboard: true },
+      renderers: { remotion: remotionAvailable, 'local-ffmpeg': true },
       mediaReadLimitBytes: MAX_MEDIA_BYTES,
       voiceReferenceMaxBytes: MAX_VOICE_REFERENCE_BYTES,
       videoBgmMaxBytes: MAX_VIDEO_BGM_BYTES,
@@ -2684,6 +2762,98 @@ export class SpokenVideoMediaHost {
     }))
   }
 
+  /**
+   * 人工放行一条「技术质检过了、独立审片没过」的成片。
+   *
+   * 为什么必须在后端做：`commit` 对 video/qc/packaging 一律拒绝
+   * （SPOKEN_VIDEO_STAGE_AUTOMATION_REQUIRED），只有受控路径能写这些阶段——
+   * 这是防伪造质检结论的守卫，不能为了放行把它拆掉。
+   *
+   * 所以放行走这条受控方法：读回 run 里登记的真实 technical / review 结论，
+   * 原样提交（passed 保持 false，只加 userOverride），既让成片能进发布页，
+   * 又保证「放行」这件事有据可查——用的是当初真跑出来的报告，不是客户端拼的。
+   */
+  async releaseRejectedCut(agent, request) {
+    const input = object(request, '放行请求')
+    const taskId = text(input.taskId, '视频任务标识', 64)
+    const detail = await this.projectsStore.get(agent, { projectId: input.projectId })
+    const root = await projectRootFor(agent, detail.id)
+    const data = await readRuns(root)
+    const run = (data.runs || []).find((item) => item.id === taskId && item.type === 'video')
+    if (!run) fail('SPOKEN_VIDEO_MEDIA_TASK_NOT_FOUND', '找不到这条视频任务。')
+    const cut = run.rejectedCut && typeof run.rejectedCut === 'object' ? run.rejectedCut : null
+    if (!cut) fail('SPOKEN_VIDEO_MEDIA_TASK_INVALID', '这条任务没有可放行的成片（未被审片否决，或成片未保留）。')
+    if (cut.technicalPassed !== true) fail('SPOKEN_VIDEO_MEDIA_TASK_INVALID', '这条成片的技术质检本身未通过，不能按「审片否决」放行。')
+    // 结论从落盘的报告读，不从客户端拿：放行必须基于真实跑出来的结论。
+    const technical = JSON.parse(await readFile(resolve(root, cut.reportFile), 'utf8'))
+    const review = cut.reviewFile ? JSON.parse(await readFile(resolve(root, cut.reviewFile), 'utf8')) : (run.pipeline?.review || null)
+    // 审片报告必须自带 2-8 项证据，否则这份否决本身站不住——放行它等于盲放。
+    // 实测有一条历史记录（03cd0575）证据是 0 项：那是更早的代码留下的残缺报告。
+    // 这种记录不该被放行，也不该让用户看到一句「独立审片证据必须包含 2-8 项」的
+    // schema 报错——要说清为什么放不了、以及能做什么。
+    if (review && (!Array.isArray(review.reviewEvidence) || review.reviewEvidence.length < 2)) {
+      fail('SPOKEN_VIDEO_MEDIA_TASK_INVALID', '这条成片的审片报告缺少证据（少于 2 项），无法判断否决是否成立，因此不能放行。请点「重试」重跑一轮。')
+    }
+    const committed = await this.projectsStore.commitProduced(agent, {
+      projectId: detail.id,
+      expectedRevision: detail.revision,
+      stage: 'qc',
+      idempotencyKey: `manual-release-editorial-${taskId}`,
+      source: 'spoken-video/manual-release',
+      payload: {
+        mode: run.pipeline?.engine === 'dsh-remotion-ai-director' || review ? 'ai-director' : 'automatic',
+        reportFile: cut.reportFile,
+        ...(cut.reviewFile ? { reviewFile: cut.reviewFile } : {}),
+        passed: false,
+        technical: technical.technical || technical,
+        ...(review ? { review } : {}),
+        userOverride: true,
+      },
+    })
+    // 放行后把成片与 qc 一并提交，让「发布」页能拿到视频。
+    const videoFile = cut.videoFile
+    const videoAbs = resolve(root, videoFile)
+    const info = await stat(videoAbs).catch(() => null)
+    if (!info?.isFile()) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '成片文件已不在磁盘上，无法放行。')
+    const probe = await this.#probe(videoAbs).catch(() => null)
+    const videoCommit = await this.projectsStore.commitProduced(agent, {
+      projectId: detail.id,
+      expectedRevision: committed.project.revision,
+      stage: 'video',
+      idempotencyKey: `manual-release-video-${taskId}`,
+      source: 'spoken-video/manual-release',
+      payload: {
+        mode: 'ai-director', renderer: 'remotion',
+        orientation: cut.width && cut.height && cut.height > cut.width ? 'portrait' : 'landscape',
+        visualBrief: run.input?.visualBrief ?? null,
+        subtitleEnabled: run.input?.subtitleEnabled !== false,
+        sourceAudioFile: run.source?.voiceover?.audio?.file || null,
+        sourceSubtitleFile: run.source?.subtitles?.srtFile || null,
+        sourceBgmFile: run.input?.backgroundMusic?.file || null,
+        backgroundMusic: run.input?.backgroundMusic || null,
+        bgmVolume: run.input?.bgmVolume ?? null,
+        remotion: {
+          projectDir: run.pipeline?.workspaceDir || null,
+          propsFile: run.pipeline?.workspaceDir ? `${run.pipeline.workspaceDir}/public/task-props.json` : null,
+          entryFile: run.pipeline?.workspaceDir ? `${run.pipeline.workspaceDir}/src/index.ts` : null,
+          creativeFile: run.pipeline?.workspaceDir ? `${run.pipeline.workspaceDir}/src/CreativeVideo.tsx` : null,
+          preflight: run.pipeline?.preflight || null,
+          editorialRepair: run.pipeline?.editorialRepair || null,
+          releasedFromReviewRejection: true,
+        },
+        video: {
+          file: videoFile, mediaType: 'video/mp4', bytes: info.size,
+          durationSeconds: cut.durationSeconds ?? probe?.durationSeconds ?? null,
+          width: cut.width ?? probe?.width ?? null, height: cut.height ?? probe?.height ?? null,
+          fps: cut.fps ?? probe?.fps ?? null,
+          ...(probe?.frameCount ? { frameCount: probe.frameCount } : {}),
+          hasAudio: probe?.hasAudio ?? true,
+        },
+      },
+    })
+    return { project: videoCommit.project, artifact: videoCommit.artifact, released: true }
+  }
+
   async #start(agent, type, request, parseInput) {
     const input = object(request, '媒体任务请求')
     const id = projectId(input.projectId)
@@ -3408,17 +3578,19 @@ export class SpokenVideoMediaHost {
     const model = reference ? config.bailianVoiceCloneModel : config.bailianModel
     const segments = splitTtsText(script)
     const directory = await mkdtemp(join(tmpdir(), 'lwb-spoken-video-bailian-'))
-    const chunks = []
-    const taskIds = []
     try {
-      for (const [offset, segment] of segments.entries()) {
+      // 分段并发合成：每段是独立的 TTS 请求，音色/模型在循环外已固定，
+      // 因此并发不改变任何一段的音频内容。结果按索引回填，拼接顺序与时间轴
+      // 仍严格按段序——这是并发唯一必须守住的不变量。
+      const synthesized = await mapWithConcurrency(segments, config.ttsConcurrency, async (segment, offset) => {
         const index = offset + 1
         const file = join(directory, `segment-${String(index).padStart(3, '0')}.wav`)
         const source = join(directory, `segment-${String(index).padStart(3, '0')}.source.wav`)
         const chunk = await this.#bailianTtsSegment(config, apiKey, model, voice, segment, { index, total: segments.length }, source, file)
-        chunks.push({ ...chunk, file })
-        if (chunk.requestId) taskIds.push(chunk.requestId)
-      }
+        return { ...chunk, file }
+      })
+      const chunks = synthesized
+      const taskIds = chunks.map((chunk) => chunk.requestId).filter(Boolean)
       return { provider: 'bailian', taskId: taskIds.at(-1) || null, voiceId: voice, audio: await this.#concatBailianWavSegments(directory, chunks) }
     } finally {
       await rm(directory, { recursive: true, force: true }).catch(() => {})
@@ -3447,7 +3619,7 @@ export class SpokenVideoMediaHost {
         baseUrl: config.mimoBaseUrl,
         model: config.mimoModel,
         defaultVoice: config.mimoDefaultVoice,
-        throttle: new MimoThrottle({ minGapMs: config.mimoMinGapMs }),
+        throttle: new MimoThrottle({ minGapMs: config.mimoMinGapMs, concurrency: config.ttsConcurrency }),
         fetchImpl: (url, init) => this.fetch(url, init),
       })
       // 三模式互斥：音色来源各不相同，这里各自分配，不做回退。
@@ -3464,19 +3636,76 @@ export class SpokenVideoMediaHost {
       // 两类标签同口径计数：入参的 (风格) 与正文里用户手写的 [叹气] 内插标签。
       // 内插的那种不经入参，不清点就能无限贴，而且和入参标签一样是裸传给模型的形态。
       assertTotalAudioTags(script, tags)
-      const chunks = []
-      const durations = []
-      for (const [offset, segment] of segments.entries()) {
+      // 分段合成：每段是独立的 TTS 请求，音色/模式/参考音频在循环外已固定，
+      // 并发不改变任何一段的音频内容。结果按索引回填，拼接顺序与时间轴仍严格
+      // 按段序——这是并发唯一必须守住的不变量。首段标签靠 index 判断，与完成
+      // 先后无关，因此并发后仍只贴在真正的那一段上。
+      //
+      // **声音克隆（clone）必须串行，且要更大的退避。**
+      //
+      // 2026-10-26 实测根因：两条成片（燃气聚能环、AI自动炒股）的配音连续 8 次
+      // 失败，报「小米 TTS 请求过于频繁（429）：Too many requests」。复现实验把
+      // 变量逐个拆开，结论很干脆：
+      //   · preset 模式 4 路并发 → 4 段全 200（预置音色不受这个限制）
+      //   · clone 模式 4 路并发 → 只有第 1 段 200，其余全部 429
+      //   · clone 模式**串行**、起点间隔仍是 2 秒 → 4 段全 200
+      //   · clone 模式串行、间隔 15 秒 → 4 段全 200（每段仅 1.2–1.4s）
+      //
+      // 所以 MiMo 对 voiceclone 的限流是按**同时在飞的请求数**算的，不是按起点
+      // 速率。官方标的 RPM 100 对预置音色成立，对复刻不成立——复刻每次都要带
+      // 一整段参考音频（约 700KB），服务端把它算成重请求。
+      //
+      // 因此 clone 走串行（concurrency=1）。这不影响总耗时：实测 clone 单段
+      // 只要 1.2–1.4 秒，串行反而比并发后被 429 打回重试更快。
+      const concurrency = mode === 'clone' ? 1 : config.ttsConcurrency
+      const synthesized = await mapWithConcurrency(segments, concurrency, async (segment, offset) => {
         const index = offset + 1
         const file = join(directory, `segment-${String(index).padStart(3, '0')}.wav`)
-        const audio = await client.synthesize({
-          text: segment,
-          mode,
-          voiceId: input.voiceSource === 'preset' ? input.voiceId : null,
-          referenceDataUrl,
-          style: mode === 'design' ? input.voiceDesign : (config.mimoStyle || ''),
-          tags: index === 1 ? tags : [],
-        })
+        // 单段失败只重试这一段，不重做已经合成的段落。
+        //
+        // 2026-10-25 实测：第 2/4 段成功、第 3 段卡满超时后整轮配音报废，而
+        // 前三段的音频其实已经在盘上。MimoError 已经带 retryable 标记（超时、
+        // 429、5xx 都是），但原先合成循环完全没有用它——一个可重试的错误直接
+        // 结束了整条流水线。这里按段落各给 2 次机会，重试前留一点退避。
+        //
+        // 2026-10-26：clone 模式改成串行之后，单段 429 的概率已经很低，但
+        // 「一次抖动打掉整轮配音」的代价太高，所以给 3 次机会（原来 2 次）。
+        // 每次重试只重做这一段，已合成段落的音频留在盘上不受影响。
+        let audio
+        let attempt = 0
+        const maxAttempts = 3
+        for (;;) {
+          attempt += 1
+          try {
+            audio = await client.synthesize({
+              text: segment,
+              mode,
+              voiceId: input.voiceSource === 'preset' ? input.voiceId : null,
+              referenceDataUrl,
+              style: mode === 'design' ? input.voiceDesign : (config.mimoStyle || ''),
+              tags: index === 1 ? tags : [],
+            })
+            break
+          } catch (error) {
+            const retryable = error instanceof MimoError && error.retryable === true
+            if (!retryable || attempt >= maxAttempts) throw error
+            await this.#progressEvent(root, run, `小米 MiMo 第 ${index}/${segments.length} 段失败，正在重试`, {
+              provider: 'mimo', stage: '合成中', detail: error.message,
+            })
+            // 退避要跟着限流类型走。
+            //
+            // 2026-10-26 实测：clone 模式被 429 时，原来的固定 3 秒等待**不够**——
+            // 服务端对复刻请求的限流窗口比预置音色长得多，3 秒后重试仍然是 429，
+            // 于是每段都白白烧掉一次机会，整轮配音全灭（实测连续 8 次任务失败）。
+            //
+            // 优先用服务端给的 Retry-After；没有就按 429 给足 15 秒
+            // （实测串行 + 15 秒间隔下 clone 4 段全 200）。
+            const waitMs = error.status === 429
+              ? Math.max(error.retryAfterMs || 0, 15_000)
+              : 3000
+            await new Promise((resolve) => setTimeout(resolve, waitMs))
+          }
+        }
         if (!audio?.length) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `小米 MiMo 第 ${index}/${segments.length} 段返回空音频。`)
         // 合成成功即清除 rejected 标记，避免换了正确 Key 后状态仍停在「被拒绝」。
         this.#markCredentialRejected('mimo', false)
@@ -3486,11 +3715,12 @@ export class SpokenVideoMediaHost {
         if (!probe.hasAudio || !probe.durationSeconds) {
           fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `小米 MiMo 第 ${index}/${segments.length} 段不含可播放的音频流。`)
         }
-        chunks.push({ file })
-        durations.push(probe.durationSeconds)
         await this.#progressEvent(root, run, `小米 MiMo 配音合成 ${index}/${segments.length}`, { provider: 'mimo', stage: '合成中' })
-      }
+        return { file, durationSeconds: probe.durationSeconds }
+      })
 
+      const chunks = synthesized.map((item) => ({ file: item.file }))
+      const durations = synthesized.map((item) => item.durationSeconds)
       const audio = await this.#concatWavSegments(directory, chunks, '小米 MiMo')
       const timeline = buildMimoTimeline({ segments, durations, rate: input.rate })
       return { provider: 'mimo', taskId: null, voiceId: input.voiceId || config.mimoDefaultVoice, audio, timeline, mode }
@@ -3973,6 +4203,59 @@ async #mimoReferenceDataUrl(root, input) {
     }
   }
 
+  /**
+   * 全片解码级检测：黑帧、冻结、静音、峰值。
+   *
+   * 抽帧质检的盲区在这里补上——抽帧只能看见被采样到的那一瞬，
+   * 而一段 8 秒全黑只要没落进采样点就完全隐形。这一层把整片解一遍，
+   * 覆盖每一帧、每一秒。
+   *
+   * 刻意**不抛错**：ffmpeg 检测失败时返回 null 让上层记为「未测」，
+   * 而不是把一次工具抖动变成「片子有问题」。判定逻辑在
+   * spoken-video-local-qc.mjs 里，保持纯函数、可单测。
+   */
+  async #detectLocalQc(videoPath, durationSeconds) {
+    const run = async (args, label) => {
+      try {
+        // 检测只需要解码，不需要写文件：`-f null -` 丢弃输出。
+        const { stderr } = await execFileAsync('ffmpeg', ['-hide_banner', '-nostats', ...args, '-f', 'null', '-'], { signal: this.signal, maxBuffer: 1024 * 1024 * 8 })
+        return String(stderr || '')
+      } catch (error) {
+        if (this.signal?.aborted) throw error
+        // 非零退出也可能已经打出了检测日志（例如损坏帧），日志仍可用。
+        const partial = String(error?.stderr || '')
+        if (partial.trim()) return partial
+        return null
+      }
+    }
+    const thresholds = DEFAULT_LOCAL_QC_THRESHOLDS
+    const [blackLog, freezeLog, silenceLog, volumeLog] = await Promise.all([
+      run(['-i', videoPath, '-vf', `blackdetect=d=${thresholds.blackMinSeconds}:pic_th=${thresholds.blackPixelThreshold}:pix_th=0.10`, '-an'], 'blackdetect'),
+      // 冻结检测只作记录（见 spoken-video-local-qc.mjs 的阈值说明），
+      // 仍跑一遍以便把「哪里特别久没动」报给人工与模型审片参考。
+      run(['-i', videoPath, '-vf', 'freezedetect=n=-60dB:d=3.0', '-an'], 'freezedetect'),
+      run(['-i', videoPath, '-vn', '-af', `silencedetect=n=${thresholds.silenceNoiseDb}dB:d=${thresholds.silenceMinSeconds}`], 'silencedetect'),
+      run(['-i', videoPath, '-vn', '-af', 'volumedetect'], 'volumedetect'),
+    ])
+    const measured = {
+      blackSpans: blackLog === null ? [] : parseBlackDetect(blackLog),
+      freezeSpans: freezeLog === null ? [] : parseFreezeDetect(freezeLog, durationSeconds),
+      silenceSpans: silenceLog === null ? [] : parseSilenceDetect(silenceLog, durationSeconds),
+      volume: volumeLog === null ? {} : parseVolumeDetect(volumeLog),
+      durationSeconds: durationSeconds || null,
+    }
+    const judged = judgeLocalQc({ ...measured, thresholds })
+    // 哪一项没跑出来，如实记 warning——「没测」和「测了没问题」必须能区分开。
+    const unmeasured = [
+      blackLog === null ? '黑帧' : null,
+      freezeLog === null ? '冻结' : null,
+      silenceLog === null ? '静音' : null,
+      volumeLog === null ? '峰值' : null,
+    ].filter(Boolean)
+    if (unmeasured.length) judged.warnings.push(`全片解码检测未完成：${unmeasured.join('、')}（该项未参与判定）。`)
+    return judged
+  }
+
   async #generateVoiceover(agent, root, run) {
     const detail = await this.projectsStore.get(agent, { projectId: run.projectId })
     const script = detail.artifacts?.script?.data?.body
@@ -4131,7 +4414,6 @@ async #mimoReferenceDataUrl(root, input) {
 
   async #renderVideo(agent, root, run) {
     if (run.input.renderer === 'local-ffmpeg') return this.#renderLegacyVideo(agent, root, run)
-    if (run.input.renderer === 'whiteboard') return this.#renderWhiteboardVideo(agent, root, run)
     return this.#renderAiDirectorVideo(agent, root, run)
   }
 
@@ -4213,418 +4495,6 @@ async #mimoReferenceDataUrl(root, input) {
     })
     // 与白板路径同理：本地渲染没有独立审片阶段，技术质检必须内联提交，
     // 否则成片不会出现在发布页。
-    const qc = await this.#commitInlineTechnicalQc(agent, run, committed, { audioPath, subtitles, subtitleEnabled, orientation })
-    return { project: qc.project, artifact: committed.artifact, video: { file: videoFile, ...probe, bytes: info.size }, qc: { passed: true, artifact: qc.artifact, technical: qc.technical } }
-  }
-
-  // ── 白板手绘渲染器：确定性管线，复用白板能力包自带的本地引擎 ──
-  //
-  // 字幕时间轴是白板动画「第几秒画哪个元素」的唯一依据（startMs 查表），所以与
-  // Remotion 路径同理：即使不烧录字幕，也必须有字幕产物，否则直接拒绝。
-  // 线稿约定：项目 media/whiteboard/ 下每幕一张 scene-*.png（16:9，暖米黄纸底）。
-  // 同名 .annotation.json 可省略——缺省时按字幕 cue 自动生成标注骨架（startMs 精确
-  // 对齐字幕，区域为等分占位；精调可在白板包预览台完成或手工放置标注文件）。
-  //
-  // 成片必须补配音音轨：白板引擎只输出无声视频流，音频在这里用 ffmpeg 合成，
-  // 同时把画面规格化到 QC 要求的 1920x1080 / 1080x1920、30fps。
-
-  // ── 白板线稿生成：按字幕分幕出线稿，落到 media/whiteboard/ 供渲染消费 ──
-  //
-  // 设计取舍：生成是「可失败的资产准备」，不塞进渲染 run——一张废图不值得
-  // 重跑 7 分钟渲染。前端拿到 plan 后批量/单张触发生成，缩略图人工确认后再
-  // 提交视频任务（对应白板 skill 的「线稿确认关卡」）。
-  // 文件命名 scene-NN-story.png：与渲染分支的幕号匹配约定一致。
-
-  #lineArtJobs = new Map()
-
-  /**
-   * 线稿分镜师（DSH 结构化执行器）：把每幕旁白转成「画什么」的英文视觉描述。
-   * 旁白原文绝不能直接喂给生图模型——Qwen-Image 会把长中文旁白整段手写到
-   * 画面上（2026-10-01 实测）。缺执行器时明确报错，而不是退化到翻车路径。
-   */
-  #requireLineArtPlanner() {
-    if (typeof this.lineArtPlanner !== 'function') {
-      throw fail('SPOKEN_VIDEO_WHITEBOARD_PLANNER_UNAVAILABLE', '线稿分镜师未配置（需要 DSH 模型支持），无法把旁白转成画面描述。请检查模型配置后重试。')
-    }
-    return this.lineArtPlanner
-  }
-
-  /**
-   * 线稿缩略图（320px JPEG base64）。plan 一次带回全部缩略图，浏览器不用拉
-   * 几 MB 的原图。压好的缩略图缓存在 media/whiteboard/.thumbs/，按源图 mtime
-   * 判断是否需要重压。
-   */
-  async #lineArtThumb(engineRoot, python, lineArtDir, fileName) {
-    const source = join(lineArtDir, fileName)
-    const thumbDir = join(lineArtDir, '.thumbs')
-    const target = join(thumbDir, `${fileName.replace(/\.[^.]+$/u, '')}.thumb.jpg`)
-    try {
-      const [sourceInfo, targetInfo] = await Promise.all([stat(source), stat(target).catch(() => null)])
-      if (targetInfo && targetInfo.mtimeMs >= sourceInfo.mtimeMs) {
-        const cached = await readFile(target)
-        return `data:image/jpeg;base64,${cached.toString('base64')}`
-      }
-    } catch { /* 缓存不可用则重压 */ }
-    await mkdir(join(lineArtDir, '.thumbs'), { recursive: true, mode: 0o700 })
-    const script = "import sys; from PIL import Image; im = Image.open(sys.argv[1]); im.thumbnail((320, 320)); im.convert('RGB').save(sys.argv[2], 'JPEG', quality=70)"
-    await execFilePromise(python, ['-c', script, source, target], { timeout: 30_000 })
-    const thumb = await readFile(target)
-    return `data:image/jpeg;base64,${thumb.toString('base64')}`
-  }
-
-  /** 视觉描述缓存文件路径与版本键。 */
-  async #lineArtDescriptionCache(agent, root, projectId) {
-    const detail = await this.projectsStore.get(agent, { projectId })
-    const key = `${detail.artifacts?.script?.revision || 0}-${detail.artifacts?.subtitles?.revision || 0}`
-    return { file: resolve(root, 'media', 'whiteboard', 'descriptions.json'), key }
-  }
-
-  /**
-   * 旁白 → 视觉描述。缓存命中直接用；稿件或字幕更新后自动重算。
-   * 返回 Map<幕号, 英文视觉描述>。
-   */
-  async #ensureLineArtDescriptions(agent, root, projectId, scenes) {
-    const planner = this.#requireLineArtPlanner()
-    const { file, key } = await this.#lineArtDescriptionCache(agent, root, projectId)
-    let cached = null
-    try {
-      cached = JSON.parse(await readFile(file, 'utf8'))
-    } catch { /* 无缓存或损坏，重新生成 */ }
-    if (cached?.key === key && Array.isArray(cached?.scenes)) {
-      return normalizeLineArtPlan(cached, scenes)
-        .reduce((map, item) => map.set(item.index, item.visual), new Map())
-    }
-
-    const raw = await planner({
-      prompt: buildLineArtPlanPrompt(scenes),
-      schema: LINE_ART_PLAN_SCHEMA,
-      agent,
-    })
-    const normalized = normalizeLineArtPlan(raw, scenes)
-    await mkdir(dirname(file), { recursive: true, mode: 0o700 })
-    await writeFile(file, `${JSON.stringify({ key, generatedAt: new Date().toISOString(), scenes: normalized }, null, 2)}\n`, { mode: 0o600 })
-    return normalized.reduce((map, item) => map.set(item.index, item.visual), new Map())
-  }
-
-  #sceneImageName(index) {
-    return `scene-${String(index).padStart(2, '0')}-story.png`
-  }
-
-  /** 幕号 → 线稿文件名。接受 scene-NN.png 与 scene-NN-*.png 两种手工命名。 */
-  async #matchSceneImages(lineArtDir, sceneCount) {
-    let names = []
-    try { names = await readdir(lineArtDir) } catch { names = [] }
-    const images = []
-    const missing = []
-    for (let index = 1; index <= sceneCount; index++) {
-      const nn = String(index).padStart(2, '0')
-      const exact = names.find((name) => new RegExp(`^scene-${nn}\\.(png|jpe?g)$`, 'iu').test(name))
-      const prefixed = names.find((name) => new RegExp(`^scene-${nn}-[^/]*\\.(png|jpe?g)$`, 'iu').test(name))
-      const found = exact || prefixed
-      if (found) images.push(found)
-      else missing.push(index)
-    }
-    if (missing.length) {
-      throw new Error(`media/whiteboard/ 缺少第 ${missing.join('、')} 幕的线稿（scene-${String(missing[0]).padStart(2, '0')}*.png，16:9 暖米黄纸底，画面不要出现文字）。`)
-    }
-    return images
-  }
-
-  /** 分幕规划 + 现有线稿清单 + 生图引擎状态。确定性只读，给前端画面板。 */
-  async whiteboardLineArtPlan(agent, request) {
-    const { root, subtitles } = await this.#whiteboardSubtitleContext(agent, request)
-    const engineRoot = this.#whiteboardEngineRoot()
-    const python = await this.#whiteboardPython(engineRoot)
-    // 分幕只读字幕内容，写到系统临时目录，用完即删，不进项目媒体目录
-    const planSrt = join(tmpdir(), `lwb-wb-plan-${randomUUID()}.srt`)
-    await writeFile(planSrt, subtitles.srt, { mode: 0o600 })
-    let parsed
-    try {
-      parsed = await this.#runWhiteboardScript(engineRoot, python, 'parse_srt.py', [planSrt])
-    } finally {
-      await unlink(planSrt).catch(() => {})
-    }
-    let scenes = null
-    try { scenes = JSON.parse(parsed.stdout).scenes }
-    catch { throw fail('SPOKEN_VIDEO_WHITEBOARD_FAILED', '字幕分幕输出无法解析。') }
-    if (!Array.isArray(scenes) || scenes.length === 0) throw fail('SPOKEN_VIDEO_WHITEBOARD_FAILED', '字幕没有解析出任何分幕。')
-
-    const lineArtDir = resolve(root, 'media/whiteboard')
-    let names = []
-    try { names = await readdir(lineArtDir) } catch { names = [] }
-    const items = []
-    for (const scene of scenes) {
-      const index = scene.sceneIndex
-      const nn = String(index).padStart(2, '0')
-      const found = names.find((name) => new RegExp(`^scene-${nn}(-[^/]*)?\\.(png|jpe?g)$`, 'iu').test(name))
-      let bytes = null
-      if (found) bytes = (await stat(join(lineArtDir, found))).size
-      items.push({
-        index,
-        startMs: scene.startMs,
-        endMs: scene.endMs,
-        durationMs: scene.sceneDurationMs,
-        text: scene.text,
-        file: found ? `media/whiteboard/${found}` : null,
-        fileName: found || null,
-        bytes,
-        thumb: found ? await this.#lineArtThumb(engineRoot, python, lineArtDir, found) : null,
-      })
-    }
-    const engine = await checkImageEngine(whiteboardBridgeUrl())
-    const generated = items.filter((item) => item.file).length
-    return {
-      scenes: items,
-      total: items.length,
-      generated,
-      missing: items.length - generated,
-      lineArtDir: 'media/whiteboard',
-      engine,
-      job: this.#lineArtJobs.get(`${request.projectId}`) || null,
-    }
-  }
-
-  /** 取该项目的字幕产物；没有就直接给出可操作的报错。 */
-  async #whiteboardSubtitleContext(agent, request) {
-    const projectId = request?.projectId
-    if (!projectId) throw fail('SPOKEN_VIDEO_INVALID_INPUT', '缺少项目标识。')
-    const root = await projectRootFor(agent, projectId)
-    const detail = await this.projectsStore.get(agent, { projectId })
-    const subtitles = detail.artifacts?.subtitles?.data || null
-    if (typeof subtitles?.srt !== 'string' || !subtitles.srt.trim()) {
-      throw fail('SPOKEN_VIDEO_STAGE_BLOCKED', '必须先完成配音与字幕，才能准备白板线稿：出场时间与画面内容都来自字幕时间轴。请在「配音与字幕」生成字幕后重试。')
-    }
-    return { root, subtitles, detail }
-  }
-
-  /**
-   * 批量生成缺失幕的线稿（后台任务）。scenes 指定幕号列表；缺省生成全部缺失幕。
-   * force=true 时连同已有线稿一起重新生成（覆盖 scene-NN-story.png，手工放置的
-   * 其他命名文件不受影响）。
-   */
-  async startWhiteboardLineArt(agent, request) {
-    const projectId = request?.projectId
-    if (!projectId) throw fail('SPOKEN_VIDEO_INVALID_INPUT', '缺少项目标识。')
-    const existing = this.#lineArtJobs.get(projectId)
-    if (existing && existing.phase === 'running') return { jobId: existing.jobId, reused: true, ...existing }
-
-    const { root } = await this.#whiteboardSubtitleContext(agent, request)
-    const plan = await this.whiteboardLineArtPlan(agent, { projectId })
-    const wanted = Array.isArray(request.scenes) && request.scenes.length
-      ? plan.scenes.filter((item) => request.scenes.includes(item.index))
-      : plan.scenes.filter((item) => !item.file || request.force)
-    const targets = request.force ? wanted : wanted.filter((item) => !item.file)
-    if (!targets.length) {
-      return { jobId: null, reused: false, skipped: true, total: 0, message: '线稿已齐全，没有需要生成的幕。' }
-    }
-
-    const engine = await checkImageEngine(whiteboardBridgeUrl())
-    if (!engine.reachable) {
-      throw fail('SPOKEN_VIDEO_WHITEBOARD_ENV', '本地媒体桥接未运行，无法生成线稿。请启动本地媒体桥接后重试。')
-    }
-    if (!engine.up) {
-      throw fail('SPOKEN_VIDEO_WHITEBOARD_ENV', '生图引擎未连接。请打开桥接配置中心（${localBridgeBase(this.environment)}）点「一键启动」，引擎就绪后再生成线稿。')
-    }
-
-    // 旁白 → 视觉描述：结果缓存在 media/whiteboard/descriptions.json，键含稿件
-    // 与字幕的产物版本，任一更新都会自动重算。缺描述时先调分镜师（一次 LLM
-    // 调用出全部幕），生图只消费视觉描述，不消费旁白原文。
-    const descriptions = await this.#ensureLineArtDescriptions(agent, root, projectId, plan.scenes)
-
-    const lineArtDir = resolve(root, 'media/whiteboard')
-    await mkdir(lineArtDir, { recursive: true, mode: 0o700 })
-    const jobId = `lineart-${Date.now().toString(36)}`
-    const job = { jobId, projectId, phase: 'running', done: 0, total: targets.length, current: targets[0].index, failures: [], startedAt: new Date().toISOString() }
-    this.#lineArtJobs.set(projectId, job)
-
-    const work = (async () => {
-      for (const item of targets) {
-        if (this.signal?.aborted) throw fail('SPOKEN_VIDEO_MEDIA_CANCELLED', '线稿生成已取消。')
-        job.current = item.index
-        try {
-          const buffer = await generateLineArtImage({
-            visual: descriptions.get(item.index) || item.visual,
-            sceneIndex: item.index,
-            signal: this.signal,
-            onStage: (stage) => { job.stage = stage },
-          })
-          const fileName = this.#sceneImageName(item.index)
-          await writeFile(resolve(lineArtDir, fileName), buffer)
-          job.done += 1
-          job.results = [...(job.results || []), { index: item.index, fileName: `media/whiteboard/${fileName}`, bytes: buffer.length }]
-        } catch (error) {
-          if (this.signal?.aborted) throw error
-          job.failures.push({ index: item.index, error: String(error?.message || error).slice(0, 300) })
-        }
-      }
-      job.phase = job.failures.length && job.done === 0 ? 'failed' : 'completed'
-      job.completedAt = new Date().toISOString()
-    })().catch((error) => {
-      job.phase = this.signal?.aborted ? 'cancelled' : 'failed'
-      job.error = String(error?.message || error).slice(0, 500)
-    }).finally(() => {
-      if (this.#lineArtJobs.get(projectId) === job) setTimeout(() => this.#lineArtJobs.delete(projectId), 10 * 60 * 1000)
-    })
-    this.background ? this.background(work) : void work
-    return { jobId, reused: false, total: targets.length, scenes: targets.map((item) => item.index) }
-  }
-
-  whiteboardLineArtStatus(agent, request) {
-    const job = this.#lineArtJobs.get(request?.projectId)
-    return job || { phase: 'idle' }
-  }
-
-  #whiteboardEngineRoot() {
-    return process.env.LWB_WHITEBOARD_ENGINE_ROOT
-      || resolve(dirname(fileURLToPath(import.meta.url)), '..', 'whiteboard', 'engine')
-  }
-
-  async #whiteboardPython(engineRoot) {
-    const venvPython = process.platform === 'win32'
-      ? join(engineRoot, '.venv', 'Scripts', 'python.exe')
-      : join(engineRoot, '.venv', 'bin', 'python')
-    const candidates = [venvPython, process.platform === 'win32' ? 'python' : 'python3']
-    const probe = 'import cv2, numpy, PIL; print("WHITEBOARD_DEPS_OK")'
-    for (const python of candidates) {
-      try {
-        const { stdout } = await execFilePromise(python, ['-c', probe], { timeout: 30_000 })
-        if (stdout.includes('WHITEBOARD_DEPS_OK')) return python
-      } catch { /* 该解释器不可用，尝试下一个 */ }
-    }
-    throw fail('SPOKEN_VIDEO_WHITEBOARD_ENV', '白板渲染需要具备 OpenCV/NumPy/Pillow 的 Python 解释器；请在「白板手绘动画」包内先执行一次「准备环境」。')
-  }
-
-  async #runWhiteboardScript(engineRoot, python, script, args) {
-    try {
-      return await execFilePromise(python, [join(engineRoot, 'scripts', script), ...args], {
-        cwd: engineRoot,
-        maxBuffer: 16 * 1024 * 1024,
-        timeout: 60 * 60 * 1000,
-      })
-    } catch (error) {
-      throw commandError(error, `白板引擎 ${script}`)
-    }
-  }
-
-  async #renderWhiteboardVideo(agent, root, run) {
-    const detail = await this.projectsStore.get(agent, { projectId: run.projectId })
-    if (detail.revision !== run.expectedRevision) fail('SPOKEN_VIDEO_REVISION_CONFLICT', '上游已更新，已取消旧版本的视频渲染任务。')
-    const voiceover = detail.artifacts?.voiceover?.data
-    const subtitles = detail.artifacts?.subtitles?.data || null
-    const subtitleEnabled = run.input.subtitleEnabled !== false
-    const orientation = run.input.orientation === 'landscape' ? 'landscape' : 'portrait'
-    if (!voiceover?.audio?.file || (subtitleEnabled && typeof subtitles?.srt !== 'string')) fail('SPOKEN_VIDEO_STAGE_BLOCKED', subtitleEnabled ? '必须先完成配音与字幕，才能渲染白板视频。' : '必须先完成配音，才能渲染白板视频。')
-
-    // 线稿：按幕号精确匹配 scene-NN*.png（两位序号）。自动生成的线稿走
-    // startWhiteboardLineArt 落到同一目录，两边命名约定一致。
-    const lineArtDir = resolve(root, 'media/whiteboard')
-    const audioPath = await this.#file(root, voiceover.audio.file, '配音文件')
-    const audioProbe = await this.#probe(audioPath)
-    const srtFile = `media/videos/${run.id}.srt`
-    const srtPath = await this.#write(root, srtFile, subtitles.srt)
-
-    const engineRoot = this.#whiteboardEngineRoot()
-    const python = await this.#whiteboardPython(engineRoot)
-    const workDir = `media/videos/${run.id}-whiteboard`
-    const workPath = resolve(root, workDir)
-    await mkdir(workPath, { recursive: true, mode: 0o700 })
-
-    // 分幕：parse_srt 动态规划分幕，stdout JSON 取 scenes
-    const parsed = await this.#runWhiteboardScript(engineRoot, python, 'parse_srt.py', [srtPath])
-    let scenes = null
-    try { scenes = JSON.parse(parsed.stdout).scenes }
-    catch { throw fail('SPOKEN_VIDEO_WHITEBOARD_FAILED', '白板引擎字幕分幕输出无法解析。') }
-    if (!Array.isArray(scenes) || scenes.length === 0) fail('SPOKEN_VIDEO_WHITEBOARD_FAILED', '字幕没有解析出任何分幕。')
-
-    let images
-    try { images = await this.#matchSceneImages(lineArtDir, scenes.length) }
-    catch (error) { throw fail('SPOKEN_VIDEO_STAGE_BLOCKED', error.message) }
-
-    const sceneFiles = []
-    for (let index = 0; index < scenes.length; index++) {
-      const scene = scenes[index]
-      const image = images[index]
-      const imagePath = join(lineArtDir, image)
-      const imageProbe = await this.#probe(imagePath)
-      if (!imageProbe.width || !imageProbe.height) fail('SPOKEN_VIDEO_WHITEBOARD_FAILED', `无法读取线稿尺寸：${image}`)
-
-      // 标注：优先用线稿同名 .annotation.json；没有则按字幕时间轴自动生成骨架
-      const annotationName = image.replace(/\.[^.]+$/u, '.annotation.json')
-      let annotationPath = join(lineArtDir, annotationName)
-      try { await stat(annotationPath) }
-      catch {
-        annotationPath = join(workPath, annotationName)
-        await this.#runWhiteboardScript(engineRoot, python, 'plan_timeline.py', [
-          srtPath, '--scene', String(index + 1),
-          '--elements', '场景铺垫', '核心主体', '结果反应',
-          '--width', String(imageProbe.width), '--height', String(imageProbe.height),
-          '--output', annotationPath,
-        ])
-      }
-
-      // 末幕时长对齐配音结尾：字幕通常在最后一句语音处结束，配音尾部可能还有
-      // 静音；把差值补进末幕，保证成片与配音时长差落在 QC 的 2 秒线内。
-      const sceneDurationMs = index === scenes.length - 1 && audioProbe?.durationSeconds
-        ? Math.max(scene.sceneDurationMs, Math.round(audioProbe.durationSeconds * 1000) - scene.startMs)
-        : scene.sceneDurationMs
-
-      const sceneFile = join(workPath, `scene-${String(index + 1).padStart(2, '0')}.mp4`)
-      await this.#runWhiteboardScript(engineRoot, python, 'render_stream_whiteboard.py', [
-        imagePath, annotationPath, sceneFile,
-        '--fps', '30',
-        '--total-ms', String(sceneDurationMs),
-        '--cap-long-edge', orientation === 'landscape' ? '1080' : '720',
-      ])
-      sceneFiles.push(sceneFile)
-    }
-
-    // 多幕合并成无声全片
-    let silentVideo = sceneFiles[0]
-    if (sceneFiles.length > 1) {
-      silentVideo = join(workPath, 'merged.mp4')
-      await this.#runWhiteboardScript(engineRoot, python, 'merge_scenes.py', ['--inputs', ...sceneFiles, '--output', silentVideo])
-    }
-
-    // 合成：规格化尺寸（pad 色用白板纸底，避免黑边）+ 配音音轨 + 可选字幕烧录。
-    // 多幕的"画不完"超时会逐幕累积，成片可能比配音长数秒（实测 3.5s，超过 QC
-    // 的 2 秒线）：先克隆尾帧补足，再精确截到配音时长——尾部本就是凝视段，
-    // 截掉无损，成片与配音的时长差因此恒为 0。
-    const videoFile = `media/videos/${run.id}.mp4`
-    const videoPath = resolve(root, videoFile)
-    const target = orientation === 'landscape' ? '1920:1080' : '1080:1920'
-    const scalePad = `scale=${target}:force_original_aspect_ratio=decrease,pad=${target}:(ow-iw)/2:(oh-ih)/2:color=0xF6F1E3,tpad=stop_mode=clone:stop_duration=10`
-    const vf = subtitleEnabled ? `${scalePad},${ffmpegSubtitleFilter(resolve(root, srtFile))}` : scalePad
-    const audioDuration = audioProbe?.durationSeconds
-    try {
-      await execFileAsync('ffmpeg', [
-        '-y', '-i', silentVideo, '-i', audioPath, '-vf', vf,
-        '-map', '0:v:0', '-map', '1:a:0',
-        '-c:v', 'libx264', '-preset', 'medium', '-crf', '20', '-pix_fmt', 'yuv420p', '-r', '30',
-        '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart',
-        ...(audioDuration ? ['-t', String(audioDuration)] : []),
-        videoPath,
-      ], { signal: this.signal, maxBuffer: 1024 * 1024 * 4 })
-    } catch (error) {
-      throw commandError(error, '白板视频合成')
-    }
-
-    const info = await stat(videoPath)
-    if (!info.isFile() || info.size < 1024) fail('SPOKEN_VIDEO_MEDIA_COMMAND_FAILED', '视频渲染没有生成有效文件。')
-    const probe = await this.#probe(videoPath)
-    const committed = await this.projectsStore.commitProduced(agent, {
-      projectId: run.projectId,
-      expectedRevision: run.expectedRevision,
-      stage: 'video',
-      idempotencyKey: `media-${run.id}`,
-      source: 'spoken-video/whiteboard',
-      payload: {
-        mode: 'whiteboard', renderer: 'whiteboard', orientation, visualBrief: run.input.visualBrief, subtitleEnabled, sourceAudioFile: voiceover.audio.file, sourceSubtitleFile: subtitleEnabled ? subtitles.srtFile || null : null,
-        video: { file: videoFile, mediaType: 'video/mp4', bytes: info.size, durationSeconds: probe.durationSeconds, width: probe.width, height: probe.height, fps: probe.fps, hasAudio: probe.hasAudio },
-        whiteboard: { scenes: scenes.length, lineArtDir: 'media/whiteboard' },
-      },
-    })
-    // 白板路径没有独立审片阶段，技术质检在这里内联完成并提交 qc 产物；
-    // 否则成片没有 qc 兄弟产物，发布页（只列 qc.passed 的项目）会看不到它。
     const qc = await this.#commitInlineTechnicalQc(agent, run, committed, { audioPath, subtitles, subtitleEnabled, orientation })
     return { project: qc.project, artifact: committed.artifact, video: { file: videoFile, ...probe, bytes: info.size }, qc: { passed: true, artifact: qc.artifact, technical: qc.technical } }
   }
@@ -4767,6 +4637,9 @@ async #mimoReferenceDataUrl(root, input) {
       // 与 variation 互补——variation 抓「各帧雷同」，content 抓「单帧空白」，
       // 覆盖「每帧不同但每帧都空白」这种 variation 漏掉的情况。不 crop，crop 会骗过检测。
       const content = await measureFrameContent(sampled.frameFiles, this.signal)
+      // 全片解码级检测。放在抽帧判定之后、模型审片之前：
+      // 它比抽帧多覆盖「没被采样到的那几秒」，又完全不花模型往返。
+      const localQc = await this.#detectLocalQc(renderedPath, videoProbe?.durationSeconds || null)
       const topology = buildTechnicalReport({ video: videoProbe, audio: audioProbe, subtitles, subtitleEnabled, orientation })
       // 给数字、去掉猜测语气。原先写的是「成片可能退化为静态画面或少量文字卡片」——
       // 那是推测，用户看完仍不知道实际有多差。现在直接报采样帧数、不同画面数、
@@ -4782,11 +4655,12 @@ async #mimoReferenceDataUrl(root, input) {
       ]
       const technical = {
         ...topology,
-        passed: topology.passed && subtitleIssues.length === 0 && content.passed,
-        issues: [...topology.issues, ...subtitleIssues, ...contentIssues],
-        warnings: [...(topology.warnings || []), ...variationWarnings],
+        passed: topology.passed && subtitleIssues.length === 0 && content.passed && localQc.passed,
+        issues: [...topology.issues, ...subtitleIssues, ...contentIssues, ...localQc.issues],
+        warnings: [...(topology.warnings || []), ...variationWarnings, ...localQc.warnings],
         subtitles: { ...topology.subtitles, maxTextChars: maxSubtitleChars, displayLimit: subtitleDisplayLimit, longCueCount: longSubtitleCount },
         variation,
+        localQc,
         sampledFrames: sampled.frameFiles.map((file) => portableRelative(root, file)),
         sampledTimestamps: sampled.timestamps,
         contactSheet: contactSheet ? portableRelative(root, contactSheet.file) : null,
@@ -4868,7 +4742,47 @@ async #mimoReferenceDataUrl(root, input) {
       reviewed = await renderAndReview(attempt)
     }
     const { renderedPath, renderedInfo, videoProbe, technical, sampled, review, reviewReportPath } = reviewed
-    if (!review.passed) fail('SPOKEN_VIDEO_VIDEO_EDITORIAL_REVIEW_FAILED', `成片经过 ${VIDEO_EDITORIAL_REPAIR_MAX_ATTEMPTS} 次定向修复后仍未通过独立审片：${review.summary}`)
+    if (!review.passed) {
+      // 审片否决时**先把成片落盘**，再报错。
+      //
+      // 2026-10-26 实测的坑：成片其实已经渲染完（30MB / 6859 帧 / 550 秒那种也完整），
+      // 技术质检也过了，只因为审片判了 3 处排版 major，整轮直接判死——而提交动作在
+      // 这一行之后，于是盘上那条成片**从来没进过 `media/videos/`**，项目里也查不到，
+      // 用户在「视频 / 预览」页只看到一句失败，没有任何可用产物，也没有放行入口。
+      //
+      // 所以这里补一步：否决也照常落盘成片与质检报告，让这条 run 留下可交付物。
+      // 落盘不等于放行——它仍然不会进发布页（qc 未通过、没有 userOverride），
+      // 只是给了用户一个「我看过审片意见，这条我要」的选择。放行由人工显式触发。
+      await this.#setVideoPhase(root, run.id, 'committing')
+      const rejectedVideoFile = `media/videos/${run.id}.mp4`
+      const rejectedVideoPath = resolve(root, rejectedVideoFile)
+      await mkdir(dirname(rejectedVideoPath), { recursive: true, mode: 0o700 })
+      await copyFile(renderedPath, rejectedVideoPath)
+      const rejectedReportFile = `media/qc/${run.id}.json`
+      const rejectedReviewFile = `media/qc/${run.id}-editorial.json`
+      await this.#write(root, rejectedReportFile, `${JSON.stringify({ generatedAt: new Date().toISOString(), projectId: run.projectId, videoTaskId: run.id, technical, review }, null, 2)}\n`)
+      await this.#write(root, rejectedReviewFile, `${JSON.stringify({ generatedAt: new Date().toISOString(), projectId: run.projectId, videoTaskId: run.id, ...review }, null, 2)}\n`)
+      // 把「已渲染但被审片否决」这条事实连同产物一起记进 run，前端据此给出放行入口。
+      // technicalPassed=true 与 review.passed=false 同时成立，正是需要人工裁量的形态。
+      await this.#mutateRun(root, run.id, (current) => ({
+        ...current,
+        rejectedCut: {
+          videoFile: rejectedVideoFile,
+          bytes: renderedInfo.size,
+          durationSeconds: videoProbe.durationSeconds,
+          width: videoProbe.width,
+          height: videoProbe.height,
+          fps: videoProbe.fps,
+          technicalPassed: technical.passed === true,
+          reviewScore: review.score,
+          reviewSummary: review.summary,
+          reportFile: rejectedReportFile,
+          reviewFile: rejectedReviewFile,
+          recordedAt: new Date().toISOString(),
+        },
+      })).catch(() => {})
+      fail('SPOKEN_VIDEO_VIDEO_EDITORIAL_REVIEW_FAILED', `成片经过 ${VIDEO_EDITORIAL_REPAIR_MAX_ATTEMPTS} 次定向修复后仍未通过独立审片：${review.summary}`)
+    }
 
     await this.#setVideoPhase(root, run.id, 'committing')
     const videoFile = `media/videos/${run.id}.mp4`
@@ -4981,7 +4895,7 @@ async #mimoReferenceDataUrl(root, input) {
 
   /**
    * Deterministic technical QC run inline by the renderers that have no
-   * editorial-review stage (whiteboard, local-ffmpeg).
+   * editorial-review stage (local-ffmpeg).
    *
    * Without this the video artifact lands with no `qc` sibling, and the publish
    * shelf — which only lists projects whose `qc.passed === true` — silently

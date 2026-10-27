@@ -33,6 +33,10 @@ const HISTORICAL = [
     category: 'credential.quota',
     retryable: true,
     mustMention: /退避/u,
+    // 2026-10-26 实测：小米 MiMo 对**声音克隆**的限流按「同时在飞的请求数」算，
+    // 不按速率。所以退避不是解药——真正要说的是「已经串行了，仍失败就是配额
+    // 不够」。文案缺了这层，用户会一直等一个不会自己好的东西。
+    mustMentionAll: [/退避/u, /串行/u, /配额/u],
   },
   {
     name: '桥接 fetch failed',
@@ -108,6 +112,21 @@ const HISTORICAL = [
     mustMention: /字幕/u,
   },
   {
+    // 2026-10-26 12:17 真实报文。审片 Agent 指出了具体视觉问题（元素迟到、
+    // 箭头语义与结论相反），定向修复 2 轮仍未达标。此前这条被误报成
+    // code.defect「内部缺陷，请反馈给开发者」——但根因是画面质量没达标，
+    // 不是代码 bug，重跑/再修能解。
+    name: '独立审片不通过（修复后仍未达标）',
+    message: '成片经过 2 次定向修复后仍未通过独立审片：技术质检通过（1920x1080/30fps/211.35s/音轨与74条字幕齐全）。全片17个场景以 React/CSS/SVG 程序化绘制，未退化成纯文字卡片。编辑层面存在2处major：S14第三条建议在旁白念到时画面仍是约5%不透明度的幽灵残影且扣减算式迟到约3秒（164.778s 实测）；"抄底？接飞刀"用一支向上的箭头表达，画面语义与结论相反（145.558s 实测）。',
+    category: 'content.editorial_rejected',
+    retryable: false,
+    mustMention: /画面|审片/u,
+    // 修法必须给出真正能解决它的动作（重试/重跑），而且**不能**再说成
+    // 「这是代码缺陷，请反馈给开发者」——审片不通过是画面质量没达标。
+    mustMentionAll: [/重试|重跑/u],
+    mustNotMention: /开发者/u,
+  },
+  {
     name: '固定墙钟超时（历史误杀）',
     message: 'Error [SPOKEN_VIDEO_SCHEDULE_TIMEOUT] 配音超过 10 分钟仍未完成。',
     category: 'timeout.ceiling',
@@ -128,6 +147,18 @@ const HISTORICAL = [
     retryable: false,
     mustMention: /开发者/u,
   },
+  {
+    // 2026-10-25 09:30 真实报文。网关对默认模型
+    // workbuddy-ai/minimax-m3.1-flash 的每次请求都回这条 429，而同网关下
+    // hy3 / deepseek-v4.1-flash / group/smart-split 全部 200——所以它不是
+    // 「等会儿就好」的限流，退避重试永远等不到恢复，必须换成不用等的那种处理。
+    name: '默认模型额度耗尽（网关 429 Credits exhausted）',
+    message: '生成未正常结束（error）：WorkBuddy AI: Credits exhausted. Please visit the link below to purchase add-on packs and get more credits: https://www.codebuddy.ai/profile/usage — WorkBuddy requires an active credit package even for 0-rate free models; check your account package balance',
+    category: 'credential.model_quota',
+    retryable: false,
+    mustMention: /模型/u,
+    mustMentionAll: [/模型/u, /hy3|deepseek-v4\.1-flash/u],
+  },
 ]
 
 for (const testCase of HISTORICAL) {
@@ -140,6 +171,11 @@ for (const testCase of HISTORICAL) {
     // 例如 content.qc_failed 必须同时保住极简风格出口和换 Edge 指引，任一项脱落都红。
     for (const pattern of testCase.mustMentionAll || []) {
       assert.match(failure.remedy, pattern, `修法必须包含：${pattern}`)
+    }
+    // mustNotMention：修法**不能**把问题推给开发者。用于钉死「这不是代码 bug」
+    // 这类事实——一旦修法又出现「反馈给开发者」，误报就回来了。
+    for (const pattern of [testCase.mustNotMention].flat().filter(Boolean)) {
+      assert.doesNotMatch(failure.remedy, pattern, `修法不应包含：${pattern}`)
     }
     assert.ok(CATEGORY_LABEL[failure.category], '每个分类都要有中文标签供界面展示')
   })
@@ -160,6 +196,35 @@ test('an unmatched error is treated as our own defect and never retried', () => 
   assert.equal(failure.category, 'code.defect')
   assert.equal(failure.retryable, false)
   assert.equal(failure.autoRepair, null)
+})
+
+test('模型额度耗尽不会被误判成可退避重试的普通限流', () => {
+  // 这条规则是 2026-10-25 加的：新规则必须排在小米 TTS 那条通用 429 之前，
+  // 否则「额度用完了」会被当成「限流一会儿就好」，退避重试把阶段预算烧光
+  // 也等不到恢复。反过来，TTS 那条带 429 的真实报文不能被新规则抢走。
+  const modelQuota = classifyFailure({
+    error: new Error('生成未正常结束（error）：WorkBuddy AI: Credits exhausted. Please visit https://www.codebuddy.ai/profile/usage'),
+  })
+  assert.equal(modelQuota.category, 'credential.model_quota')
+  assert.equal(modelQuota.retryable, false, '额度耗尽重试不会恢复，不能给它退避重试')
+
+  // pack 在完全挖不到线索时给的兜底文案也必须落在这个分类上：它描述的
+  // 就是「请求还没产出任何内容就断了」，把它留在可退避的 quota 桶里会白等。
+  const fallback = classifyFailure({
+    error: new Error('生成未正常结束（error）：模型在返回任何内容前就结束了本次请求（未产生 assistant 消息），最常见的原因是默认模型的额度已经用完'),
+  })
+  assert.equal(fallback.category, 'credential.model_quota')
+
+  // 反过来：真正的限流不能被新规则抢走，它们该退避重试。
+  const ttsThrottle = classifyFailure({
+    error: new Error('SciTiger TTS任务failed：第 1/25 段云端合成失败（已重试）：小米 TTS 返回 429：Too many requests'),
+  })
+  assert.equal(ttsThrottle.category, 'credential.quota', 'TTS 的限流仍走可退避的那条')
+  assert.equal(ttsThrottle.retryable, true)
+
+  const plainThrottle = classifyFailure({ error: new Error('模型返回 429 Too many requests') })
+  assert.equal(plainThrottle.category, 'credential.quota', '普通限流不该被判成额度耗尽')
+  assert.equal(plainThrottle.retryable, true)
 })
 
 test('signatures collapse volatile parts so one root cause clusters into one row', () => {

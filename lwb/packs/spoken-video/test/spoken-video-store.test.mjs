@@ -503,6 +503,77 @@ test('qc commit rejects userOverride when there are no issues', async (t) => {
   )
 })
 
+/**
+ * 审片否决也能人工放行。
+ *
+ * 2026-10-26 实测的缺口：成片已渲染完（30MB）、**技术质检通过**、审片判了
+ * 3 处排版 major，整轮判死。因为提交动作在审片之后，盘上的成片从未进过
+ * `media/videos/`，项目里查不到，用户只看到「全部失败」——**没有任何放行出口**。
+ * 后端守卫原来只认「技术质检 issues」，而这里 technical.issues 是空的。
+ *
+ * 这两条用例锁住：技术质检过 + 审片不过，也必须能放行；而两者都过时仍然拒绝
+ * （无病放行）。
+ */
+test('qc commit allows userOverride when technical passed but editorial review failed', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await projectThroughVideo(store, currentAgent)
+  const qcCommit = await store.commitProduced(currentAgent, {
+    projectId: project.id, expectedRevision: project.revision, stage: 'qc', idempotencyKey: 'm0-qc-editorial-release-01', source: 'spoken-video/remotion-agent',
+    payload: {
+      mode: 'ai-director', reportFile: 'media/qc/v.json', passed: false,
+      // 技术质检是过的：issues 为空。整条不过是因为审片。
+      technical: { passed: true, issues: [], warnings: [], video: {}, audio: {}, subtitles: { cueCount: 1 } },
+      review: {
+        passed: false, technicalPass: true, editorialPass: false, evidencePassed: true, score: 79,
+        summary: '构图与可读性合格，但若干帧主画面与同屏字幕错配。',
+        findings: [{ severity: 'major', category: 'relevance', message: '196.62s 右侧清单第 5 条被结算条压住。' }],
+        reviewEvidence: [
+          { timestampSeconds: 8.594, observedMainVisual: '开场标题页，大字标题与印章。' },
+          { timestampSeconds: 196.62, observedMainVisual: '成本账：左收益栏、右五条清单。' },
+        ],
+      },
+      userOverride: true,
+    },
+  })
+  assert.equal(qcCommit.artifact.passed, undefined, 'artifactPointer 不得带 passed:true')
+  const detail = await store.get(currentAgent, { projectId: project.id })
+  assert.equal(detail.artifacts.qc.data.passed, false, '整条没通过的事实不被改写')
+  assert.equal(detail.artifacts.qc.data.userOverride, true, '放行标记已落盘')
+  assert.equal(detail.artifacts.qc.data.technical.passed, true, '技术质检的结论保持原样')
+  assert.equal(detail.artifacts.qc.data.review.passed, false, '审片结论保持原样')
+})
+
+test('qc commit still rejects userOverride when both gates passed', async (t) => {
+  // 反向锁：两道门都过了还放行就是无病放行，必须拒绝——否则「放行」会变成
+  // 一个可以随手点掉的开关，失去「我看过缺陷、我认可」的含义。
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await projectThroughVideo(store, currentAgent)
+  await assert.rejects(
+    store.commitProduced(currentAgent, {
+      projectId: project.id, expectedRevision: project.revision, stage: 'qc', idempotencyKey: 'm0-qc-bothpassed-01', source: 'spoken-video/remotion-agent',
+      payload: {
+        mode: 'ai-director', reportFile: 'media/qc/v.json', passed: true,
+        technical: { passed: true, issues: [], warnings: [], video: {}, audio: {}, subtitles: { cueCount: 1 } },
+        review: {
+          passed: true, technicalPass: true, editorialPass: true, evidencePassed: true, score: 88,
+          summary: '全部通过。',
+          findings: [],
+          reviewEvidence: [
+            { timestampSeconds: 8.594, observedMainVisual: '开场标题页。' },
+            { timestampSeconds: 60, observedMainVisual: '流程示意图。' },
+          ],
+        },
+        userOverride: true,
+      },
+    }),
+    /没有质检问题，不需要人工放行。/u,
+  )
+})
+
 test('packaging gate: blocked without release, allowed with userOverride (two-project)', async (t) => {
   const cwd = await workspace(t)
   const store = new SpokenVideoProjectStore()

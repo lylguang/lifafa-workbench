@@ -1249,24 +1249,6 @@ window.__ModuleLoader__.load({
         .sv-tp-srcgrid { grid-template-columns:repeat(2,minmax(0,1fr)); }
       }
       @media (prefers-reduced-motion:reduce) { .sv-page * { animation:none !important; transition:none !important; } }
-
-      /* 白板线稿准备面板：选择制作方式后出现，按"状态 → 操作 → 网格"三段布局 */
-      .sv-lineart-panel { display:grid; gap:10px; padding:13px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-surface); }
-      .sv-lineart-head { display:flex; flex-wrap:wrap; align-items:baseline; justify-content:space-between; gap:8px; }
-      .sv-lineart-head strong { font-size:var(--lwb-text-base,14px); }
-      .sv-lineart-stat { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); }
-      .sv-lineart-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
-      .sv-lineart-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:9px; }
-      .sv-lineart-card { display:grid; gap:6px; padding:8px; border:1px solid var(--lwb-line); border-radius:8px; }
-      .sv-lineart-card-head { display:flex; align-items:baseline; justify-content:space-between; gap:6px; }
-      .sv-lineart-no { color:var(--lwb-blue); background:var(--lwb-blue-soft); border-radius:4px; padding:1px 6px; font-size:var(--lwb-text-xs,12px); font-weight:700; }
-      .sv-lineart-time { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); font-variant-numeric:tabular-nums; }
-      .sv-lineart-thumb { aspect-ratio:16/9; display:grid; place-items:center; overflow:hidden; border-radius:6px; background:#f5ebd7; }
-      .sv-lineart-thumb img { width:100%; height:100%; object-fit:cover; }
-      .sv-lineart-empty { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); }
-      .sv-lineart-text { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); line-height:1.5; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-      body[data-ds-dark-theme] .sv-lineart-panel { border-color:var(--lwb-line); }
-      body[data-ds-dark-theme] .sv-lineart-thumb { background:#2a2a24; }
     `;
     function installStyle() {
       const existing = document.getElementById('lwb-spoken-video-style');
@@ -6080,12 +6062,6 @@ window.__ModuleLoader__.load({
       const [bgmVolume, setBgmVolume] = React.useState('0.12');
       const [bgmUploading, setBgmUploading] = React.useState(false);
       const bgmFileInputRef = React.useRef(null);
-      const [renderer, setRenderer] = React.useState('remotion');
-      const [wbLineArtPlan, setWbLineArtPlan] = React.useState(null);
-      const [wbLineArtLoading, setWbLineArtLoading] = React.useState(false);
-      const [wbLineArtError, setWbLineArtError] = React.useState(null);
-      const [wbLineArtJob, setWbLineArtJob] = React.useState(null);
-      const [wbPlanning, setWbPlanning] = React.useState(false);
       const [sourcePickerOpen, setSourcePickerOpen] = React.useState(false);
       const [sourceQuery, setSourceQuery] = React.useState('');
       const [sourcePage, setSourcePage] = React.useState(0);
@@ -6129,7 +6105,6 @@ window.__ModuleLoader__.load({
         setVisualBrief(['默认信息型竖屏口播版式。', '默认信息型口播版式。', DEFAULT_VIDEO_VISUAL_BRIEF].includes(savedBrief) ? '' : savedBrief);
         setSubtitleEnabled(savedVideo ? savedVideo.subtitleEnabled !== false : done(detail, 'subtitles'));
         setOrientation(savedVideo?.orientation === 'portrait' ? 'portrait' : 'landscape');
-        setRenderer(savedVideo?.renderer === 'whiteboard' ? 'whiteboard' : 'remotion');
         setBackgroundMusic(savedVideo?.backgroundMusic || null);
         setBgmVolume(String(savedVideo?.bgmVolume ?? 0.12));
       }, [detail?.id, detail?.revision]);
@@ -6145,49 +6120,12 @@ window.__ModuleLoader__.load({
       const hasRequiredSource = detail && done(detail, 'script') && done(detail, 'voiceover') && (!subtitleEnabled || done(detail, 'subtitles'));
       const selectedSource = candidates.find((project) => project.id === selectedId) || null;
       const projectForTask = (task) => projects.find((project) => project.id === task.projectId) || null;
-      // ── 白板线稿准备：分幕规划 / 批量生成 / 轮询进度 ──
-      const loadWbLineArt = React.useCallback(async (projectId) => {
-        if (!projectId) { setWbLineArtPlan(null); return; }
-        setWbLineArtLoading(true);
-        try {
-          const value = await remote(packId, 'whiteboardLineArtPlan', { projectId });
-          setWbLineArtPlan(value); setWbLineArtError(null);
-        } catch (cause) { setWbLineArtError(cause.message); setWbLineArtPlan(null); }
-        finally { setWbLineArtLoading(false); }
-      }, []);
-
-      React.useEffect(() => {
-        if (renderer === 'whiteboard') void loadWbLineArt(detail?.id);
-      }, [renderer, detail?.id, loadWbLineArt]);
-
-      const generateWbLineArt = async ({ force = false, scenes } = {}) => {
-        if (!detail) return;
-        setWbLineArtError(null); setWbPlanning(true);
-        try {
-          const started = await remote(packId, 'startWhiteboardLineArt', { projectId: detail.id, force, scenes });
-          setWbPlanning(false);
-          if (started.skipped) { setWbLineArtError(null); await loadWbLineArt(detail.id); return; }
-          // 轮询后台批量任务；完成或失败后重拉 plan 拿新缩略图
-          await new Promise((resolve) => {
-            const timer = setInterval(async () => {
-              try {
-                const job = await remote(packId, 'whiteboardLineArtStatus', { projectId: detail.id });
-                setWbLineArtJob(job && job.phase !== 'idle' ? job : null);
-                if (!job || ['completed', 'failed', 'cancelled', 'idle'].includes(job.phase)) {
-                  clearInterval(timer); resolve();
-                }
-              } catch (cause) { setWbLineArtError(cause.message || String(cause)); clearInterval(timer); resolve(); }
-            }, 2000);
-          });
-        } catch (cause) { setWbLineArtError(cause.message); }
-        finally { setWbPlanning(false); setWbLineArtJob(null); if (detail) await loadWbLineArt(detail.id); }
-      };
 
       const createVideoTask = async (source = detail, settings = { visualBrief, subtitleEnabled, orientation, backgroundMusic, bgmVolume: Number(bgmVolume) }) => {
         if (!source) return;
         setSubmitting(source.id);
         try {
-          await remote(packId, 'startVideoRender', { projectId: source.id, expectedRevision: source.revision, visualBrief: settings.visualBrief.trim() || DEFAULT_VIDEO_VISUAL_BRIEF, subtitleEnabled: settings.subtitleEnabled, orientation: settings.orientation === 'portrait' ? 'portrait' : 'landscape', renderer, backgroundMusic: settings.backgroundMusic || null, bgmVolume: settings.backgroundMusic ? Number(settings.bgmVolume ?? 0.12) : null });
+          await remote(packId, 'startVideoRender', { projectId: source.id, expectedRevision: source.revision, visualBrief: settings.visualBrief.trim() || DEFAULT_VIDEO_VISUAL_BRIEF, subtitleEnabled: settings.subtitleEnabled, orientation: settings.orientation === 'portrait' ? 'portrait' : 'landscape', renderer: 'remotion', backgroundMusic: settings.backgroundMusic || null, bgmVolume: settings.backgroundMusic ? Number(settings.bgmVolume ?? 0.12) : null });
           await taskFeed.refresh(); setError(null);
         } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
       };
@@ -6263,7 +6201,36 @@ window.__ModuleLoader__.load({
           setNotice('已人工放行：这条成片已进入「发布」页，原已生成的发布文案/封面已被清掉，需重新生成封面。');
         } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
       };
-      // 删一条已结束的视频任务及其产物。视频渲染产物动辄几百 MB，失败任务尤其占地方。
+      /**
+       * 放行「审片否决但技术质检通过」的成片。
+       *
+       * 与 releaseVideoCut 的区别：那条处理的是「技术质检没过」（qc 记录存在、
+       * 带 issues）；这条处理的是「技术质检过了、审片不过」——这时根本没有 qc
+       * 记录，结论在 run.rejectedCut 里。所以放行要按 rejectedCut 重建一份 qc
+       * 提交，而不是复用已有记录。
+       *
+       * 2026-10-26 补：此前这种成片既进不了 result（拿不到 video），也没有放行
+       * 按钮，整轮判死后成片等于白扔。
+       */
+      const releaseRejectedCut = async (task) => {
+        const project = projectForTask(task);
+        const cut = task.rejectedCut;
+        if (!project || !cut?.reportFile) {
+          setError('这条成片的质检记录不完整，无法人工放行。');
+          return;
+        }
+        setSubmitting(`release:${task.id}`);
+        try {
+          // 必须走后端受控方法：`commit` 对 qc 阶段一律拒绝
+          // （SPOKEN_VIDEO_STAGE_AUTOMATION_REQUIRED），这是防伪造质检结论的守卫。
+          // releaseRejectedCut 会在后端读回落盘的真实结论、原样提交并只加 userOverride。
+          await remote(packId, 'releaseRejectedCut', { projectId: project.id, taskId: task.id });
+          await taskFeed.refresh();
+          await reload();
+          setError(null);
+          setNotice('已人工放行：这条成片已进入「发布」页，原已生成的发布文案/封面已被清掉，需重新生成封面。');
+        } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
+      };
       const deleteVideoTasks = async (tasks) => {
         const targets = (Array.isArray(tasks) ? tasks : [tasks]).filter(Boolean);
         if (!targets.length || submitting) return;
@@ -6292,6 +6259,17 @@ window.__ModuleLoader__.load({
         const qcFailedWithIssues = task.status === 'succeeded' && Boolean(task.result?.video) && !qcPassed && qcTechnicalIssues.length > 0;
         // 已经点过人工放行：常驻标记，且不再提供放行按钮（避免用户以为没成功而重复点）。
         const qcReleased = qcFailedWithIssues && taskQc?.result?.userOverride === true;
+        // 审片否决但成片已渲染：技术质检过了、审片判了 major，整轮记为 failed。
+        // 2026-10-26 补的出口——此前这种成片既不在 result 里（所以拿不到 video），
+        // 也没有任何放行按钮，用户只看到「全部失败」，盘上的成片等于白扔。
+        // 现在后端在否决时也会落盘并在 run.rejectedCut 里记下产物，这里据此给放行入口。
+        const rejectedCut = task.status === 'failed' && task.rejectedCut && typeof task.rejectedCut === 'object' ? task.rejectedCut : null;
+        // 只有「技术质检通过、纯粹审片不过」才走这条放行：技术质检自己没过时，
+        // 成片可能是空白的，那条路径仍由 qcFailedWithIssues 负责（判据不同、文案也不同）。
+        // 另外要求审片报告自带 ≥2 项证据：没有证据的否决本身站不住，放行等于盲放。
+        // 历史上有条记录证据是 0 项（更早的代码留下的残缺报告），这种不给按钮。
+        const reviewEvidence = Array.isArray(task.pipeline?.review?.reviewEvidence) ? task.pipeline.review.reviewEvidence.length : 0;
+        const editorialRejected = Boolean(rejectedCut) && rejectedCut.technicalPassed === true && reviewEvidence >= 2 && taskQc?.result?.userOverride !== true;
         const liveStatus = task.status === 'running' ? videoPhaseLabel(task.phase) || mediaStatusLabel(task.status) : mediaStatusLabel(task.status);
         const statusClass = task.status === 'failed' ? 'sv-status-error' : task.status === 'succeeded' ? 'sv-stage' : 'sv-status-manual';
         const progress = task.status === 'running' || task.status === 'succeeded' ? videoTaskProgress(task, now) : null;
@@ -6308,9 +6286,16 @@ window.__ModuleLoader__.load({
           // 3) 已人工放行：常驻状态标记，用中性偏冷的新色（不复用 warn 黄），
           //    让用户几天后回看也知道它没经过合格质检。
           qcReleased ? h('p', { className: 'sv-released' }, `已人工放行 · 质检未通过（${qcTechnicalIssues[0] || '技术问题'}）`) : null,
+          // 4) 审片否决但技术质检通过：成片能播，只是审片认为画面有缺陷。
+          //    这里把审片的分说清楚，让用户自己判断值不值得放行。
+          editorialRejected ? h('p', { className: 'sv-warn' }, `这条成片技术质检已通过，但独立审片判为不通过（${rejectedCut.reviewScore != null ? `${rejectedCut.reviewScore} 分` : '未评分'}）：${String(rejectedCut.reviewSummary || '审片未给出摘要').slice(0, 160)}。成片已保留，不会自动进入「发布」页；若你认可这个质量，可点下方按钮人工放行。`) : null,
           h('div', { className: 'sv-actions' }, task.source?.script?.body ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setScriptDrawer(task) }, '查看稿件') : null, task.source?.voiceover?.audio || task.source?.subtitles || task.input?.backgroundMusic ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setMediaDrawer(task) }, '查看配音/字幕/BGM') : null, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSummaryDrawer(task) }, '执行详情'), task.status === 'succeeded' && task.result?.video && !qcPassed ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(submitting) || taskFeed.anyRunning, onClick: () => ask({ title: '补做技术质检', copy: `将对「${task.projectTitle}」的现有成片补做一次技术质检（检查分辨率、帧率、音轨、时长与字幕），通过后该成片会出现在「发布」页。不会重新渲染视频。`, confirm: '开始质检', onConfirm: () => { void runTechnicalQc(task); } }) }, submitting === `qc:${task.id}` ? '正在提交…' : '补做技术质检') : null,
           // 人工放行：仅当质检失败且确有技术问题、且尚未放行时显示。放过之后按钮消失。
           qcFailedWithIssues && !qcReleased ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(submitting) || taskFeed.anyRunning, onClick: () => ask({ title: '人工放行这条成片', copy: `这条成片技术质检未通过（${qcTechnicalIssues[0]}）。放行后它会进入「发布」页，可正常打包与生成封面，但「质检通过」标记不会点亮。\n\n如果你要的就是纯字幕/静态海报风格，可以继续。\n如果这不是你要的效果，说明画面没渲染出来——放行后发出去就是一条空白视频。\n\n注意：放行会按当前稿件版本重新计算发布资料，原已生成的发布文案/封面将被清掉，放行后需重新生成封面。`, confirm: '确认放行', onConfirm: () => { void releaseVideoCut(task); } }) }, submitting === `release:${task.id}` ? '正在提交…' : '这是我要的静态风格，直接采用') : null,
+          // 审片否决的放行入口。语义与技术质检那条**不同**：那边是「画面可能压根没画出来」，
+          // 这边是「画面画出来了、技术指标也合格，只是审片认为表达有缺陷」——所以文案
+          // 强调「我认可这个质量」，而不是「这是我要的静态风格」。
+          editorialRejected ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(submitting) || taskFeed.anyRunning, onClick: () => ask({ title: '放行这条审片未通过的成片', copy: `独立审片判为不通过（${rejectedCut.reviewScore != null ? `${rejectedCut.reviewScore} 分` : '未评分'}）。技术质检是通过的，成片能正常播放，审片指的是表达层面的问题。\n\n审片意见：${String(rejectedCut.reviewSummary || '').slice(0, 300)}\n\n放行后它会进入「发布」页，可正常打包与生成封面，但「质检通过」标记不会点亮。\n\n建议先点开成片看一眼再决定——如果你也认可这个质量，就放行；如果不认可，关掉这个对话框去改稿重跑。\n\n注意：放行会按当前稿件版本重新计算发布资料，原已生成的发布文案/封面将被清掉，放行后需重新生成封面。`, confirm: '我认可这个质量，放行', onConfirm: () => { void releaseRejectedCut(task); } }) }, submitting === `release:${task.id}` ? '正在提交…' : '我认可这个质量，放行') : null,
           task.status === 'failed' ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: submitting === task.projectId, onClick: () => retryTask(task) }, submitting === task.projectId ? '正在提交…' : '重试') : null, qcPassed ? h('span', { className: 'sv-meta' }, task.result?.qc ? '技术质检与独立审片通过' : '技术质检通过') : null, ['succeeded', 'failed'].includes(task.status) ? h('button', { type: 'button', className: 'lwb-danger-button', disabled: Boolean(submitting), onClick: () => ask({ title: '删除这条视频任务？', copy: `将删除「${task.projectTitle}」这条${task.status === 'failed' ? '失败' : '已完成'}的视频任务记录，以及磁盘上的成片与渲染中间文件（视频产物通常有几百 MB）。删除后无法恢复；项目的稿件与配音不受影响，只是这条渲染记录不再出现在列表里。`, confirm: '确认删除', danger: true, onConfirm: () => { void deleteVideoTasks(task); } }) }, submitting === `delete:${task.id}` ? '正在删除…' : '删除') : null),
         );
       };
@@ -6319,41 +6304,7 @@ window.__ModuleLoader__.load({
         candidates.length ? h(React.Fragment, null, h('div', { className: 'sv-list' }, candidates.slice(0, 6).map(sourceCard)), candidates.length > 6 ? h('button', { type: 'button', className: 'sv-sc-more', onClick: () => { setSourceQuery(''); setSourcePage(0); setSourcePickerOpen(true); } }, `还有 ${candidates.length - 6} 篇 · 查看更多`) : null) : h('div', { className: 'sv-empty' }, '当前账号暂无可制作视频的稿件。若配音已完成，请到「配音 / 字幕」检查项目同步状态。'),
         detail ? h('section', { className: 'sv-form sv-video-create' },
           h('div', { className: 'sv-section-head' }, h('h3', null, '创建视频任务'), h('span', null, selectedSource?.title || '')),
-          h('p', { className: 'sv-note' }, renderer === 'whiteboard' ? (subtitleEnabled ? '白板手绘将读取当前稿件的配音和字幕，按字幕叙事顺序逐幕绘制成片，再由独立会话审片。' : '白板手绘将按字幕时间轴逐幕绘制成片（当前任务未烧录字幕），再由独立会话审片。') : subtitleEnabled ? 'DSH 视觉导演将读取当前稿件、配音和字幕，直接制作 Remotion 成片，再由独立会话审片。' : done(detail, 'subtitles') ? '当前任务将跳过已有字幕，仅使用稿件和配音制作成片。' : '当前稿件没有字幕，将直接制作无字幕成片。'),
-          h('div', { className: 'sv-video-option' }, h('span', null, '制作方式'), h('div', { className: 'sv-video-orientation', role: 'radiogroup', 'aria-label': '制作方式' }, [{ id: 'remotion', label: 'AI 图文（Remotion）' }, { id: 'whiteboard', label: '白板手绘' }].map((item) => h('button', { key: item.id, type: 'button', role: 'radio', 'aria-checked': renderer === item.id, 'data-active': renderer === item.id ? 'true' : 'false', onClick: () => setRenderer(item.id) }, item.label)))),
-          renderer === 'whiteboard' ? h('div', { className: 'sv-lineart-panel' },
-            h('div', { className: 'sv-lineart-head' },
-              h('strong', null, '线稿准备'),
-              wbLineArtPlan ? h('span', { className: 'sv-lineart-stat' },
-                `共 ${wbLineArtPlan.total} 幕 · 已有 ${wbLineArtPlan.generated} 张`,
-                wbLineArtPlan.engine?.up ? ' · 生图引擎就绪' : wbLineArtPlan.engine?.reachable ? ' · 生图引擎未连接' : ' · 本地桥接未运行',
-              ) : h('span', { className: 'sv-lineart-stat' }, wbLineArtLoading ? '读取分幕…' : ''),
-            ),
-            h('p', { className: 'sv-note' }, '每幕一张线稿，按字幕叙事顺序逐笔画出；线稿由本机 Qwen-Image 按视觉规范生成，生成后请逐张确认，不满意可单独重画。'),
-            h('div', { className: 'sv-lineart-actions' },
-              h('button', { type: 'button', className: 'lwb-primary-button', disabled: wbLineArtLoading || wbPlanning || (wbLineArtJob && wbLineArtJob.phase === 'running') || !detail, onClick: () => void generateWbLineArt({}) },
-                wbLineArtJob && wbLineArtJob.phase === 'running' ? `生成中 ${wbLineArtJob.done || 0}/${wbLineArtJob.total}…` : '生成缺失线稿'),
-              wbLineArtPlan && wbLineArtPlan.generated > 0 ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: wbLineArtLoading || wbPlanning || (wbLineArtJob && wbLineArtJob.phase === 'running'), onClick: () => void generateWbLineArt({ force: true }) }, '全部重新生成') : null,
-            ),
-            wbLineArtError ? h('p', { className: 'sv-error' }, wbLineArtError) : null,
-            wbPlanning ? h('p', { className: 'sv-note' }, '分镜师正在把每幕旁白转成画面描述（约 1-2 分钟）…') : null,
-            wbLineArtJob && wbLineArtJob.phase === 'running' && wbLineArtJob.current ? h('p', { className: 'sv-note' }, `正在生成第 ${wbLineArtJob.current} 幕…`) : null,
-            wbLineArtPlan && wbLineArtPlan.scenes.length ? h('div', { className: 'sv-lineart-grid' },
-              wbLineArtPlan.scenes.map((scene) => h('div', { key: scene.index, className: 'sv-lineart-card' },
-                h('div', { className: 'sv-lineart-card-head' },
-                  h('span', { className: 'sv-lineart-no' }, `幕 ${scene.index}`),
-                  h('span', { className: 'sv-lineart-time' }, `${(scene.startMs / 1000).toFixed(0)}–${(scene.endMs / 1000).toFixed(0)}s`),
-                ),
-                h('div', { className: 'sv-lineart-thumb' },
-                  scene.thumb ? h('img', { src: scene.thumb, alt: `第 ${scene.index} 幕线稿` })
-                    : h('div', { className: 'sv-lineart-empty' }, '无线稿'),
-                ),
-                h('p', { className: 'sv-lineart-text', title: scene.text }, scene.text),
-                h('button', { type: 'button', className: 'lwb-plain-button', disabled: wbLineArtLoading || wbPlanning || (wbLineArtJob && wbLineArtJob.phase === 'running'), onClick: () => void generateWbLineArt({ scenes: [scene.index], force: true }) }, '重新生成本幕'),
-              )),
-            ) : null,
-          ) : null,
-          renderer === 'whiteboard' ? null : h('p', { className: 'sv-note' }, subtitleEnabled ? 'DSH 视觉导演将读取当前稿件、配音和字幕，直接制作 Remotion 成片，再由独立会话审片。' : done(detail, 'subtitles') ? '当前任务将跳过已有字幕，仅使用稿件和配音制作成片。' : '当前稿件没有字幕，将直接制作无字幕成片。'),
+          h('p', { className: 'sv-note' }, subtitleEnabled ? 'DSH 视觉导演将读取当前稿件、配音和字幕，直接制作 Remotion 成片，再由独立会话审片。' : done(detail, 'subtitles') ? '当前任务将跳过已有字幕，仅使用稿件和配音制作成片。' : '当前稿件没有字幕，将直接制作无字幕成片。'),
           h('div', { className: 'sv-video-option' }, h('span', null, '视频方向'), h('div', { className: 'sv-video-orientation', role: 'radiogroup', 'aria-label': '视频方向' }, [{ id: 'landscape', label: '横屏 16:9' }, { id: 'portrait', label: '竖屏 9:16' }].map((item) => h('button', { key: item.id, type: 'button', role: 'radio', 'aria-checked': orientation === item.id, 'data-active': orientation === item.id ? 'true' : 'false', onClick: () => setOrientation(item.id) }, item.label)))),
           h('label', { className: 'sv-checks' }, h('span', null, h('input', { type: 'checkbox', checked: subtitleEnabled, disabled: !done(detail, 'subtitles'), onChange: (event) => setSubtitleEnabled(event.target.checked) }), '启用字幕')),
           h('div', { className: 'sv-video-option' },
@@ -6369,7 +6320,7 @@ window.__ModuleLoader__.load({
             ),
           ),
           h('textarea', { className: 'sv-textarea', value: visualBrief, maxLength: 6000, placeholder: '可选：补充视觉风格、表现重点或必须避开的表达；留空由 AI 视觉导演自主决定', onChange: (event) => setVisualBrief(event.target.value) }),
-          h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-primary-button', disabled: submitting === detail.id || bgmUploading || !hasRequiredSource, onClick: () => ask({ title: '创建视频任务', copy: renderer === 'whiteboard' ? `将为「${detail.title}」按字幕叙事顺序绘制白板手绘成片（${orientation === 'landscape' ? '横屏 16:9' : '竖屏 9:16'}）。任务会冻结当前稿件、配音${subtitleEnabled ? '、字幕' : ''}，按 media/whiteboard/ 下的线稿逐幕渲染并合成配音音轨，并在技术质检后交给独立 DSH 会话审片；任一环节不通过都会直接失败。` : `将为「${detail.title}」启动 DSH 视觉导演，制作${orientation === 'landscape' ? '横屏 16:9' : '竖屏 9:16'} Remotion 成片。任务会冻结当前稿件、配音${subtitleEnabled ? '、字幕' : ''}${backgroundMusic ? `和 BGM「${backgroundMusic.name}」` : ''}，并在技术质检后交给独立 DSH 会话审片；任一环节不通过都会直接失败。`, confirm: '确认创建', onConfirm: () => { void createVideoTask(); } }) }, submitting === detail.id ? '正在提交…' : '生成视频')),
+          h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-primary-button', disabled: submitting === detail.id || bgmUploading || !hasRequiredSource, onClick: () => ask({ title: '创建视频任务', copy: `将为「${detail.title}」启动 DSH 视觉导演，制作${orientation === 'landscape' ? '横屏 16:9' : '竖屏 9:16'} Remotion 成片。任务会冻结当前稿件、配音${subtitleEnabled ? '、字幕' : ''}${backgroundMusic ? `和 BGM「${backgroundMusic.name}」` : ''}，并在技术质检后交给独立 DSH 会话审片；任一环节不通过都会直接失败。`, confirm: '确认创建', onConfirm: () => { void createVideoTask(); } }) }, submitting === detail.id ? '正在提交…' : '生成视频')),
         ) : null,
       );
       const taskPanel = h('section', { className: 'sv-section sv-video-task-list' }, h('div', { className: 'sv-section-head' }, h('h3', null, '视频制作任务'), h('span', { role: 'status', 'aria-live': 'polite' }, taskFeed.anyRunning ? '任务执行中' : `共 ${taskFeed.total} 条`)), h('div', { className: 'sv-video-task-tools' }, h('input', { className: 'sv-input', value: taskQuery, maxLength: 160, placeholder: '搜索稿件标题、稿件内容或制作说明', onChange: (event) => setTaskQuery(event.target.value) }), h('div', { className: 'sv-filter-chips' }, taskFilters.map((filter) => h('button', { key: filter.id, type: 'button', className: 'sv-filter-chip', 'data-on': taskFilter === filter.id ? 'true' : 'false', onClick: () => setTaskFilter(filter.id) }, `${filter.label} ${filter.count}`)))), taskFeed.items.length ? h('div', { className: 'sv-list' }, taskFeed.items.map(taskCard)) : h('div', { className: 'sv-empty' }, taskFeed.loading ? '正在读取视频任务…' : '尚无视频制作任务。请在左侧选择完成配音的稿件后创建。'), h('div', { className: 'sv-audio-pagebar' }, h('span', { className: 'sv-meta' }, `第 ${taskPage + 1}/${taskPages} 页 · 共 ${taskFeed.total} 条`), h('span', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', 'aria-label': '上一页', disabled: taskPage === 0, onClick: () => setTaskPage((current) => Math.max(0, current - 1)) }, '上一页'), h('button', { type: 'button', className: 'lwb-plain-button', 'aria-label': '下一页', disabled: taskPage + 1 >= taskPages, onClick: () => setTaskPage((current) => current + 1) }, '下一页'))));

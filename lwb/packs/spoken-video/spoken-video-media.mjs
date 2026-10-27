@@ -162,6 +162,9 @@ export function mediaServiceConfig(environment = process.env) {
     // 相邻两次请求最小间隔（毫秒）。官方 RPM 100 看似宽裕，但分段连发实测会 429，
     // 串行 + 2 秒间隔把峰值压到 ~30 RPM。
     mimoMinGapMs: number(environment.LWB_SPOKEN_VIDEO_MIMO_MIN_GAP_MS, '小米 MiMo 请求间隔', 0, 60_000, 2000),
+    // 同时进行的配音请求数。只重叠「等响应」的时间，请求起点间隔仍由
+    // mimoMinGapMs 控制，因此不会提高峰值速率、不增加触发 429 的概率。
+    ttsConcurrency: number(environment.LWB_SPOKEN_VIDEO_TTS_CONCURRENCY, '配音并发数', 1, 8, 4),
     // 音频标签由前端拼进正文发送（见 buildTaggedText），后端只做长度与形态校验。
     mimoMaxAudioTags: number(environment.LWB_SPOKEN_VIDEO_MIMO_MAX_AUDIO_TAGS, '小米 MiMo 音频标签数上限', 0, 20, 8),
   }
@@ -285,7 +288,7 @@ export function mediaCredentialRef(provider) {
 export function normalizeRenderRequest(value) {
   const input = object(value ?? {}, '视频渲染请求')
   const renderer = optionalText(input.renderer, '渲染器', 40) || 'remotion'
-  if (!['remotion', 'local-ffmpeg', 'whiteboard'].includes(renderer)) throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '渲染器只支持 remotion、local-ffmpeg 或 whiteboard。')
+  if (!['remotion', 'local-ffmpeg'].includes(renderer)) throw fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '渲染器只支持 remotion 或 local-ffmpeg。')
   const orientation = oneOf(input.orientation, '视频方向', VIDEO_ORIENTATIONS, 'landscape')
   const requestedBrief = optionalText(input.visualBrief, '画面制作说明', 6000)
   const backgroundMusicInput = input.backgroundMusic == null ? null : object(input.backgroundMusic, '背景音乐')

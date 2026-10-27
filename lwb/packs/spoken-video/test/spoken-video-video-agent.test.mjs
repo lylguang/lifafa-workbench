@@ -189,3 +189,34 @@ test('reviewer prompt no longer excuses empty frames as entrance animation', () 
   assert.match(prompt, /可能落在场景的入场动画期/u)
   assert.match(prompt, /不要只凭接触表下结论/u)
 })
+
+/**
+ * 审片必须用 read_image 直接看图，并禁止自制图像分析脚本。
+ *
+ * 2026-10-26 从会话事件流挖出的失控根因：审片模型有很强的 shell 偏好，
+ * 提示词不指定工具时它会写 node 脚本把 PNG 转成 ASCII 字符画来「读」画面。
+ * 实测失控会话写了 9 个自制脚本、跑 176 次 pwsh、只用 1 次 read_image，
+ * 工具结果 271 万字符，触发 51 次上下文裁剪，单轮审片 82 分钟；
+ * 正常会话则是 13 次 read_image、17 次调用、33k 字符。
+ * 这条契约是那 84% 无效 token 的直接防线，不能被后续改文案时悄悄删掉。
+ */
+test('审片提示词强制 read_image 看图，并禁止自制图像解析脚本', () => {
+  const prompt = buildVideoReviewerPrompt({
+    runDir: '/tmp/video-agent/run-1',
+    technicalReportFile: '/tmp/video-agent/run-1/outputs/technical-qc.json',
+    frameFiles: ['/tmp/video-agent/run-1/outputs/frame-1.png'],
+    timestamps: [0.5],
+  })
+  // 必须点名工具，而不只是说「查看图片」。
+  assert.match(prompt, /必须用 read_image 工具/u)
+  assert.match(prompt, /唯一能真正看到画面/u)
+  // 必须明确禁止那条已知失控路径。
+  assert.match(prompt, /禁止用 pwsh\/shell 处理图片/u)
+  assert.match(prompt, /ASCII 字符画/u)
+  assert.match(prompt, /色彩网格/u)
+  assert.match(prompt, /失控/u)
+  // 只允许读那几个输入文件，产出只有 structured_output。
+  assert.match(prompt, /不要执行 shell 命令/u)
+  assert.match(prompt, /不要新建临时脚本/u)
+  assert.match(prompt, /只有最后那一次 structured_output 提交/u)
+})

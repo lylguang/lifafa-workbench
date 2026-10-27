@@ -75,8 +75,16 @@ export const MIMO_CLONE_TRANSCODE = Object.freeze(['-ac', '1', '-ar', '24000'])
 /** 相邻两次请求开始之间的最小间隔（毫秒）。 */
 export const MIMO_MIN_GAP_MS = 2000
 
-/** 单次请求超时。分段合成一段文本不该超过三分钟。 */
-export const MIMO_TIMEOUT_MS = 180_000
+/**
+ * 单次请求超时。
+ *
+ * 2026-10-25 从 180s 抬到 300s。原来的注释写「分段合成一段文本不该超过三分钟」，
+ * 当天实测被推翻：定时任务「11」的配音在 07:33:51 完成第 2/4 段后，第 3 段挂了
+ * 整整 3 分钟没返回，直接 `The operation was aborted due to timeout` 整轮失败。
+ * 云端 TTS 在高峰期单段超过 3 分钟是真实发生的事，把预算留到 5 分钟才能覆盖
+ * 这种抖动；配合下面的单段重试，偶发慢请求不再等于整轮报废。
+ */
+export const MIMO_TIMEOUT_MS = 300_000
 
 export class MimoError extends Error {
   constructor(message, { code = 'SPOKEN_VIDEO_MIMO_FAILED', retryable = false, status = null, retryAfterMs = null } = {}) {
@@ -92,32 +100,90 @@ export class MimoError extends Error {
 /**
  * 全局节流队列。
  *
- * 桥接侧的教训直接照搬：所有 MiMo 请求在这里串行排队，前一个响应回来之前
- * 不发下一个。失败也必须摘链，否则一次请求抛错会让后面排队的请求跟着拒绝。
+ * 桥接侧的教训直接照搬：所有 MiMo 请求在这里统一排队。失败也必须摘链，
+ * 否则一次请求抛错会让后面排队的请求跟着拒绝。
+ *
+ * 2026-10-26 起由「完全串行」改为「限并发」：原来 `run()` 把整条请求链成
+ * `chain.then(fn)`，即前一个请求的**响应**回来之前不发下一个。配音 27 段
+ * 因此纯粹是 27 次往返的累加（实测约 20 分钟），而限流真正约束的是**请求
+ * 起点速率**（官方 RPM 100，串行 + 2 秒间隔把峰值压到约 30 RPM），不是
+ * 「同时只能有一个在飞」。
+ *
+ * 所以现在分成两件事：
+ *   · `minGapMs` 仍然只控制**起点间隔**——任意两个请求的开始时刻至少差
+ *     这么多，速率上限完全不变，不会比串行更容易触发 429；
+ *   · `concurrency` 控制**同时在飞**的数量，让等待网络的时间重叠起来。
+ *
+ * 只要 minGapMs > 0，吞吐上限就仍由它决定（1000/minGapMs 个每秒）；
+ * 并发只是把「等响应」的空转时间填满。想真正提速就得同时下调 minGapMs，
+ * 那是明确的限流取舍，由调用方（环境变量）决定，不在这一层偷偷放宽。
  */
 export class MimoThrottle {
-  constructor({ minGapMs = MIMO_MIN_GAP_MS, now = () => Date.now(), sleep = null } = {}) {
+  constructor({ minGapMs = MIMO_MIN_GAP_MS, concurrency = 1, now = () => Date.now(), sleep = null } = {}) {
     this.minGapMs = minGapMs
+    this.concurrency = Math.max(1, Math.floor(Number(concurrency) || 1))
     this.now = now
     this.sleep = sleep || ((ms) => new Promise((resolve) => {
       const timer = setTimeout(resolve, ms)
       if (typeof timer.unref === 'function') timer.unref()
     }))
-    this.chain = Promise.resolve()
+    /** 当前在飞的请求数。 */
+    this.active = 0
+    /** 起点间隔的排队链：只用来把「取时间槽」这一步串起来，不覆盖整个请求。 */
+    this.slotChain = Promise.resolve()
     this.lastStart = 0
+    /** 等待并发名额的排队者。 */
+    this.waiters = []
+  }
+
+  async #acquire() {
+    if (this.active < this.concurrency) {
+      this.active += 1
+      return
+    }
+    await new Promise((resolve) => this.waiters.push(resolve))
+    this.active += 1
+  }
+
+  #release() {
+    this.active = Math.max(0, this.active - 1)
+    const next = this.waiters.shift()
+    if (next) next()
   }
 
   run(fn) {
-    const next = this.chain.then(fn)
-    this.chain = next.then(() => {}, () => {})
-    return next
+    return this.#acquire().then(async () => {
+      try {
+        return await fn()
+      } finally {
+        this.#release()
+      }
+    })
   }
 
-  /** 距离上一个请求开始不足 minGapMs 时先等差额。排队等待不计入单次请求超时。 */
+  /**
+   * 距离上一个请求开始不足 minGapMs 时先等差额。排队等待不计入单次请求超时。
+   *
+   * 取槽本身必须串行：并发下多个请求同时算 `lastStart + minGapMs - now()`
+   * 会算出同一个时刻、一起放行，起点间隔就失效了。这里用一条短链只锁住
+   * 「读 lastStart → 等 → 写 lastStart」这几步，请求本身仍可并行。
+   *
+   * 返回本次取到的起点时刻（毫秒），供调用方记录/断言；不依赖调用方在
+   * await 之后自己读时钟——那时别的请求可能已经把时钟推走了。
+   */
   async waitForSlot() {
-    const waitMs = this.lastStart + this.minGapMs - this.now()
-    if (waitMs > 0) await this.sleep(waitMs)
-    this.lastStart = this.now()
+    const previous = this.slotChain
+    let release
+    this.slotChain = new Promise((resolve) => { release = resolve })
+    try {
+      await previous
+      const waitMs = this.lastStart + this.minGapMs - this.now()
+      if (waitMs > 0) await this.sleep(waitMs)
+      this.lastStart = this.now()
+      return this.lastStart
+    } finally {
+      release()
+    }
   }
 }
 

@@ -29,24 +29,25 @@ async function runNpm(args, options) {
  *
  * The pack declares its DSH peers as `workspace:*`, which the host resolves by
  * symlinking into the profile's node_modules — so a plain `npm install` inside
- * the pack fails on those peer specs. Playwright is the one dependency that is
- * a real npm package, so it is installed in a clean staging directory and then
+ * the pack fails on those peer specs. Patchright (the anti-detection Playwright
+ * fork; same API, no `Runtime.enable` CDP leak) is the one dependency that is a
+ * real npm package, so it is installed in a clean staging directory and then
  * copied into the pack's own node_modules.
  */
 async function main() {
-  const version = process.env.LWB_PUBLISHER_PLAYWRIGHT_VERSION || '^1.63.0'
-  const target = join(PACK_DIR, 'node_modules', 'playwright-core')
+  const version = process.env.LWB_PUBLISHER_PATCHRIGHT_VERSION || '^1.64.1'
+  const target = join(PACK_DIR, 'node_modules', 'patchright')
   if (existsSync(join(target, 'package.json'))) {
     const installed = JSON.parse(await readFile(join(target, 'package.json'), 'utf8'))
-    console.log(`[publisher] playwright-core ${installed.version} 已安装，跳过。`)
+    console.log(`[publisher] patchright ${installed.version} 已安装，跳过。`)
     return
   }
   await rm(STAGING, { recursive: true, force: true })
   await mkdir(STAGING, { recursive: true })
   await writeFile(join(STAGING, 'package.json'), `${JSON.stringify({ name: 'publisher-deps', private: true, version: '0.0.0' }, null, 2)}\n`)
-  console.log(`[publisher] 正在安装 playwright-core ${version} …`)
+  console.log(`[publisher] 正在安装 patchright ${version} …`)
   try {
-    await runNpm(['install', `playwright-core@${version}`, '--no-audit', '--no-fund', '--loglevel', 'error'], {
+    await runNpm(['install', `patchright@${version}`, '--no-audit', '--no-fund', '--loglevel', 'error'], {
       cwd: STAGING,
       env: { ...process.env, npm_config_cache: process.env.npm_config_cache || join(ROOT, '.tmp', 'npm-cache') },
       maxBuffer: 16 * 1024 * 1024,
@@ -57,10 +58,11 @@ async function main() {
     return
   }
   await mkdir(dirname(target), { recursive: true })
-  await cp(join(STAGING, 'node_modules', 'playwright-core'), target, { recursive: true })
+  await cp(join(STAGING, 'node_modules', 'patchright'), target, { recursive: true })
+  await cp(join(STAGING, 'node_modules', 'patchright-core'), join(PACK_DIR, 'node_modules', 'patchright-core'), { recursive: true })
   await rm(STAGING, { recursive: true, force: true })
   const installed = JSON.parse(await readFile(join(target, 'package.json'), 'utf8'))
-  console.log(`[publisher] 已安装 playwright-core ${installed.version}。`)
+  console.log(`[publisher] 已安装 patchright ${installed.version}。`)
   console.log('[publisher] 未下载浏览器：本包使用本机已安装的 Chrome / Edge。')
 }
 

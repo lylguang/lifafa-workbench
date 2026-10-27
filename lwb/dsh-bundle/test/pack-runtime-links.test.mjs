@@ -66,6 +66,5 @@ test('an existing correct link is left alone', async () => {
 test('every in-repo pack gets its runtime peers linked', async () => {
   const linked = await linkInRepoPacks()
   assert.ok(linked.includes('spoken-video'), `spoken-video 应在链接列表里，实际 ${linked.join(', ')}`)
-  assert.ok(linked.includes('whiteboard'), 'whiteboard 引擎包也要链接')
   assert.ok(linked.includes('publisher'), 'publisher 包也要链接')
 })

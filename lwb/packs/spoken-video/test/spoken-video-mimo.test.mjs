@@ -220,6 +220,78 @@ test('节流队列失败摘链：一次抛错不会让后续排队请求跟着�
   assert.equal(await following, 'ok')
 })
 
+test('并发模式：同时在飞的数量不超过 concurrency，且确实重叠执行', async () => {
+  const throttle = new MimoThrottle({ minGapMs: 0, concurrency: 3, now: () => 0, sleep: async () => {} })
+  let active = 0
+  let peak = 0
+  const job = () => throttle.run(async () => {
+    active += 1
+    peak = Math.max(peak, active)
+    // 让出事件循环，制造真实的「多个请求同时在飞」窗口。
+    await new Promise((resolve) => setImmediate(resolve))
+    active -= 1
+  })
+  await Promise.all(Array.from({ length: 9 }, job))
+  assert.equal(peak, 3, `并发上限应为 3，实际峰值 ${peak}`)
+  assert.equal(active, 0, '结束后不应有残留占用')
+})
+
+test('并发模式：默认 concurrency=1 时行为与旧的完全串行一致', async () => {
+  const throttle = new MimoThrottle({ minGapMs: 0, now: () => 0, sleep: async () => {} })
+  const order = []
+  const job = (n) => throttle.run(async () => {
+    order.push(`start-${n}`)
+    await new Promise((resolve) => setImmediate(resolve))
+    order.push(`end-${n}`)
+    return n
+  })
+  await Promise.all([job(1), job(2), job(3)])
+  assert.deepEqual(order, ['start-1', 'end-1', 'start-2', 'end-2', 'start-3', 'end-3'], '必须严格串行')
+})
+
+test('并发下起点间隔仍生效：任意两次请求开始时刻之差都不小于 minGapMs', async () => {
+  let clock = 0
+  const starts = []
+  const throttle = new MimoThrottle({
+    minGapMs: 2000,
+    concurrency: 4,
+    now: () => clock,
+    // 真实时间由 sleep 推进；请求本身「耗时」也要推进时钟，否则测不出重叠。
+    sleep: async (ms) => { clock += ms },
+  })
+  const job = () => throttle.run(async () => {
+    starts.push(await throttle.waitForSlot())
+    clock += 100
+    await Promise.resolve()
+  })
+  await Promise.all(Array.from({ length: 6 }, job))
+  starts.sort((a, b) => a - b)
+  for (let i = 1; i < starts.length; i += 1) {
+    assert.ok(starts[i] - starts[i - 1] >= 2000, `第 ${i} 次与上一次起点间隔不足 2000ms：${starts[i - 1]} → ${starts[i]}`)
+  }
+})
+
+test('取槽并发安全：多个请求同时 waitForSlot 不会算出同一个放行时刻', async () => {
+  let clock = 0
+  const starts = []
+  const throttle = new MimoThrottle({
+    minGapMs: 1000,
+    concurrency: 8,
+    now: () => clock,
+    sleep: async (ms) => { clock += ms },
+  })
+  // 8 个请求同时抢槽，不经过 run()，直接打 waitForSlot。
+  await Promise.all(Array.from({ length: 8 }, async () => {
+    starts.push(await throttle.waitForSlot())
+  }))
+  starts.sort((a, b) => a - b)
+  const unique = new Set(starts)
+  assert.equal(unique.size, starts.length, `放行时刻必须两两不同，实际 ${starts}`)
+  for (let i = 1; i < starts.length; i += 1) {
+    assert.ok(starts[i] - starts[i - 1] >= 1000, `起点间隔不足：${starts}`)
+  }
+})
+
 test('MimoClient 音色：空值落默认，非法音色明确报错并列出可选值', async () => {
   const client = new MimoClient({ apiKey: 'k', baseUrl: 'u', fetchImpl: async () => okAudio() })
   assert.equal(client.resolveVoice(null), '冰糖')
@@ -817,4 +889,108 @@ test('#mimoVoiceover 的进度事件按存储分发，不写死 runs.json', asyn
   assert.match(source, /const inAudioTasks = \(await readAudioTasks\(root\)\)\.tasks\.some\(\(task\) => task\.id === record\.id\)/u)
   assert.match(source, /\? this\.#audioEvent\(root, record\.id, label, detail\)/u)
   assert.match(source, /: this\.#runEvent\(root, record\.id, label, detail\)/u)
+})
+
+/**
+ * 并发配音不改变成片：拼接顺序必须严格按段序，与完成先后无关。
+ *
+ * 这是「配音改并发」唯一真正的风险点——如果按完成顺序 push，某段网络慢
+ * 就会让整篇语序错乱。这里用乱序完成的 worker 直接验证 mapWithConcurrency
+ * 的保序契约（它是 #bailianVoiceover / #mimoVoiceover 共用的底座）。
+ */
+test('并发合成保序：完成顺序打乱，结果仍按输入索引排列', async () => {
+  const source = readFileSync(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  // 取出 mapWithConcurrency 的实现体，在测试里独立求值，避免依赖宿主类。
+  const start = source.indexOf('async function mapWithConcurrency(')
+  assert.ok(start > 0, 'mapWithConcurrency 必须存在')
+  const end = source.indexOf('\n}\n', start)
+  assert.ok(end > start, 'mapWithConcurrency 必须是一个完整函数')
+  const factory = new Function(`${source.slice(start, end + 3)}\nreturn mapWithConcurrency`)
+  const mapWithConcurrency = factory()
+
+  const items = ['a', 'b', 'c', 'd', 'e', 'f']
+  // 故意让越靠前的段越慢：若按完成顺序收集，结果会完全反过来。
+  const results = await mapWithConcurrency(items, 3, async (item, index) => {
+    await new Promise((resolve) => setTimeout(resolve, (items.length - index) * 5))
+    return `${item}${index}`
+  })
+  assert.deepEqual(results, ['a0', 'b1', 'c2', 'd3', 'e4', 'f5'], '结果必须按输入顺序，而不是完成顺序')
+})
+
+test('并发合成失败语义：任一分支抛错即整体失败，且不再启动后续条目', async () => {
+  const source = readFileSync(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  const start = source.indexOf('async function mapWithConcurrency(')
+  const end = source.indexOf('\n}\n', start)
+  const factory = new Function(`${source.slice(start, end + 3)}\nreturn mapWithConcurrency`)
+  const mapWithConcurrency = factory()
+
+  const started = []
+  await assert.rejects(
+    mapWithConcurrency([1, 2, 3, 4, 5, 6, 7, 8], 2, async (item) => {
+      started.push(item)
+      if (item === 2) throw new Error('第 2 段失败')
+      return item
+    }),
+    /第 2 段失败/u,
+  )
+  assert.ok(started.length < 8, `失败后不应再启动全部条目，实际启动了 ${started.length} 个`)
+})
+
+test('配音并发度：配置项存在、有上限，且两个 voiceover 路径都真的用了它', async () => {
+  const media = readFileSync(new URL('../spoken-video-media.mjs', import.meta.url), 'utf8')
+  assert.match(media, /ttsConcurrency:\s*number\(environment\.LWB_SPOKEN_VIDEO_TTS_CONCURRENCY/u, '必须有独立的配音并发配置项')
+  assert.match(media, /'配音并发数',\s*1,\s*8,\s*4/u, '并发上限应为 8，默认 4')
+
+  const host = readFileSync(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  const bailian = host.slice(host.indexOf('async #bailianVoiceover('))
+  const bailianBody = bailian.slice(0, bailian.indexOf('\n  /**', 1))
+  assert.match(bailianBody, /mapWithConcurrency\(segments, config\.ttsConcurrency/u, '百炼配音必须走限并发')
+
+  const mimo = host.slice(host.indexOf('async #mimoVoiceover('))
+  const mimoBody = mimo.slice(0, mimo.indexOf('\n  /**', 1))
+  // MiMo 配音的并发度：clone 串行、其余走配置值。锁的是「按模式分流」这个
+  // 事实本身，具体取值见下面那条专门的回归用例。
+  assert.match(mimoBody, /mapWithConcurrency\(segments, concurrency/u, 'MiMo 配音必须走按模式分流的并发度')
+  // 音色/模式必须在循环外解析：并发时每段若各自解析，可能拿到不同音色。
+  assert.match(mimoBody, /const mode = input\.voiceSource === 'upload'/u, '模式必须在并发循环外解析')
+  assert.match(mimoBody, /const referenceDataUrl = mode === 'clone'/u, '参考音频必须在并发循环外解析')
+})
+
+/**
+ * 声音克隆必须串行合成。
+ *
+ * 2026-10-26 线上实测：两条成片（燃气聚能环、AI自动炒股）的配音连续 8 次
+ * 失败，报「小米 TTS 请求过于频繁（429）：Too many requests」。逐变量复现后
+ * 结论明确：
+ *   · preset 模式 4 路并发 → 4 段全 200
+ *   · clone 模式 4 路并发 → 只有第 1 段 200，其余全部 429
+ *   · clone 模式**串行**、起点间隔仍 2 秒 → 4 段全 200
+ *
+ * 即 MiMo 对 voiceclone 的限流按**同时在飞的请求数**算（复刻每次要带约 700KB
+ * 参考音频，服务端算重请求），官方标的 RPM 100 只对预置音色成立。
+ */
+test('声音克隆（clone）串行合成，预置音色仍走配置的并发度', async () => {
+  const host = readFileSync(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  const mimo = host.slice(host.indexOf('async #mimoVoiceover('))
+  const mimoBody = mimo.slice(0, mimo.indexOf('\n  /**', 1))
+  // clone → 1；其余 → 配置值。
+  assert.match(mimoBody, /const concurrency = mode === 'clone' \? 1 : config\.ttsConcurrency/u,
+    'clone 模式必须串行（concurrency=1），其余模式沿用配置的并发度')
+  // 前提是 mode 在循环外已经算好——否则这里拿到的 mode 恒为空。
+  const modeAt = mimoBody.indexOf("const mode = input.voiceSource === 'upload'")
+  const concAt = mimoBody.indexOf('const concurrency = mode ===')
+  assert.ok(modeAt >= 0 && concAt > modeAt, 'mode 必须先于 concurrency 求出')
+})
+
+test('MiMo 单段重试：429 退避按限流类型给足，段级尝试次数不少于 3 次', async () => {
+  // 2026-10-26 实测：clone 被 429 时，原来固定 3 秒的退避**不够**——服务端对
+  // 复刻请求的限流窗口更长，3 秒后重试仍是 429，每段白白烧掉一次机会，
+  // 整轮配音全灭（连续 8 次任务失败）。实测串行 + 15 秒间隔下 4 段全 200。
+  const host = readFileSync(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  const mimo = host.slice(host.indexOf('async #mimoVoiceover('))
+  const mimoBody = mimo.slice(0, mimo.indexOf('\n  /**', 1))
+  assert.match(mimoBody, /error\.status === 429/u, '429 必须单独处理')
+  assert.match(mimoBody, /retryAfterMs/u, '必须优先采用服务端给的 Retry-After')
+  assert.match(mimoBody, /15_000/u, '429 的退避下限必须是 15 秒')
+  assert.match(mimoBody, /const maxAttempts = 3/u, '段级尝试次数必须不少于 3 次')
 })

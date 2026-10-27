@@ -124,10 +124,9 @@ export class SpokenVideoGateway extends TypertRemoteService {
   startVoiceover(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startVoiceover(context, request)) }
   startSubtitles(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startSubtitles(context, request)) }
   startVideoRender(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startVideoRender(context, request)) }
-  whiteboardLineArtPlan(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.whiteboardLineArtPlan(context, request)) }
-  startWhiteboardLineArt(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startWhiteboardLineArt(context, request)) }
-  whiteboardLineArtStatus(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.whiteboardLineArtStatus(context, request)) }
   startTechnicalQc(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startTechnicalQc(context, request)) }
+  /** 人工放行审片否决的成片（受控路径，客户端不能直接 commit qc）。 */
+  releaseRejectedCut(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.releaseRejectedCut(context, request)) }
   readMedia(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.readMedia(context, request)) }
   publishStatus() { return this.ctx.spokenVideoScope.request(() => this.ctx.spokenVideoPublish.status()) }
   configurePublishConnection(request) { return this.ctx.spokenVideoScope.request(() => this.ctx.spokenVideoPublish.configureConnection(request)) }
@@ -223,10 +222,8 @@ decorateRemote(SpokenVideoGateway.prototype, 'readVideoTaskMedia', 'readVideoTas
 decorateRemote(SpokenVideoGateway.prototype, 'startVoiceover', 'startVoiceover')
 decorateRemote(SpokenVideoGateway.prototype, 'startSubtitles', 'startSubtitles')
 decorateRemote(SpokenVideoGateway.prototype, 'startVideoRender', 'startVideoRender')
-decorateRemote(SpokenVideoGateway.prototype, 'whiteboardLineArtPlan', 'whiteboardLineArtPlan')
-decorateRemote(SpokenVideoGateway.prototype, 'startWhiteboardLineArt', 'startWhiteboardLineArt')
-decorateRemote(SpokenVideoGateway.prototype, 'whiteboardLineArtStatus', 'whiteboardLineArtStatus')
 decorateRemote(SpokenVideoGateway.prototype, 'startTechnicalQc', 'startTechnicalQc')
+decorateRemote(SpokenVideoGateway.prototype, 'releaseRejectedCut', 'releaseRejectedCut')
 decorateRemote(SpokenVideoGateway.prototype, 'readMedia', 'readMedia')
 decorateRemote(SpokenVideoGateway.prototype, 'publishStatus', 'publishStatus')
 decorateRemote(SpokenVideoGateway.prototype, 'configurePublishConnection', 'configurePublishConnection')

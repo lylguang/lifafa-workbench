@@ -11,7 +11,6 @@ import { buildTechnicalReport, DEFAULT_VIDEO_VISUAL_BRIEF, DEFAULT_VOICE_PROFILE
 import { SpokenVideoProjectStore, SpokenVideoStoreError } from '../spoken-video-store.mjs'
 import { SpokenVideoMediaHost, parseRemotionRenderProgress, parseSceneSpans, reviewTimestamps, REVIEW_FRAME_LIMIT, REVIEW_FRAME_HARD_LIMIT, REVIEW_MAX_GAP_SECONDS, analyzeFrameContent } from '../spoken-video-media-host.mjs'
 import { remotionEncodingSettings, remotionRendererAvailable } from '../spoken-video-remotion.mjs'
-import { buildLineArtPlanPrompt, composeLineArtPrompt, LINE_ART_PLAN_SCHEMA, lineArtSeed, normalizeLineArtPlan } from '../spoken-video-whiteboard-art.mjs'
 
 function agent(cwd) { return { session: { header: { cwd } } } }
 
@@ -1682,120 +1681,6 @@ test('defaults a local render to landscape and passes ffprobe technical qc', asy
   assert.equal(qcRun.status, 'succeeded', qcRun.error)
   const checkedProject = await store.get(currentAgent, { projectId: project.id })
   assert.equal(checkedProject.artifacts.qc.data.passed, true)
-})
-
-test('composeLineArtPrompt bakes the visual spec and rejects empty scenes', () => {
-  const prompt = composeLineArtPrompt('a small monkey sitting on a rockery holding a banana')
-  assert.match(prompt, /#F5EBD7/u)
-  assert.match(prompt, /STRICTLY FORBIDDEN/u)
-  assert.match(prompt, /never words to write/u)
-  assert.throws(() => composeLineArtPrompt('   '), /画面视觉描述/u)
-})
-
-test('buildLineArtPlanPrompt forbids quoting narration and lists every scene', () => {
-  const prompt = buildLineArtPlanPrompt([
-    { index: 1, startMs: 0, endMs: 30_000, text: '第一幕旁白' },
-    { index: 2, startMs: 30_000, endMs: 60_000, text: '第二幕旁白' },
-  ])
-  assert.match(prompt, /NEVER copy/u)
-  assert.match(prompt, /Scene 1 \[0-30s\]: 第一幕旁白/u)
-  assert.match(prompt, /Scene 2 \[30-60s\]: 第二幕旁白/u)
-})
-
-test('normalizeLineArtPlan aligns by scene index and falls back for missing entries', () => {
-  const bySceneIndex = [{ sceneIndex: 1, text: '一' }, { sceneIndex: 2, text: '二' }, { sceneIndex: 3, text: '三' }]
-  const byIndex = [{ index: 1, text: '一' }, { index: 2, text: '二' }, { index: 3, text: '三' }]
-  for (const scenes of [bySceneIndex, byIndex]) {
-    const plan = normalizeLineArtPlan({ scenes: [{ index: 2, visual: 'a dog running' }, { index: 99, visual: 'ignored' }] }, scenes)
-    assert.equal(plan.length, 3)
-    assert.doesNotMatch(plan[0].visual, /一/u, 'fallback must not embed narration text')
-    assert.equal(plan[0].index, 1)
-    assert.equal(plan[1].visual, 'a dog running')
-    assert.match(plan[2].visual, /visual metaphor/u)
-  }
-  assert.equal(LINE_ART_PLAN_SCHEMA.properties.scenes.items.required.join(','), 'index,visual')
-})
-
-test('lineArtSeed is deterministic per scene and differs across scenes', () => {
-  assert.equal(lineArtSeed(1), lineArtSeed(1))
-  assert.notEqual(lineArtSeed(1), lineArtSeed(2))
-  assert.ok(lineArtSeed(1) > 0 && lineArtSeed(1) < 2 ** 31 - 1)
-})
-
-test('whiteboard line art plan refuses projects without subtitles', async (t) => {
-  const cwd = await workspace(t)
-  const store = new SpokenVideoProjectStore()
-  const currentAgent = agent(cwd)
-  const project = await projectWithApprovedScript(currentAgent, store)
-  const host = new SpokenVideoMediaHost({ projectsStore: store })
-  await assert.rejects(
-    () => host.whiteboardLineArtPlan(currentAgent, { projectId: project.id }),
-    /必须先完成配音与字幕/u,
-  )
-})
-
-test('renders a whiteboard video with voiceover audio and passes technical qc', async (t) => {
-  if (!mediaBinariesAvailable()) { t.skip('ffmpeg or ffprobe is unavailable in this environment'); return }
-  const cwd = await workspace(t)
-  const store = new SpokenVideoProjectStore()
-  const currentAgent = agent(cwd)
-  let project = await projectWithApprovedScript(currentAgent, store)
-  const projectRoot = join(cwd, 'data', 'projects', project.id)
-  // 配音 1 秒；字幕覆盖 0-0.9 秒，单幕
-  const audioDirectory = join(projectRoot, 'media', 'voiceovers')
-  const audioFile = join(audioDirectory, 'whiteboard.wav')
-  await mkdir(audioDirectory, { recursive: true })
-  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100:duration=1', '-c:a', 'pcm_s16le', audioFile], { stdio: 'ignore' })
-  project = (await store.commitProduced(currentAgent, {
-    projectId: project.id, expectedRevision: project.revision, stage: 'voiceover', idempotencyKey: 'whiteboard-voice-0001', source: 'spoken-video/tts',
-    payload: { mode: 'tts', provider: 'test', settings: { rate: 1, volume: 1, pitch: 0 }, audio: { file: 'media/voiceovers/whiteboard.wav', mediaType: 'audio/wav', bytes: 88_278, durationSeconds: 1 } },
-  })).project
-  project = (await store.commitProduced(currentAgent, {
-    projectId: project.id, expectedRevision: project.revision, stage: 'subtitles', idempotencyKey: 'whiteboard-subtitles-0001', source: 'spoken-video/asr',
-    payload: { mode: 'asr', sourceAudioFile: 'media/voiceovers/whiteboard.wav', srtFile: 'media/subtitles/whiteboard.srt', srt: '1\n00:00:00,000 --> 00:00:00,900\n白板渲染测试' },
-  })).project
-
-  // 缺线稿：任务应失败并明确提示线稿约定
-  const host = new SpokenVideoMediaHost({ projectsStore: store })
-  const missingLineArt = await host.startVideoRender(currentAgent, { projectId: project.id, expectedRevision: project.revision, visualBrief: '白板测试。', renderer: 'whiteboard' })
-  const missingRun = await waitForOperation(host, currentAgent, project.id, missingLineArt.id)
-  assert.equal(missingRun.status, 'failed')
-
-  // 没有 OpenCV/NumPy/Pillow 的 Python 时，这里会先报环境错误（判定顺序真实如此：
-  // 分幕由 parse_srt.py 决定，线稿数量要按分幕数匹配，所以引擎必须先能跑）。
-  // 上面「任务必须失败」的断言仍然成立；下面那条要求具体到线稿约定的断言，
-  // 只有在引擎可用时才谈得上——本机没有 Python 就明确跳过，不假通过。
-  if (/白板渲染需要具备/u.test(String(missingRun.error || ''))) {
-    t.skip(`本机没有具备 OpenCV/NumPy/Pillow 的 Python，白板引擎跑不起来，无法验证线稿约定提示（实际错误：${String(missingRun.error).slice(0, 80)}）`)
-    return
-  }
-  assert.match(missingRun.error, /media\/whiteboard/u)
-
-  // 放一张带墨迹的 16:9 纸底线稿：自动骨架标注 → 渲染 → 合成音轨
-  const lineArtDirectory = join(projectRoot, 'media', 'whiteboard')
-  await mkdir(lineArtDirectory, { recursive: true })
-  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'color=c=0xF5EBD7:s=1672x941:d=1', '-vf', 'drawbox=x=120:y=140:w=560:h=620:color=0x303030@1:t=6,drawbox=x=900:y=200:w=620:h=480:color=0x404040@1:t=4,drawbox=x=758:y=120:w=4:h=700:color=0x303030@1:t=fill', '-frames:v', '1', join(lineArtDirectory, 'scene-01.png')], { stdio: 'ignore' })
-
-  const render = await host.startVideoRender(currentAgent, { projectId: project.id, expectedRevision: project.revision, visualBrief: '白板测试。', renderer: 'whiteboard' })
-  const rendered = await waitForOperation(host, currentAgent, project.id, render.id, 300_000)
-  assert.equal(rendered.status, 'succeeded', rendered.error)
-  const renderedProject = await store.get(currentAgent, { projectId: project.id })
-  const video = renderedProject.artifacts.video.data
-  assert.equal(video.renderer, 'whiteboard')
-  assert.equal(video.video.width, 1920)
-  assert.equal(video.video.height, 1080)
-  assert.equal(video.video.hasAudio, true)
-  assert.equal(video.whiteboard.scenes, 1)
-  // 关键回归：白板渲染没有独立审片阶段，技术质检必须在渲染内联完成并提交。
-  // 缺 qc 时发布页（只列 qc.passed 的项目）会看不到这条成片。
-  assert.equal(renderedProject.artifacts.qc?.data?.passed, true, '白板渲染必须内联提交 qc 产物')
-  assert.equal(renderedProject.artifacts.qc.data.mode, 'automatic')
-
-  const qc = await host.startTechnicalQc(currentAgent, { projectId: project.id, expectedRevision: renderedProject.revision })
-  const qcRun = await waitForOperation(host, currentAgent, project.id, qc.id)
-  assert.equal(qcRun.status, 'succeeded', qcRun.error)
-  const checkedProject = await store.get(currentAgent, { projectId: project.id })
-  assert.equal(checkedProject.artifacts.qc.data.passed, true, JSON.stringify(checkedProject.artifacts.qc.data.issues))
 })
 
 test('runs the DSH Remotion creator, deterministic QC, and independent reviewer before committing', async (t) => {

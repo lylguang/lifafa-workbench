@@ -49,12 +49,21 @@ export function resolveBrowserExecutable(environment = process.env) {
   return null
 }
 
-/** Import playwright-core lazily so a missing dependency yields a usable message. */
+/**
+ * Load the browser driver lazily so a missing dependency yields a usable
+ * message. Preferred driver is Patchright (anti-detection Playwright fork:
+ * identical API, no `Runtime.enable`/`Console.enable` CDP leak thatDouyin-class
+ * risk control fingerprints); playwright-core stays as the fallback so an
+ * environment that only has it still works.
+ */
 async function loadPlaywright() {
+  try {
+    return await import('patchright')
+  } catch { /* fall through to playwright-core */ }
   try {
     return await import('playwright-core')
   } catch {
-    fail('PUBLISHER_BROWSER_UNAVAILABLE', '缺少 playwright-core 依赖。请在工作台根目录运行「npm run publisher:install」后重试。')
+    fail('PUBLISHER_BROWSER_UNAVAILABLE', '缺少浏览器驱动依赖。请在工作台根目录运行「npm run publisher:install」后重试。')
   }
 }
 
@@ -77,14 +86,20 @@ export class PublisherBrowserPool {
 
   /** Diagnostics for the accounts page: what the pack can actually do here. */
   async status() {
-    let playwrightVersion = null
-    try {
-      const playwright = await import('playwright-core/package.json', { with: { type: 'json' } })
-      playwrightVersion = playwright.default?.version || null
-    } catch { /* dependency absent or unreadable */ }
+    let driverVersion = null
+    let driverName = null
+    for (const name of ['patchright', 'playwright-core']) {
+      try {
+        const pkg = await import(`${name}/package.json`, { with: { type: 'json' } })
+        driverVersion = pkg.default?.version || null
+        driverName = name
+        break
+      } catch { /* try the next driver */ }
+    }
     return {
-      ready: Boolean(playwrightVersion) && Boolean(this.executablePath),
-      playwright: playwrightVersion,
+      ready: Boolean(driverVersion) && Boolean(this.executablePath),
+      playwright: driverVersion,
+      driver: driverName,
       executable: this.executablePath,
       headless: this.headless,
       openSessions: this.sessions.size,
@@ -110,7 +125,14 @@ export class PublisherBrowserPool {
     }
     if (existing) await this.close(account.id)
 
-    const { chromium } = await loadPlaywright()
+    // 打包器/tsx 互操作可能把 CJS 入口折进 default（playwright-core 1.64 的
+    // inprocess 导出就没有 chromium 命名导出），必须两层兜底再解构。
+    const playwrightModule = await loadPlaywright()
+    const playwright = playwrightModule?.default?.chromium ? playwrightModule.default : playwrightModule
+    const { chromium } = playwright
+    if (typeof chromium?.launchPersistentContext !== 'function') {
+      fail('PUBLISHER_BROWSER_UNAVAILABLE', 'playwright-core 加载异常：未找到 chromium 接口。请在工作台根目录重跑「npm run publisher:install」。')
+    }
     const profilePath = this.profilePath(account.profileDir)
     await mkdir(profilePath, { recursive: true, mode: 0o700 })
     let context

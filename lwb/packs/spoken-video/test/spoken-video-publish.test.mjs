@@ -23,6 +23,7 @@ import {
   CUSTOM_IMAGE_PRESET,
   customOpenAiImageRequest,
   customOpenAiImageUrl,
+  customAsyncImageRequest,
   CUSTOM_IMAGE_PROTOCOLS,
 } from '../spoken-video-publish.mjs'
 import { coverHeadline, coverLayoutFor, wrapCoverHeadline } from '../spoken-video-cover-text.mjs'
@@ -228,6 +229,49 @@ test('image request, task id and url extraction follow the async generation cont
   assert.equal(extractPublishImageUrl({ output: {} }), null)
 })
 
+/**
+ * 聚合服务（lk888）的自定义生图形态。
+ *
+ * 2026-10-26 实测：它的 `/v1/media/generate` 把任务 id 放在 `data.task_id`，
+ * 完成态把图放在顶层 `result_url`，而且 `status` 字段是**中文**（"处理中"）。
+ * 三处都曾让封面这条路走不通：
+ *   · 认不出 task_id → 提交后不知道去哪儿轮询；
+ *   · 轮询地址推成 /api/v1/tasks/{id} → 那个端点在它上面是 404；
+ *   · 先读中文 status → 失败态永远认不出来，只能一路等到轮询超时。
+ */
+test('聚合服务的自定义生图形态：task_id、状态与图片地址都能认出来', () => {
+  // 提交响应（实测原文）
+  const submitted = { code: 200, data: { task_id: 190654098, task_ids: [190654098] }, msg: '任务创建成功' }
+  assert.equal(imageTaskId(submitted), '190654098', '必须认得出 data.task_id')
+  assert.equal(imageTaskId({ data: { task_ids: [42] } }), '42', '必须认得出 data.task_ids[0]')
+
+  // 状态：中文 status 不能盖住英文 state
+  assert.equal(imageTaskState({ status: '处理中', state: 'running' }), 'RUNNING', '必须优先读英文 state')
+  assert.equal(imageTaskState({ status: '已完成', state: 'success' }), 'SUCCESS')
+  assert.equal(imageTaskState({ status: '失败', state: 'failed', error: '生成失败' }), 'FAILED',
+    '失败态必须认得出来，否则只能等到轮询超时')
+  assert.equal(imageTaskState({ status: '已过期', state: 'expired' }), 'EXPIRED')
+
+  // 完成态的图片地址
+  const done = { state: 'success', is_final: true, result_type: 'image', result_url: 'https://tos/a.png', result_urls: ['https://tos/a.png'] }
+  assert.equal(extractPublishImageUrl(done), 'https://tos/a.png', '必须认得出顶层 result_url')
+  assert.equal(extractPublishImageUrl({ data: { result_url: 'https://tos/b.png' } }), 'https://tos/b.png',
+    '必须认得出 data.result_url')
+})
+
+test('通用异步协议提交体同时带顶层 prompt 与百炼那套 input.messages', () => {
+  // 实测：聚合服务要顶层 prompt（只给 input.messages 会回
+  // 「缺少必要参数 prompt」）；百炼/SciTiger 只认 input.messages。
+  // 两套字段一起给，两族服务都能收下。
+  const body = customAsyncImageRequest({ model: 'tt-image-2.5', prompt: '封面', negativePrompt: '水印', size: '1280*720' })
+  assert.equal(body.prompt, '封面', '顶层必须有 prompt')
+  assert.equal(body.model, 'tt-image-2.5')
+  assert.equal(body.input.messages[0].content[0].text, '封面', '百炼那套结构也必须保留')
+  assert.equal(body.parameters.size, '1280*720')
+  assert.equal(body.params.size, '1280*720')
+  assert.equal(body.parameters.negative_prompt, '水印')
+})
+
 test('inspectPublishImage accepts PNG/JPEG/WebP dimensions and rejects unsafe bytes', () => {
   const wide = inspectPublishImage(png(1280, 720))
   assert.deepEqual({ mediaType: wide.mediaType, extension: wide.extension, width: wide.width, height: wide.height }, { mediaType: 'image/png', extension: 'png', width: 1280, height: 720 })
@@ -422,7 +466,7 @@ test('SciTiger covers use synchronous multimodal generation without the DashScop
         sizes.push(size)
         return jsonResponse({ output: { choices: [{ message: { content: [{ image: `https://cdn.test/${size}.png` }] } }] } })
       }
-      assert.match(String(url), /^https:\/\/cdn\.test\/(1280\*720|1080\*1440)\.png$/u)
+      assert.match(String(url), /^https:\/\/cdn\.test\/(1440\*1080|1080\*1440)\.png$/u)
       const [width, height] = new URL(String(url)).pathname.slice(1, -4).split('*').map(Number)
       return imageResponse(png(width, height))
     },
@@ -431,9 +475,12 @@ test('SciTiger covers use synchronous multimodal generation without the DashScop
   const finished = await waitForTask(host, currentAgent, started.id)
   assert.equal(finished.status, 'succeeded')
   assert.deepEqual(finished.coverErrors, { landscape: null, portrait: null })
-  assert.deepEqual(sizes.sort(), ['1080*1440', '1280*720'])
+  // 抖音规格：横 4:3 = 1440x1080，竖 3:4 = 1080x1440。
+  assert.deepEqual(sizes.sort(), ['1080*1440', '1440*1080'])
   const detail = await store.get(currentAgent, { projectId: project.id })
-  assert.equal(detail.artifacts.packaging.data.covers.landscape.width, 1280)
+  assert.equal(detail.artifacts.packaging.data.covers.landscape.width, 1440)
+  assert.equal(detail.artifacts.packaging.data.covers.landscape.height, 1080)
+  assert.equal(detail.artifacts.packaging.data.covers.portrait.width, 1080)
   assert.equal(detail.artifacts.packaging.data.covers.portrait.height, 1440)
 })
 
@@ -618,19 +665,23 @@ test('regenerateCover reuses a hand-edited prompt for one direction and keeps th
   assert.equal(coverTask.coverKind, 'landscape')
   const finished = await waitForTask(host, currentAgent, coverTask.id)
   assert.equal(finished.status, 'succeeded')
-  assert.deepEqual(sizes, ['1280*720'], 'only the requested direction is generated')
+  assert.deepEqual(sizes, ['1440*1080'], 'only the requested direction is generated, at 4:3')
 
   const fresh = await store.get(currentAgent, { projectId: project.id })
   const packaging = fresh.artifacts.packaging.data
   assert.equal(packaging.mode, 'cover-regenerate')
   assert.equal(packaging.content.title, '人工标题', 'the copy is preserved')
   assert.deepEqual(packaging.content.tags, ['人工'])
-  assert.equal(packaging.prompts.landscape, '手改后的横屏提示词')
+  // 手改的提示词会保留原话，但前面会被加上比例规格——用户在界面上改提示词时
+  // 不该被要求自己记住 4:3 / 3:4，而比例是抖音上传的硬约束，绝不能丢。
+  assert.match(packaging.prompts.landscape, /4:3/u, '手改提示词也要带横版比例')
+  assert.ok(packaging.prompts.landscape.endsWith('手改后的横屏提示词'), '用户原话必须原样保留在末尾')
   assert.equal(packaging.prompts.negative, '手改负面')
-  // 另一个方向没被手改，走的是自动生成的固定句式。
+  // 另一个方向没被手改，走的是自动生成的模板句式。
   // 主题取的是 **startPackaging 那一轮**的标题（「发布必须有闸门」）——那轮跑在
   // 人工改标题之前，而「重新生成封面」只重生图片、不重算文案与提示词主题。
-  assert.equal(packaging.prompts.portrait, '根据提供的主题做一张视频封面，主题：发布必须有闸门')
+  assert.equal(packaging.prompts.portrait, coverImagePrompt('发布必须有闸门', 'portrait'))
+  assert.match(packaging.prompts.portrait, /3:4/u, '竖版提示词带 3:4 规格')
   assert.match(packaging.covers.landscape.file, /^media\/publish-covers\/landscape-[a-f0-9-]+\.png$/u)
   assert.equal(packaging.covers.landscape.source, 'generated')
   assert.equal(packaging.covers.portrait.file, beforePortrait.file, 'the other direction keeps its frozen cover')
@@ -692,8 +743,9 @@ test('updatePackaging rewrites only the human-editable content fields', async (t
   const fresh = await store.get(currentAgent, { projectId: project.id })
   assert.equal(fresh.artifacts.packaging.data.mode, 'manual-update')
   assert.deepEqual(fresh.artifacts.packaging.data.content.tags, ['人工', '审核'])
-  // 人工编辑保存：提示词按固定句式生成，但用户改过的内容必须原样留住。
-  assert.match(fresh.artifacts.packaging.data.prompts.landscape, /^根据提供的主题做一张视频封面，主题：/u)
+  // 人工编辑保存：提示词按模板重新生成（带 4:3 / 3:4 规格），但用户改过的内容必须原样留住。
+  assert.match(fresh.artifacts.packaging.data.prompts.landscape, /^生成一张横版短视频封面图，画面比例必须是 4:3/u)
+  assert.match(fresh.artifacts.packaging.data.prompts.portrait, /^生成一张竖版短视频封面图，画面比例必须是 3:4/u)
 
   await assert.rejects(
     host.updatePackaging(currentAgent, { projectId: project.id, expectedRevision: fresh.revision, content: { title: '无标签', copy: '文案', description: '描述', tags: [] } }),
@@ -930,17 +982,48 @@ test('regenerateCover reuses the saved title when the task itself carries none',
     "the cover overlay must read the title from the project saved packaging")
   assert.ok(source.includes('if (!title) title = task.result?.content?.title'),
     "and keep the in-task title as a later fallback")})
-test('the portrait cover is generated at 3:4 so nothing important falls outside the feed crop', async () => {
-  // 抖音、小红书的信息流封面都按 3:4 展示。9:16 生成的图上下会被裁掉约 25%，
-  // 主体很容易被切到——按展示形态生成，主体天然落在必留区里。
+test('covers are generated at 抖音 upload specs: 4:3 landscape and 3:4 portrait', async () => {
+  // 2026-10-25 用户实测反馈：横版封面比例不对。抖音创作者后台的封面模板是
+  // 4:3（横）与 3:4（竖），而旧实现横版用的是 16:9 的 1280*720——传上去会被
+  // 裁掉上下约 25%，主体和标题都可能被切。现在两边都必须严格等于展示规格。
   const source = await readFile(new URL('../spoken-video-publish-host.mjs', import.meta.url), 'utf8')
-  // 尺寸改由一个 size 变量决定（自定义渠道要复用它），但取值必须没变。
-  assert.match(source, /const size = kind === 'landscape' \? '1280\*720' : '1080\*1440'/u)
+
+  // 规格集中在一个常量里，取值必须是 4:3 / 3:4。
+  assert.match(source, /landscape:\s*\{\s*width:\s*1440,\s*height:\s*1080,\s*ratio:\s*4\s*\/\s*3\s*\}/u,
+    '横版必须是 1440x1080（4:3）')
+  assert.match(source, /portrait:\s*\{\s*width:\s*1080,\s*height:\s*1440,\s*ratio:\s*3\s*\/\s*4\s*\}/u,
+    '竖版必须是 1080x1440（3:4）')
+
+  // 不允许再出现旧的 16:9 横版尺寸（注释里回顾历史不算，只看真实取值）。
+  assert.doesNotMatch(source, /['"`]1280\*720['"`]/u, '16:9 的旧横版尺寸必须彻底移除')
+
+  // 提示词里要把比例写死：生图模型（tt-image-2.5）对硬规格的响应远好于白话描述。
   const prompt = buildPublishPrompt({ project: { title: '测试', artifacts: {} } })
-  // 2026-10-10 起提示词简化成固定句式，不再指导构图——3:4 这件事由 size 参数
-  // 落实（1080*1440），不需要在提示词里再说一遍。这里守住句式本身。
-  assert.match(prompt, /根据提供的主题做一张视频封面，主题：<短标题>/u)
-  assert.doesNotMatch(prompt, /竖屏 3:4 比横版更高更窄/u, '构图规则已从提示词移除')
+  assert.match(prompt, /4:3/u, '提示词必须写明横版 4:3')
+  assert.match(prompt, /3:4/u, '提示词必须写明竖版 3:4')
+})
+
+test('横竖两版封面用各自的比例提示词，不能共用一句', async () => {
+  const landscape = coverImagePrompt('测试标题', 'landscape')
+  const portrait = coverImagePrompt('测试标题', 'portrait')
+  assert.match(landscape, /4:3/u)
+  assert.doesNotMatch(landscape, /3:4/u, '横版提示词里不该出现竖版比例')
+  assert.match(portrait, /3:4/u)
+  assert.doesNotMatch(portrait, /4:3/u, '竖版提示词里不该出现横版比例')
+  assert.notEqual(landscape, portrait, '两版提示词必须不同')
+})
+
+test('生图返回的比例不对时会被裁成抖音规格，而不是原样存下', async () => {
+  // 这条守的是兜底：OpenAI 兼容的生图端点经常忽略 size，或只接受自己的
+  // 白名单档位，返回的宽高比可能和目标对不上。只改 size 参数是不够的。
+  const source = await readFile(new URL('../spoken-video-publish-host.mjs', import.meta.url), 'utf8')
+  assert.match(source, /#fitCoverAspect/u, '必须有按目标比例裁切的兜底逻辑')
+  // 两条返回路径（内联 base64 / URL 下载）都要过一遍兜底，漏一条就等于没做。
+  const fitted = source.match(/this\.#fitCoverAspect\(kind/g) || []
+  assert.ok(fitted.length >= 2, `两条封面返回路径都要裁切兜底，实际只有 ${fitted.length} 处`)
+  // 裁切而不是拉伸：拉伸会让主体变形、文字糊掉。
+  assert.doesNotMatch(source, /scale=\$\{target\.width\}:\$\{target\.height\}:force_original_aspect_ratio=increase[^']*'(?!.*crop)/u,
+    '不能只做拉伸')
 })
 
 test('a busy title zone is reported instead of silently stacking text over artwork', async () => {
@@ -992,16 +1075,19 @@ test('the headline wraps at punctuation instead of orphaning a trailing characte
   const strip = (value) => [...String(value)].filter((ch) => ch.trim() !== '').join('')
   assert.equal(strip(lines.join('')), strip('苹果收紧 Mac 磁盘权限，你的 AI 工具还能跑吗'), 'wrapping must not drop characters')
 })
-test('the cover prompt is one fixed sentence with no styling instructions', async () => {
-  // 2026-10-10 用户简化：此前十条硬性规则（风格/场景/人物/蓝调时刻/标题字号/
-  // 倾斜角度/橙色强调…）让模型自由发挥，结果每张封面长得都不一样，规则越多越
-  // 容易跑偏。实测 tt-image-2.5 本身对中文标题的渲染已经很好，不需要用提示词
-  // 反复约束它——现在只给固定句式 + 一个主题，画面交给模型自己的审美。
+test('the cover prompt carries only spec constraints, never styling instructions', async () => {
+  // 2026-10-10 曾把十条硬性规则（风格/场景/人物/蓝调时刻/标题字号/倾斜角度/
+  // 橙色强调…）全部删掉；2026-10-25 又补回了少量约束。两次调整的教训是同一条：
+  // **只补模型确实会做错的硬规格**（比例、文字大小、安全边距），
+  // **绝不加风格词**——风格词才是「每张封面长得都不一样、越写越跑偏」的根源。
   const source = await readFile(new URL('../spoken-video-publish.mjs', import.meta.url), 'utf8')
-  assert.match(source, /根据提供的主题做一张视频封面，主题：/u, '固定句式必须逐字保留')
-  // 旧的十条规则整体消失——它们是「每张封面不一样」的根源。
+  // 硬规格必须在。
+  assert.match(source, /画面比例必须是/u, '比例约束必须在提示词里')
+  assert.match(source, /不得裁切/u, '必须禁止裁切主体文字')
+  assert.match(source, /安全边距/u, '必须留安全边距')
+  // 旧的审美规则一条都不能回来。
   for (const gone of ['【封面生图提示词的硬性要求】', '标题就是画面主体', '蓝调时刻', '微微倾斜约 -4 度', '高饱和亮橙色单独强调', '必须有人物', '具象可辨']) {
-    assert.equal(source.includes(gone), false, `旧规则「${gone}」应已移除`)
+    assert.equal(source.includes(gone), false, `旧审美规则「${gone}」应已移除`)
   }
   // 而「不许写文字」那类禁令更不能回来——模型写中文标题零乱码正是我们要的。
   assert.ok(!source.includes('不要出现任何文字、字母、数字、标点'), 'the no-text rule must stay gone')
@@ -1131,8 +1217,9 @@ test('a custom image service that returns inline base64 still produces a cover',
   assert.equal(done.imageProvider.custom.protocol, 'openai')
   assert.ok(requested.length >= 1, '至少请求了一张封面')
   assert.ok(requested.every((row) => row.auth === 'Bearer sk-custom'), '每次请求都带 Bearer 密钥')
-  // OpenAI 只认 WIDTHxHEIGHT；把百炼的 1280*720 原样发过去会每次都报参数错。
-  assert.ok(requested.some((row) => row.size === '1280x720'), '横版尺寸按 OpenAI 写法')
+  // OpenAI 只认 WIDTHxHEIGHT；把百炼的 `宽*高` 原样发过去会每次都报参数错。
+  assert.ok(requested.some((row) => row.size === '1440x1080'), '横版 4:3 按 OpenAI 写法发送')
+  assert.ok(requested.some((row) => row.size === '1080x1440'), '竖版 3:4 按 OpenAI 写法发送')
   assert.ok(requested.some((row) => row.size === '1080x1440'), '竖版尺寸按 OpenAI 写法')
   // 关键断言：内联 base64 不能再被当成无效地址拒掉。封面最终是否被标题区质检
   // 留下是另一回事（那张测试图是纯色方图，本就该被判掉），与协议无关。
@@ -1210,13 +1297,30 @@ test('a service-side rejection is not disguised as an unreachable service', asyn
 
 /* ------------------------- 封面提示词：固定句式 + 标题优化 ------------------------- */
 
-test('the cover prompt is the fixed sentence with only the topic filled in', () => {
-  // 2026-10-10 用户要求：提示词固定成「根据提供的主题做一张视频封面，主题：<短标题>」。
-  // 逐字照写，不加任何修饰——此前十条自由发挥的规则让每张封面长得都不一样。
-  assert.equal(coverImagePrompt('AI 大模型价格战'), '根据提供的主题做一张视频封面，主题：AI 大模型价格战')
-  const prompt = buildPublishPrompt({ project: { title: 'x', artifacts: {} } })
-  assert.match(prompt, /根据提供的主题做一张视频封面，主题：<短标题>/u, '给 Agent 的句式模板必须逐字一致')
-  assert.match(prompt, /不超过 20 个字/u, '要告诉 Agent 短标题的长度上限')
+test('the cover prompt pins the aspect ratio, the title and the safe margin', () => {
+  // 2026-10-25 重写。旧的「根据提供的主题做一张视频封面，主题：<短标题>」是
+  // 2026-10-10 为 Qwen-Image 简化出来的；生图换成 tt-image-2.5（GPT 系列）后
+  // 约束不住，实测出现比例不对、主体偏小、文字贴边被裁等问题。
+  const landscape = coverImagePrompt('AI 大模型价格战', 'landscape')
+  const portrait = coverImagePrompt('AI 大模型价格战', 'portrait')
+
+  // 硬规格必须显式写进提示词——模型对「画面比例」的响应远好于隐含约束。
+  assert.match(landscape, /4:3/u, '横版要写明 4:3')
+  assert.match(landscape, /1440x1080/u, '横版要给出推荐像素')
+  assert.match(portrait, /3:4/u, '竖版要写明 3:4')
+  assert.match(portrait, /1080x1440/u, '竖版要给出推荐像素')
+
+  // 主体文字是封面的信息载体，必须要求大、居中、不被裁。
+  for (const prompt of [landscape, portrait]) {
+    assert.match(prompt, /AI 大模型价格战/u, '主题文字必须出现在提示词里')
+    assert.match(prompt, /不得裁切/u, '必须禁止裁切主体文字')
+    assert.match(prompt, /安全边距/u, '必须留安全边距，避免平台裁切切掉内容')
+    // 不要堆风格词：那是每张封面长得都不一样、且越来越跑偏的根源。
+    assert.doesNotMatch(prompt, /赛博朋克|水墨|油画|胶片|超写实/u, '不要引入不受控的风格词')
+  }
+
+  const agentPrompt = buildPublishPrompt({ project: { title: 'x', artifacts: {} } })
+  assert.match(agentPrompt, /不超过 20 个字/u, '要告诉 Agent 短标题的长度上限')
 })
 
 test('a title within the limit is passed through untouched', () => {
@@ -1249,8 +1353,8 @@ test('shortening never invents punctuation and always respects the cap', () => {
   assert.ok(cut.endsWith('…'), '句子内部的硬截断要标出省略，否则读者以为是完整标题')
 })
 
-test('the publish result carries the fixed prompt, not whatever the agent wrote', () => {
-  // Agent 总爱在提示词里加修饰词；句式既然是固定的，就不该指望模型听话。
+test('the publish result carries the generated prompt, not whatever the agent wrote', () => {
+  // Agent 总爱在提示词里加修饰词；提示词既然由程序按模板生成，就不该指望模型听话。
   const result = normalizePublishResult({
     title: 'AI 大模型价格战开始了',
     copy: 'c', description: 'd', tags: ['a', 'b'],
@@ -1258,11 +1362,16 @@ test('the publish result carries the fixed prompt, not whatever the agent wrote'
     portraitPrompt: '同样一堆修饰词',
     negativePrompt: '不要模糊、不要畸变',
   })
-  const expected = `根据提供的主题做一张视频封面，主题：${result.coverTitle}`
-  assert.equal(result.prompts.landscape, expected)
-  assert.equal(result.prompts.portrait, expected, '横竖用同一个短标题——两个视觉主体会让画面失焦')
-  assert.equal(result.prompts.negative, '', '固定句式里没有「不要什么」，negative 不再往下传')
+  // 横竖各自带自己的比例，不能共用一句——比例是硬约束。
+  assert.equal(result.prompts.landscape, coverImagePrompt(result.coverTitle, 'landscape'))
+  assert.equal(result.prompts.portrait, coverImagePrompt(result.coverTitle, 'portrait'))
+  assert.match(result.prompts.landscape, /4:3/u)
+  assert.match(result.prompts.portrait, /3:4/u)
+  assert.notEqual(result.prompts.landscape, result.prompts.portrait, '横竖提示词必须区分')
+  assert.equal(result.prompts.negative, '', '模板里没有「不要什么」，negative 不再往下传')
   assert.match(result.coverTitle, /^AI 大模型价格战/u)
+  // Agent 那些修饰词一个字都不能漏进去。
+  assert.doesNotMatch(result.prompts.landscape, /8K|商业海报|戏剧性光影/u)
 })
 
 test('自定义生图：没保存过地址也判为可用，并回传生效中的那份配置', async (t) => {

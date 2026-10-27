@@ -211,9 +211,37 @@ export function shortenCoverTitle(title, { maxLength = 20 } = {}) {
   return `${head}…`
 }
 
-/** 封面生图提示词的固定句式。短标题由标题优化那一步给出。 */
-export function coverImagePrompt(shortTitle) {
-  return `根据提供的主题做一张视频封面，主题：${shortTitle}`
+/**
+ * 封面生图提示词。
+ *
+ * 2026-10-25 用户反馈后重写。旧句式只有一句「根据提供的主题做一张视频封面，
+ * 主题：<短标题>」——它出自 2026-10-10 的一次简化（当时用本机 Qwen-Image，
+ * 模型对中文标题的审美足够好，规则越多越跑偏）。但生图模型已经换成
+ * GPT 系列的 tt-image-2.5，白话短句对它的约束力明显不够，实测封面会出现
+ * 主体偏小、留白过多、文字被裁等问题，比例也随模型自由发挥。
+ *
+ * 现在改成「一句话说清规格 + 分项要点」，只补模型确实会做错的部分，不再
+ * 堆砌风格词（风格词正是让每张封面各不相同、且越来越跑偏的来源）：
+ *   · 比例写死：模型对「画面比例」这类硬规格响应最好，必须显式给出；
+ *   · 标题文字要求：主题文字是封面的信息主体，要求大、居视觉中心、不裁切；
+ *   · 安全区：禁止把主体/文字贴边，避免平台侧裁切时切掉关键内容；
+ *   · 画面结构：单一视觉主体 + 高对比，对应信息流缩略图只有拇指大小的现实。
+ *
+ * 仍然不写 negativePrompt：固定句式的正向约束已经够用，且部分中转端点对
+ * negative_prompt 支持不一致，写了反而可能报错。
+ */
+export function coverImagePrompt(shortTitle, kind = 'landscape') {
+  const spec = kind === 'portrait'
+    ? '画面比例必须是 3:4（宽:高 = 3:4，推荐 1080x1440 像素）'
+    : '画面比例必须是 4:3（宽:高 = 4:3，推荐 1440x1080 像素）'
+  return [
+    `生成一张${kind === 'portrait' ? '竖版' : '横版'}短视频封面图，${spec}，严格按此比例构图，不要生成其他比例。`,
+    `画面主体文字：${shortTitle}`,
+    '文字要求：主体文字要大而醒目，占画面主要位置，使用清晰的无修饰中文黑体，笔画完整，不得裁切、变形、被其他元素遮挡，不得出现错别字或乱码。',
+    '构图要求：整幅画面只有一个明确视觉主体，主体与文字集中在画面中央区域，四周留出至少 6% 的安全边距，任何文字和关键图形都不要贴边。',
+    '画面要求：高对比度、层次分明，色彩饱满，背景简洁不抢主体；不要使用大面积纯白或纯黑背景，不要出现细碎密集的小字和繁杂装饰。',
+    '用途：这是手机信息流里以缩略图形式展示的封面，必须保证缩小到拇指大小时仍能一眼看清主体和文字。',
+  ].join('\n')
 }
 
 export function buildPublishPrompt({ project }) {
@@ -230,19 +258,18 @@ export function buildPublishPrompt({ project }) {
     '  - 禁止空泛的「你怎么看」「评论区聊聊」；禁止抽奖、转发有礼、关注才告知结局式诱导；',
     '  - 故事类内容不得在标题或文案里剧透结局，用悬念缺口代替结论；',
     '  - 视频文案（copy）以稿件内容本身为主，不加互动话术——互动引导只在描述区，避免每条视频都像在讨评论。',
-    // 封面提示词：**固定句式，只填主题**。
+    // 封面提示词：**由程序按固定模板生成，Agent 只负责给短标题**。
     //
-    // 2026-10-10 用户简化：此前十条规则（风格/场景/人物/色调/标题样式/分行…）让
-    // 模型自由发挥，结果每张封面长得都不一样，而且规则越多越容易跑偏。实测
-    // tt-image-2.5 本身对中文标题的渲染已经很好（零乱码、关键词可着色），不需要
-    // 用提示词去反复约束它。
+    // 2026-10-25 用户反馈后调整：生图模型换成 GPT 系列（tt-image-2.5）后，
+    // 纯白话短句约束不住它，封面出现比例不对、主体偏小等问题。现在提示词
+    // 里写死了 4:3 / 3:4 比例、文字大小、安全边距等硬规格——这些由代码保证，
+    // 不再依赖 Agent 自由发挥。
     //
-    // 现在只给一句固定前缀 + 一个主题，画面怎么画交给模型自己的审美——这反而
-    // 更稳，也让人一眼看懂提示词在说什么。
+    // 所以这里 Agent 的任务收窄成：产出一个合格的封面短标题。提示词两个字段
+    // 仍要求非空（schema 校验），但内容不会被直接使用。
     '【封面生图提示词】',
-    '固定句式，逐字照写，只把 <短标题> 替换成本条视频的封面短标题：',
-    '根据提供的主题做一张视频封面，主题：<短标题>',
-    '<短标题> 要求：不超过 20 个字；保留视频标题里的核心专有名词与数字（如 WTO、GPT、AI、50%）；',
+    '横竖两版提示词都由程序按固定模板生成（横版 4:3、竖版 3:4，并已包含文字大小与安全边距要求），你不需要写句式，只需要两个字段都填非空值。',
+    '真正决定封面效果的是你给的「短标题」，要求：不超过 20 个字；保留视频标题里的核心专有名词与数字（如 WTO、GPT、AI、50%）；',
     '不要写成完整句子、不要加标点结尾、不要出现「视频」「封面」这类词。',
   // 封面三要素只作**取舍判据**，不是新增格式要求。
   '封面短标题的三个要素：观众视角（谁会点）、具体数字（多具体）、一句话结论（看完知道什么）。三个不必齐全，但**没有数字**时从原标题里找一个真实数字补上（专有名词和数字都要保留），**没有结论**时压缩成一个判断句。不要为了凑要素编造数字——稿件里没有就用专有名词替代。',
@@ -274,14 +301,20 @@ export function normalizePublishResult(value) {
   // 提示词不再直接采用 Agent 返回的内容——统一按固定句式重写，主题取封面短标题。
   //
   // 为什么不信任 Agent 给的提示词：句式是固定的，而模型总会「顺手」加些修饰
-  // （风格词、场景描述）。2026-10-10 用户要求逐字照写成「根据提供的主题做一张
-  // 视频封面，主题：<短标题>」，那就在这里保证它一定成立，而不是指望模型听话。
-  // Agent 返回的两版提示词仍要求非空（上面已校验），作为「它确实思考过封面」的信号。
+  // （风格词、场景描述）。一旦把这些自由发挥带进生图请求，每张封面都会长得
+  // 不一样，而且比例、主体大小都会失控。这里保证规格约束一定成立，而不是
+  // 指望模型听话。Agent 返回的两版提示词仍要求非空（上面已校验），作为
+  // 「它确实思考过封面」的信号。
+  //
+  // 横竖两版必须分别生成：比例是硬约束，横版写 4:3、竖版写 3:4，不能共用一句。
   const shortTitle = shortenCoverTitle(title)
-  const prompt = coverImagePrompt(shortTitle)
   return {
     content: { title, copy, description, tags },
-    prompts: { landscape: prompt, portrait: prompt, negative: '' },
+    prompts: {
+      landscape: coverImagePrompt(shortTitle, 'landscape'),
+      portrait: coverImagePrompt(shortTitle, 'portrait'),
+      negative: '',
+    },
     coverTitle: shortTitle,
   }
 }
@@ -300,12 +333,65 @@ export function publishImageRequest({ model, prompt, negativePrompt, size }) {
   }
 }
 
+/**
+ * 通用异步协议的提交体。
+ *
+ * 2026-10-26 实测：聚合服务（lk888）的 `/v1/media/generate` 要的是**顶层
+ * prompt**，不是百炼那套 `input.messages[].content[].text`——后者会被判
+ * 「缺少必要参数 prompt」，任务根本建不起来：
+ *   {"code":400,"data":{"详情":"缺少必要参数 prompt（可放在请求体顶层，也可放在 params 里）"}}
+ *
+ * 它同时接受 `size` 写成 `1280x720` 或 `1280*720` 两种，两种都实测通过。
+ *
+ * 所以这里单独给一套扁平体：既有 `input.messages`（百炼/SciTiger 认），也有
+ * 顶层 `prompt` 与 `params`（聚合服务认）。多写的字段对认不认它们的服务都是
+ * 无害的，而少写任何一个都会让其中一族直接失败。
+ */
+export function customAsyncImageRequest({ model, prompt, negativePrompt, size }) {
+  return {
+    model: clipped(model, 120) || PUBLISH_IMAGE_MODEL,
+    prompt,
+    params: { size, n: 1, ...(negativePrompt ? { negative_prompt: negativePrompt } : {}) },
+    input: { messages: [{ role: 'user', content: [{ text: prompt }] }] },
+    parameters: {
+      size,
+      n: 1,
+      prompt_extend: true,
+      watermark: false,
+      ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
+    },
+  }
+}
+
 export function imageTaskId(value) {
-  return clipped(value?.output?.task_id || value?.output?.taskId || value?.task_id || value?.taskId, 200) || null
+  // 2026-10-26：多认一种聚合服务的形态——它把任务 id 放在 `data.task_id`
+  // （或 `data.task_ids[0]`），而不是百炼那套的 `output.task_id`。
+  // 2026-10-26 实测 lk888 的 `/v1/media/generate` 就是这个形态：
+  //   {"code":200,"data":{"task_id":190654098,"task_ids":[190654098]},"msg":"任务创建成功"}
+  // 少认这一处，提交会被当成「没拿到任务 id」，封面就永远等不到图。
+  const nested = value?.data
+  return clipped(
+    value?.output?.task_id || value?.output?.taskId || value?.task_id || value?.taskId
+    || nested?.task_id || nested?.taskId || (Array.isArray(nested?.task_ids) ? nested.task_ids[0] : null),
+    200,
+  ) || null
 }
 
 export function imageTaskState(value) {
-  return clipped(value?.output?.task_status || value?.output?.taskStatus || value?.task_status || value?.status, 40).toUpperCase() || null
+  // 同上：聚合服务用 `state`（running/success/failed）而不是 `status`，
+  // 且把它放在顶层或 `data` 里。
+  //
+  // 2026-10-26 修正取值顺序：**先读英文的 `state`，再读 `status`**。
+  // 实测 lk888 的响应里 `status` 是中文（"处理中"/"已完成"），而失败判定
+  // 比的是英文状态名（FAILED/CANCELED/…）。先读 status 会读到 "处理中"，
+  // 于是失败态永远认不出来——任务失败时只能一路等到轮询超时。
+  const nested = value?.data
+  return clipped(
+    value?.output?.task_status || value?.output?.taskStatus || value?.task_status
+    || value?.state || nested?.state
+    || value?.status || nested?.status || nested?.task_status,
+    40,
+  ).toUpperCase() || null
 }
 
 export function extractPublishImageUrl(value) {
@@ -316,6 +402,17 @@ export function extractPublishImageUrl(value) {
       const candidate = typeof item?.image === 'string' ? item.image : typeof item?.url === 'string' ? item.url : null
       if (candidate?.trim()) return candidate.trim()
     }
+  }
+  // 2026-10-26：聚合服务的完成态把图放在 `result_url`（单张）或
+  // `result_urls`（多张）里，位置在顶层或 `data` 下。实测 lk888：
+  //   {"state":"success","is_final":true,"result_type":"image","result_url":"https://...png","result_urls":["https://...png"]}
+  for (const source of [value, value?.data]) {
+    if (!source || typeof source !== 'object') continue
+    const single = typeof source.result_url === 'string' ? source.result_url : null
+    if (single?.trim()) return single.trim()
+    const list = Array.isArray(source.result_urls) ? source.result_urls : []
+    const first = list.find((item) => typeof item === 'string' && item.trim())
+    if (first) return first.trim()
   }
   for (const key of ['results', 'images']) {
     const items = Array.isArray(value?.output?.[key]) ? value.output[key] : []

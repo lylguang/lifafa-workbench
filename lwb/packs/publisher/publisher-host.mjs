@@ -460,6 +460,7 @@ export class PublisherHost {
       this.onLog('publish', `${platformLabel(account.platform)}：${detail}`)
       await this.#capture(account, jobId, `step-${phase}`)
     }
+    let awaitingConfirm = false
     try {
       await this.store.mutateJob(jobId, (item) => { item.status = 'running'; item.phase = 'open' })
       this.busy.add(account.id)
@@ -468,6 +469,12 @@ export class PublisherHost {
       if (signal) {
         signal.addEventListener('abort', () => { void this.browser.close(account.id) }, { once: true })
       }
+      // 任务运行期间必须暂停空闲回收：大视频上传要十来分钟，期间没有任何
+      // touch() 调用，idleTimeoutMs（默认 10 分钟）到点就会把正在上传的浏览器
+      // 关掉——2026-10-24 两次实测都在 editor 阶段后约 10 分钟报
+      // "Target page, context or browser has been closed"，就是这条 timer。
+      // await/finally 保证任何退出路径都会解除 hold。
+      this.browser.hold(account.id)
       const result = await adapter.publish(page, {
         videoPath,
         content: (await this.store.getJob(jobId)).content,
@@ -490,10 +497,9 @@ export class PublisherHost {
           item.phase = 'awaiting-confirm'
         })
         await this.#capture(account, jobId, 'step-awaiting-confirm')
-        // 停在这里等人点「发表」：暂停浏览器的空闲回收。默认 10 分钟没交互就把
-        // 会话关掉，而这一档恰恰要用户慢慢填、随时提交（2026-10-13 反馈「停留久了
-        // 网页会自动关闭」）。用户点「我已发布」或取消时再 release。
-        this.browser.hold(account.id)
+        // 停在这里等人点「发表」：保持 hold（任务开始时就已设置）。用户点
+        // 「我已发布」或取消时再 release。
+        awaitingConfirm = true
       }
       this.onLog('publish', result.submitted ? '发布已提交。' : '已停在发布前，等待人工确认。')
     } catch (error) {
@@ -512,6 +518,9 @@ export class PublisherHost {
       }
       this.onLog('publish', `发布失败：${message}`)
     } finally {
+      // 失败/取消路径解除 hold，让空闲回收重新接管；succeeded 时浏览器已经关了，
+      // release 对不存在的会话是 no-op。awaiting-confirm 保持 hold 等用户。
+      if (!awaitingConfirm) this.browser.release(account.id)
       this.busy.delete(account.id)
     }
   }

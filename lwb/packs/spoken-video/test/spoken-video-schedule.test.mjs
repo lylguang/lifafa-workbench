@@ -11,6 +11,7 @@ import {
   isoWeekday,
   missedSlot,
   nextRunAt,
+  NO_PROGRESS_BUDGET_MS,
   parseScheduleRequest,
   reduceRunStatus,
   SCHEDULE_SCHEMA,
@@ -1250,6 +1251,50 @@ test('cloud voiceover is not blocked by the local-model memory floor', async (t)
   assert.notEqual(memory.status, 'blocked', '云端配音不被内存门槛拦下')
 })
 
+test('云端配音时本地 TTS 引擎不可用不阻断（本地引擎用不上）', async () => {
+  // 2026-10-26 实测的 bug：任务「11」用云端小米 MiMo 配音，8188 引擎根本没起，
+  // 但「开工前体检」把这一项判成 blocked，整轮被挡在「体检未过·未启动」。
+  //
+  // 根因是不一致：同一段代码里「桥接不可达」已经正确处理了云端配音
+  // （cloudOnly → 不阻断），但「引擎不可达」漏了同样的判断。本地引擎只在本轮
+  // 真走本地推理时才是硬要求。
+  const { runPreflight } = await import('../spoken-video-runtime-preflight.mjs')
+  const report = await runPreflight({
+    steps: ['voiceover', 'video'],
+    mediaStatus: {
+      connection: { provider: 'mimo', providers: { mimo: { configured: true } } },
+      ttsConfigured: true,
+    },
+    publishStatus: null,
+    // 引擎拉不起来 —— 这正是线上那台机器的状态（8188 没起）。
+    ensureEngine: async () => ({ ok: false, detail: '等待引擎就绪超时' }),
+    environment: { LWB_PREFLIGHT_MEMORY_FLOOR_MIB: '1' },
+  })
+  const engine = report.checks.find((item) => item.key === 'engine.tts')
+  assert.ok(engine, '引擎项总会被检查')
+  assert.notEqual(engine.status, 'blocked', `云端配音不该被本地引擎拦下，实际 ${engine.status}`)
+  assert.equal(report.blockers.length, 0, `不应有阻断项：${JSON.stringify(report.blockers)}`)
+})
+
+test('本地配音时引擎不可用仍然阻断（这条不能放过）', async () => {
+  // 反向锁：走本机桥接（scitiger）时，8188 确实是必需的，引擎起不来就必须
+  // 阻断——否则这一轮会跑到一半才发现没有配音引擎。
+  const { runPreflight } = await import('../spoken-video-runtime-preflight.mjs')
+  const report = await runPreflight({
+    steps: ['voiceover', 'video'],
+    mediaStatus: {
+      connection: { provider: 'scitiger', providers: { scitiger: { configured: true } } },
+      ttsConfigured: true,
+    },
+    publishStatus: null,
+    ensureEngine: async () => ({ ok: false, detail: '等待引擎就绪超时' }),
+    environment: { LWB_PREFLIGHT_MEMORY_FLOOR_MIB: '1' },
+  })
+  const engine = report.checks.find((item) => item.key === 'engine.tts')
+  assert.ok(engine, '引擎项总会被检查')
+  assert.equal(engine.status, 'blocked', '本地配音时引擎不可用必须阻断')
+})
+
 test('a slot missed while the host was down is logged once and never backfilled', async (t) => {
   const { host, currentAgent, fake, file } = await setup(t, { neverDone: 'topic' })
   const created = await createTask(host, currentAgent, { days: [5], time: '21:00' })
@@ -1577,4 +1622,22 @@ test('依赖恢复后桥接自愈会被再次调用，而不是一次性', async
   assert.ok(attempts >= 3, `重试必须真的重进本阶段，实际 ${attempts} 次`)
   assert.ok(bridgeProbes >= 2, `每次失败都要探一次桥接，实际 ${bridgeProbes} 次`)
   assert.equal(run.items[0].stages.find((s) => s.step === 'voiceover').status, 'done', '恢复后配音阶段应该完成')
+})
+
+test('选题的停滞预算必须显著高于它的真实耗时', async () => {
+  // 2026-10-25 实测：选题生成的模型阶段真实耗时是 313 / 406 / 461 / 508 秒
+  // （5–8.5 分钟）。当时停滞预算是 8 分钟，等于让正常任务贴着红线跑，
+  // 慢一点就被误判「卡死」。当天确实出现了
+  // `SPOKEN_VIDEO_SCHEDULE_NO_PROGRESS 选题已连续 8 分钟没有任何进展`。
+  //
+  // 这条用例把「预算必须有安全余量」钉住：不得低于实测最慢值（508s）的 1.5 倍。
+  const measuredSlowestMs = 508 * 1000
+  assert.ok(NO_PROGRESS_BUDGET_MS.topic >= measuredSlowestMs * 1.5,
+    `选题停滞预算 ${NO_PROGRESS_BUDGET_MS.topic / 60000} 分钟对实测最慢 8.5 分钟余量不足`)
+  // 写稿同样要留余量：结构化输出装整篇稿子的思考和续写都在这个预算内。
+  assert.ok(NO_PROGRESS_BUDGET_MS.script >= 10 * 60_000,
+    '写稿停滞预算不得低于 10 分钟')
+  // 停滞预算不能超过硬性上限，否则前者永远不触发。
+  assert.ok(NO_PROGRESS_BUDGET_MS.topic <= STEP_TIMEOUT_MS.topic)
+  assert.ok(NO_PROGRESS_BUDGET_MS.script <= STEP_TIMEOUT_MS.script)
 })

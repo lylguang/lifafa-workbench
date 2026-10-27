@@ -85,6 +85,10 @@ export function projectDshSessionEvent(event, fallbackAt) {
     case 'step/start': return { ...base, status: 'running', label: 'DSH 正在请求模型生成' }
     case 'llm/retry-started': return { ...base, status: 'running', label: '模型请求异常，DSH 正在重试' }
     case 'llm/retry': return { ...base, status: 'done', label: '模型重试步骤结束' }
+    // 额度耗尽后的换模型兜底：不是「同一个模型又试了一次」，而是换到另一个
+    // 还有额度的模型重跑。必须说清楚，否则用户看到「模型重试步骤结束」会以为
+    // 原地重试能解决（实际上原地重试永远不会恢复）。
+    case 'quota/fallback': return { ...base, status: 'running', label: '当前模型额度已耗尽，正在换用有额度的模型重跑' }
     case 'tool/call': {
       const name = safeToolName(event.data?.name)
       if (name === 'structured_output') return { ...base, status: 'running', label: 'DSH 正在提交候选结构' }

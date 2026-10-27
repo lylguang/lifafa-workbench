@@ -38,11 +38,31 @@ const RULES = [
     remedyTarget: 'media-connection',
   },
   {
+    // 模型网关的额度耗尽要和「普通限流」分开讲。2026-10-25 实测：默认模型
+    // workbuddy-ai/minimax-m3.1-flash 的额度包用完后，网关对每次请求都直接
+    // 回 429「Credits exhausted」，0.8 秒内失败；而同一个网关下 hy3、
+    // deepseek-v4.1-flash、group/smart-split 全都 200。也就是说这不是
+    // 「等一会儿就好」的限流，退避重试永远等不到恢复，只有换模型或充值能解。
+    // 所以这条 retryable=false 且 autoRepair=null：不要拿退避去烧阶段预算，
+    // 直接把人指向真正能解决它的两个动作。
+    category: 'credential.model_quota',
+    // 测试只认「额度真的用完了」的明确措辞，不认「模型 + 额度」这种宽松搭配：
+    // 后者会把「模型返回 429 限流」也吞进不可重试的桶里，而限流恰恰是该退避的。
+    test: /(credits?\s*(exhausted|insufficient|depleted)|quota\s*(exhausted|exceeded)|credit\s*package|add-on\s*packs?|账户.{0,8}(额度|余额).{0,6}(不足|耗尽|用完)|额度.{0,6}(不足|耗尽|用完))/iu,
+    retryable: false,
+    remedy: '当前默认模型的额度已耗尽（网关返回 429 Credits exhausted），自动重试不会恢复。请在「设置 → 模型」把默认模型切换到仍有额度的模型（例如 workbuddy-ai/hy3、workbuddy-ai/deepseek-v4.1-flash），或到 https://www.codebuddy.ai/profile/usage 购买额度包后再重试。',
+    remedyTarget: 'model-settings',
+  },
+  {
     category: 'credential.quota',
     test: /(\b429\b|too\s*many\s*requests|rate[\s-]?limit|额度|配额|余额不足|quota)/iu,
     retryable: true,
     autoRepair: 'backoff',
-    remedy: '云端服务限流或额度不足。系统会自动退避重试；若持续出现请检查配额与并发。',
+    // 2026-10-26：配音的 429 有个特殊之处——小米 MiMo 对**声音克隆**的限流按
+    // 「同时在飞的请求数」算，不是按请求速率。所以「等一会儿再试」这类退避
+    // 并不解决问题，真正要解决的是别让多个复刻请求同时在飞（代码已按模式
+    // 串行化）。文案要说清这两层，否则用户会一直等一个不会自己好的东西。
+    remedy: '云端服务限流或额度不足。系统会自动退避重试；若持续出现请检查配额与并发。使用声音克隆（上传参考音频）时尤其要注意：该渠道按「同时在飞的请求数」限流而不是按速率，所以已经改为串行合成——若仍失败，多半是配额本身不够用，请检查服务商的用量与限流额度。',
     remedyTarget: null,
   },
   {
@@ -96,6 +116,21 @@ const RULES = [
     // 这是程序/环境缺陷，不是用户内容问题：重跑同一浏览器只会再等满整片渲染又拿空片。
     // 给可执行动作——改用 Edge 或显式指定浏览器——而不是让用户「调整画面要求重跑」。
     remedy: '渲染管线不能在当前浏览器画出画面（探测帧只有一种颜色），属于程序/环境问题，重跑没有用。请改用 Microsoft Edge，或设置环境变量 LWB_REMOTION_BROWSER_EXECUTABLE 指向 chrome-headless-shell / Edge 的可执行文件后重跑；也可点「反馈问题」附上这条任务编号。',
+    remedyTarget: null,
+  },
+  {
+    // 独立审片不通过：成片渲染出来了、技术质检也过了，但审片 Agent 指出
+    // 了具体的视觉问题（元素迟到、语义与结论相反、断词换行错位等），定向
+    // 修复若干轮后仍未达标。
+    //
+    // 为什么单列一条：2026-10-26 实测这条被误报成 code.defect「内部缺陷，
+    // 请反馈给开发者」。实际根因是内容质量没达标——重跑/再修能解，不是代码
+    // bug。而且下面的 content.qc_failed 讲的是另一回事（画面几乎全程静止、
+    // 疑似渲染没画出内容），两者的处置完全不同，不能共用一条文案。
+    category: 'content.editorial_rejected',
+    test: /(未通过独立审片|独立审片未通过|仍未通过独立审片|审片.{0,6}(未通过|不通过)|editorial.{0,10}(reject|fail))/iu,
+    retryable: false,
+    remedy: '成片已经渲染出来、技术质检也过了，但独立审片指出了具体的画面问题（例如元素出现时机不对、画面语义与结论相反、断词换行错位），系统定向修复若干轮后仍未达标。这是画面质量没达标，不是程序故障：可以点「重试」再跑一轮定向修复，或在稿件里调整对应段落后重跑。',
     remedyTarget: null,
   },
   {
@@ -189,12 +224,14 @@ export const CATEGORY_LABEL = Object.freeze({
   'credential.invalid': '密钥失效',
   'credential.missing': '密钥未配置',
   'credential.quota': '限流或额度不足',
+  'credential.model_quota': '模型额度耗尽',
   'engine.down': '本地引擎不可用',
   'host.restart': '主机重启打断',
   'record.missing': '记录丢失',
   'timeout.no_progress': '阶段停滞',
   'timeout.ceiling': '超过时间上限',
   'content.qc_failed': '成片质检未过',
+  'content.editorial_rejected': '独立审片未通过',
   'video.render_pipeline': '渲染管线不可用',
   'content.invalid': '内容格式无效',
   'publish.blocked': '发布目标不可用',

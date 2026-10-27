@@ -207,7 +207,17 @@ test('rejects symlinked workspace instead of reading or clearing an ordinary dir
   await mkdir(outside)
   await writeFile(join(outside, 'precious.txt'), 'keep')
   await rm(context.workspacePath, { recursive: true })
-  await symlink(outside, context.workspacePath, 'dir')
+  try {
+    await symlink(outside, context.workspacePath, 'dir')
+  } catch (error) {
+    // Windows 未开开发者模式/无符号链接特权时无法构造该场景（实测 EPERM）：
+    // 是环境限制而不是被测代码的问题，跳过而不是让整套测试红。
+    if (error.code === 'EPERM' || error.code === 'EACCES' || error.code === 'ENOTSUP') {
+      t.skip(`this OS denies symlink creation (${error.code})`)
+      return
+    }
+    throw error
+  }
   await assert.rejects(manager.activate(manifest()), code('PACK_WORKSPACE_UNSAFE'))
   await assert.rejects(manager.clearData('spoken-video'), code('PACK_WORKSPACE_UNSAFE'))
   assert.equal(await readFile(join(outside, 'precious.txt'), 'utf8'), 'keep')

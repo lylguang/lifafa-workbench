@@ -261,6 +261,18 @@ export async function runPreflight({ steps = [], mediaStatus = null, publishStat
 
   // --- 本地引擎（仅当本轮真的要用本地推理）---
   if (wantsMedia && health.ok || (wantsMedia && checks[0]?.status === 'ok')) {
+    // 本地引擎只在本轮**真的走本地推理**时才是硬要求。走云端配音时，8188 起不来
+    // 完全不影响这一轮——配音直接打小米 MiMo 的云端接口。
+    //
+    // 2026-10-26 实测的 bug：上面「桥接不可达」那段已经正确处理了云端配音
+    // （`cloudOnly` → 不阻断），但这一段**漏了同样的判断**——桥接活着、8188
+    // 引擎没起，就硬判 blocked。结果是：任务「11」用的是云端小米 MiMo 配音，
+    // 引擎其实用不上，却因为这个误判被「开工前体检」拦住，整轮根本没启动
+    // （体检未过·未启动）。两条云端配音任务都栽在这里。
+    //
+    // 判据与桥接那段保持一致：provider 是 bailian / mimo 就是云端配音。
+    const mediaProvider = mediaStatus?.connection?.provider || ''
+    const cloudTts = ['bailian', 'mimo'].includes(mediaProvider)
     for (const [kind, label] of [['tts', '字幕/配音引擎（8188）'], ['image', '封面生图引擎（8187）']]) {
       if (kind === 'image' && !wantsCover) continue
       const result = await probeJson(`${base}/admin/engines`)
@@ -277,6 +289,10 @@ export async function runPreflight({ steps = [], mediaStatus = null, publishStat
         checks.push(ok(`engine.${kind}`, label, `已自动拉起（${fixed.reason}）`))
       } else if (kind === 'image') {
         checks.push(degraded(`engine.${kind}`, label, `未运行且自动拉起失败：${fixed.detail || '未知原因'}`, '封面可人工上传；如需自动生成请打开桥接配置中心点「一键启动」'))
+      } else if (cloudTts) {
+        // 云端配音不依赖 8188：这一轮照样能配好音，只是用不上本地引擎。
+        // 判成 blocked 会把整轮挡在「开工前体检」，白白不启动。
+        checks.push(degraded(`engine.${kind}`, label, `未运行且自动拉起失败：${fixed.detail || '未知原因'}`, '当前走云端配音，不需要本地引擎，不影响本轮；如需本地配音请打开桥接配置中心 http://127.0.0.1:8199/ 点「一键启动」。'))
       } else {
         checks.push(blocked(`engine.${kind}`, label, `未运行且自动拉起失败：${fixed.detail || '未知原因'}`, '请打开桥接配置中心 http://127.0.0.1:8199/ 点「一键启动」。注意 16G 显卡上生图与配音不能同时驻留。'))
       }
