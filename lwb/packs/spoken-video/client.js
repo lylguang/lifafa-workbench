@@ -3021,6 +3021,17 @@ window.__ModuleLoader__.load({
         }
         catch (cause) { setError(cause.message); } finally { setReportBusy(false); }
       };
+      // 仅保存：存下当前修改但留在写稿页。旧实现只有「保存并进入配音」一条路，
+      // 想先存着回头再改的用户被迫跳页。
+      const saveOnly = async () => {
+        if (!dirty || !detail) return;
+        setBusy(true);
+        try {
+          const saved = await commit(detail, 'script', { body });
+          if (!saved) return;
+          await refresh(); await reload(); setError(null);
+        } finally { setBusy(false); }
+      };
       const approve = () => ask({
         title: dirty ? '保存并进入配音' : '进入配音', confirm: dirty ? '保存并进入' : '进入配音',
         copy: dirty ? `保存「${detail.title}」当前修改并进入配音？` : `选择「${detail.title}」进入配音模块？`,
@@ -3316,7 +3327,10 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sv-tp-drawer-foot' },
             drawerMode === 'edit' ? h(React.Fragment, null,
               h('p', { className: 'sv-sc-gate-note' }, dirty ? '保存当前修改并进入配音' : '当前稿件可直接进入配音'),
-              h('span', { style: { display: 'flex', gap: '8px', flex: 'none' } }, h('button', { type: 'button', className: 'lwb-plain-button', disabled: saving || anyRunning, onClick: discardEdits }, '取消编辑'), h('button', { type: 'button', className: 'lwb-primary-button sv-sc-approve', disabled: busy || saving || projectBusy || !body.trim(), onClick: approve }, busy || saving ? '正在处理…' : dirty ? '保存并进入配音' : '进入配音')),
+              h('span', { style: { display: 'flex', gap: '8px', flex: 'none' } },
+                h('button', { type: 'button', className: 'lwb-plain-button', disabled: saving || anyRunning, onClick: discardEdits }, '取消编辑'),
+                dirty ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: busy || saving || projectBusy || !body.trim(), onClick: () => { void saveOnly(); } }, busy || saving ? '正在保存…' : '仅保存') : null,
+                h('button', { type: 'button', className: 'lwb-primary-button sv-sc-approve', disabled: busy || saving || projectBusy || !body.trim(), onClick: approve }, busy || saving ? '正在处理…' : dirty ? '保存并进入配音' : '进入配音')),
             ) : approved ? h(React.Fragment, null,
               h('div', { className: 'sv-sc-ritual' }, h('div', { className: 'sv-sc-ritual-info' }, h('strong', null, '稿件已保存 · 可进入配音'), h('span', null, `版本 ${detail.artifacts?.script?.revision || '—'}`))),
               h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => enterEditor(readableScript) }, '编辑稿件'),

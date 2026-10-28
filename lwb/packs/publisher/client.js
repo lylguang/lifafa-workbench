@@ -193,6 +193,18 @@ window.__ModuleLoader__.load({
       .pb-run-msg[data-tone="muted"] { color:var(--lwb-muted); background:var(--lwb-line); }
       @keyframes pb-pulse { 0%,100% { opacity:1 } 50% { opacity:.25 } }
       @media (prefers-reduced-motion: reduce) { .pb-steps li[data-state="current"]::before { animation:none; } }
+      /*
+       * 移动端适配。过去整包只有 prefers-reduced-motion 一条 media query：
+       *   · 390px 下两列表单每列约 155px，装不下「发布策略」的长选项；
+       *   · 右下角固定 340px 悬浮横幅盖住页面底部操作区。
+       * 这里补上窄屏规则：单列表单、横幅贴边全宽，避免横向滚动与遮挡。
+       */
+      @media (max-width:680px) {
+        .pb-form-grid { grid-template-columns:1fr; }
+        .pb-shelf { grid-template-columns:1fr; }
+        .pb-run { right:8px; left:8px; bottom:8px; width:auto; }
+        .pb-actions { flex-wrap:wrap; }
+      }
       .pb-error, .pb-note { margin:0; padding:10px 11px; border:1px solid #e6b5b5; border-radius:7px; color:#994646; background:#fff7f7; font-size:var(--lwb-text-sm,13px); line-height:1.55; white-space:pre-wrap; }
       .pb-note { border-color:#bad5ed; color:#486277; background:#f7fbff; }
       .pb-warn { margin:0; padding:10px 11px; border:1px solid #e2c58a; border-radius:7px; color:#7a5b17; background:#fffaf0; font-size:var(--lwb-text-sm,13px); line-height:1.55; }
