@@ -101,6 +101,19 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'bm-empty' }, text);
     }
 
+    /**
+     * 列表区的三态渲染：加载中 → 出错 → 空 → 有内容。
+     *
+     * 顺序很重要：出错时不能再显示「还没有…」，否则用户会以为数据被清了，
+     * 而不是去修网络/服务。加载中也不能显示空态，那是「误报数据没了」。
+     */
+    function ListState({ loading, error, empty, emptyText, children }) {
+      if (loading) return h('div', { className: 'bm-empty', 'aria-busy': 'true' }, '正在读取…');
+      if (error) return h('div', { className: 'bm-empty bm-empty-error', role: 'alert' }, `读取失败：${error}`);
+      if (empty) return h(EmptyState, { text: emptyText });
+      return children;
+    }
+
     function TagRow({ tags }) {
       const list = Array.isArray(tags) ? tags : [];
       return list.length ? h('div', { className: 'bm-tag-row' }, list.map((tag) => h('span', { key: tag, className: 'bm-tag' }, tag))) : null;
@@ -140,9 +153,19 @@ window.__ModuleLoader__.load({
       return null;
     }
 
+    /**
+     * 读取异步数据，并把「加载中 / 有数据 / 出错」三种状态分开暴露。
+     *
+     * 旧实现只有 data 与 error：data 初值 null，于是页面打开瞬间 data 恒为空，
+     * 空态文案（「还没有对标账号」）会在请求回来之前先闪一次；请求失败后
+     * data 仍是 null，用户看到的依然是「还没有数据」而不是错误——两者都误导。
+     *
+     * loading 只在**首次**加载时为 true；silent 刷新不会让已有内容闪烁。
+     */
     function useAsyncData(loader) {
       const [data, setData] = React.useState(null);
       const [error, setError] = React.useState(null);
+      const [loading, setLoading] = React.useState(true);
       const loaderRef = React.useRef(loader);
       loaderRef.current = loader;
       const reload = React.useCallback(async (silent = false) => {
@@ -153,10 +176,14 @@ window.__ModuleLoader__.load({
           setError(null);
         } catch (cause) {
           if (!silent) setError(cause.message || String(cause));
+        } finally {
+          setLoading(false);
         }
       }, []);
       React.useEffect(() => { void reload(); }, [reload]);
-      return { data, error, reload, setError };
+      // ready 只在「拿到过数据」后为真，供空态判断使用。
+      const ready = !loading && !error && data !== null;
+      return { data, error, loading, ready, reload, setError };
     }
 
     function accountNameOf(accountId, accounts) {
@@ -179,7 +206,7 @@ window.__ModuleLoader__.load({
     /* ---------------- 对标账号 ---------------- */
 
     function AccountsPage() {
-      const { data, error, reload, setError } = useAsyncData(() => remote('listAccounts'));
+      const { data, error, loading, reload, setError } = useAsyncData(() => remote('listAccounts'));
       const { ask, confirmNode } = useConfirm();
       const [busy, setBusy] = React.useState('');
       const [editing, setEditing] = React.useState(null);
@@ -232,8 +259,8 @@ window.__ModuleLoader__.load({
             editing ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(busy), onClick: () => { setEditing(null); setForm({ platform: form.platform, name: '', url: '', note: '', tags: '' }); } }, '取消编辑') : null,
           ),
         ),
-        !accounts.length ? h(EmptyState, { text: '还没有对标账号。先添加 1-3 个你想学习的账号，再去「爆款拆解」录入它们的内容。' })
-          : h('div', { className: 'bm-list' }, accounts.map((account) => h('div', { key: account.id, className: 'bm-card' },
+        h(ListState, { loading, error, empty: !accounts.length, emptyText: '还没有对标账号。先添加 1-3 个你想学习的账号，再去「爆款拆解」录入它们的内容。' },
+          h('div', { className: 'bm-list' }, accounts.map((account) => h('div', { key: account.id, className: 'bm-card' },
             h('div', { className: 'bm-card-head' },
               h('div', null,
                 h('div', { className: 'bm-card-title' }, account.name),
@@ -247,7 +274,7 @@ window.__ModuleLoader__.load({
             account.url ? h('a', { href: account.url, target: '_blank', rel: 'noreferrer', className: 'bm-note' }, account.url) : null,
             account.note ? h('p', null, account.note) : null,
             h(TagRow, { tags: account.tags }),
-          ))),
+          )))),
         confirmNode,
       );
     }
@@ -356,8 +383,8 @@ window.__ModuleLoader__.load({
             h('span', { className: 'bm-meta' }, '拆解使用系统默认模型，约需几十秒，可离开页面等待。'),
           ),
         ),
-        !teardowns.length ? h(EmptyState, { text: '还没有拆解记录。录入第一条爆款内容，开始积累你的方法论库。' })
-          : h('div', { className: 'bm-list' }, teardowns.map((record) => {
+        h(ListState, { loading: teardownsData.loading, error: teardownsData.error, empty: !teardowns.length, emptyText: '还没有拆解记录。录入第一条爆款内容，开始积累你的方法论库。' },
+          h('div', { className: 'bm-list' }, teardowns.map((record) => {
             const isExpanded = Boolean(expanded[record.id]);
             return h('div', { key: record.id, className: 'bm-card' },
               h('div', { className: 'bm-card-head' },
@@ -381,7 +408,7 @@ window.__ModuleLoader__.load({
               isExpanded && record.status === 'completed' ? h(AnalysisView, { analysis: record.analysis }) : null,
               h(TagRow, { tags: record.tags }),
             );
-          })),
+          }))),
         confirmNode,
       );
     }

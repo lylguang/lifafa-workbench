@@ -707,6 +707,32 @@ async function writeFileAtomic(path, content, { mode = 0o600 } = {}) {
 const STALE_TEMP_PREFIXES = ['lwb-spoken-video-bailian-', 'lwb-spoken-video-mimo-', 'lwb-spoken-video-mimo-ref-']
 const STALE_TEMP_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
+/**
+ * 探测本机媒体工具链是否真的可用。
+ *
+ * 旧实现把 renderers['local-ffmpeg'] 写死成 true，界面因此无法判断
+ * ffmpeg 是否装上——用户要等到点了配音、在媒体主机里拿到
+ * 「ffprobe失败：spawn ffprobe ENOENT」才知道。这里改成真跑一次 -version，
+ * 让界面在按钮旁边就能给出可读的阻断提示。
+ */
+const MEDIA_TOOL_PROBE_TIMEOUT_MS = 8_000
+
+async function probeBinary(file) {
+  try {
+    const { stdout } = await execFileAsync(file, ['-version'], { timeout: MEDIA_TOOL_PROBE_TIMEOUT_MS, maxBuffer: 1024 * 256 })
+    const firstLine = String(stdout || '').split(/\r?\n/u)[0].trim()
+    return { available: true, version: firstLine || null }
+  } catch (error) {
+    // ENOENT = 没装；其它错误（权限、超时）也算不可用，但原因要分开说。
+    return { available: false, reason: error?.code === 'ENOENT' ? '未安装' : mediaErrorMessage(error) }
+  }
+}
+
+async function probeMediaTools() {
+  const [ffmpeg, ffprobe] = await Promise.all([probeBinary('ffmpeg'), probeBinary('ffprobe')])
+  return { ffmpeg, ffprobe, available: ffmpeg.available && ffprobe.available }
+}
+
 async function sweepStaleTempDirectories(now = Date.now()) {
   const base = tmpdir()
   const entries = await readdir(base, { withFileTypes: true }).catch(() => [])
@@ -1846,7 +1872,11 @@ export class SpokenVideoMediaHost {
     const config = mediaServiceConfig(this.environment)
     const connection = await this.connection()
     const referenceVoiceConfigured = await defaultVoiceReference().then(() => true).catch(() => false)
-    const remotionAvailable = await remotionRendererAvailable()
+    const [remotionAvailable, mediaTools] = await Promise.all([
+      remotionRendererAvailable(),
+      // 探测结果缓存：status() 被界面每几秒轮询一次，不该每次都起两个子进程。
+      this.mediaToolsProbe || (this.mediaToolsProbe = probeMediaTools()),
+    ])
     // 把渠道实际指向哪里告诉界面：本机桥接 vs 远端云端。用户遇到
     // "Invalid API key" 时，第一眼就能看出请求打到了哪个地址。
     const scitigerLoopback = isLoopbackEndpoint(config.scitigerBaseUrl)
@@ -1878,7 +1908,10 @@ export class SpokenVideoMediaHost {
       },
       connection,
       renderer: 'remotion',
-      renderers: { remotion: remotionAvailable, 'local-ffmpeg': true },
+      // 真实探测，不再写死 true：界面要在点「生成视频/配音」之前就能
+      // 告诉用户缺什么，而不是等十几分钟后在渲染阶段失败。
+      renderers: { remotion: remotionAvailable, 'local-ffmpeg': mediaTools.available },
+      mediaTools,
       mediaReadLimitBytes: MAX_MEDIA_BYTES,
       voiceReferenceMaxBytes: MAX_VOICE_REFERENCE_BYTES,
       videoBgmMaxBytes: MAX_VIDEO_BGM_BYTES,

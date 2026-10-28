@@ -261,8 +261,15 @@ window.__ModuleLoader__.load({
      * is told so plainly and the banner can be dismissed. A finished banner
      * never silently disappears — that is the whole point of it.
      */
-    function RunBanner({ jobs, onOpenRecords }) {
+    function RunBanner({ jobs, onOpenRecords, onRefresh }) {
       const [dismissedId, setDismissedId] = React.useState(null);
+      // 「我已发布」失败必须让用户看见。
+      //
+      // 旧实现是 .catch(() => {})——网络断开、jobId 失效、后端拒绝时，
+      // 用户点完页面毫无变化，横幅仍停在「待确认」，也没有重试入口。
+      // 这是发布流程的最后一步，静默失败等于流程直接断掉且无法自救。
+      const [confirmError, setConfirmError] = React.useState(null);
+      const [confirming, setConfirming] = React.useState(false);
       // 步骤默认折叠：2026-10-13 用户反馈原来 7 个步骤条铺满整行「太难看、
       // 占地方」。小卡片里只留一行「进度 n/m」，点开才看细节。
       const [stepsOpen, setStepsOpen] = React.useState(false);
@@ -287,6 +294,11 @@ window.__ModuleLoader__.load({
         if (stalled) return '视频已上传并填好资料，正停在发布前。请在浏览器窗口里点「发表」完成最后一步，或在「记录」页取消。';
         return `正在${PHASE_LABEL[phase] || phase}…上传大文件可能需要几分钟，请不要关闭工作台。`;
       };
+      // 回执失败的可见错误行 + 重试入口。重试就是再点一次「我已发布」，
+      // 所以这里只需要把原因说清楚，不要另造一个按钮。
+      const confirmErrorRow = confirmError
+        ? h('p', { className: 'pb-warn', role: 'alert' }, `回执提交失败：${confirmError}。请确认网络与工作台服务正常后，再点一次「我已发布」。`)
+        : null;
 
       return h('div', { className: 'pb-run', 'data-state': newest.status, role: 'status', 'aria-live': 'polite' },
         h('div', { className: 'pb-run-head' },
@@ -302,9 +314,18 @@ window.__ModuleLoader__.load({
             // （2026-10-13 反馈：用户点完发表，卡片还一直卡在待确认）。
             stalled || newest.status === 'awaiting-confirm'
               ? h('button', {
-                type: 'button', className: 'lwb-primary-button',
-                onClick: () => { void remote('confirmSubmitted', { jobId: newest.id }).catch(() => {}); },
-              }, '我已发布')
+                type: 'button', className: 'lwb-primary-button', disabled: confirming,
+                onClick: async () => {
+                  setConfirming(true);
+                  try {
+                    await remote('confirmSubmitted', { jobId: newest.id });
+                    setConfirmError(null);
+                    if (onRefresh) await Promise.resolve(onRefresh()).catch(() => {});
+                  } catch (cause) {
+                    setConfirmError(cause?.message || '回执没有送达服务端，请重试。');
+                  } finally { setConfirming(false); }
+                },
+              }, confirming ? '正在提交…' : '我已发布')
               : null,
             onOpenRecords ? null : null,
             // 通知开关就地放在横幅里：用户说「没效果」时最该先能一键打开。
@@ -356,6 +377,7 @@ window.__ModuleLoader__.load({
           );
         })(),
         h('p', { className: 'pb-run-msg', 'data-tone': ok ? 'green' : (failed || cancel) ? 'red' : 'muted' }, message()),
+        confirmErrorRow,
       );
     }
 
@@ -413,6 +435,21 @@ window.__ModuleLoader__.load({
       }, [reload, intervalMs]);
       return { jobs, error, reload };
     }
+    /**
+     * 列表区三态：加载中 → 出错 → 空 → 有内容。
+     *
+     * 旧实现里 state 初值是 null，accounts/jobs 由 `state?.accounts || []` 得出，
+     * 于是页面打开瞬间恒为空数组，空态文案（「还没有平台账号」）先闪一次；
+     * 请求失败后 data 仍是 null，用户看到的还是「还没有数据」而不是错误。
+     * 冷启动时成片货架更糟：整块直接渲染 null，页面只有页头。
+     */
+    function ListState({ loading, error, empty, emptyText, children }) {
+      if (loading) return h('div', { className: 'pb-empty', 'aria-busy': 'true' }, '正在读取…');
+      if (error) return h('div', { className: 'pb-warn', role: 'alert' }, `读取失败：${error}`);
+      if (empty) return h(EmptyState, { text: emptyText });
+      return children;
+    }
+
     function EmptyState({ text }) {
       return h('div', { className: 'pb-empty' }, text);
     }
@@ -541,8 +578,8 @@ window.__ModuleLoader__.load({
             h('h3', null, '账号列表'),
             h('span', null, accounts.length ? `可用 ${accounts.filter((item) => item.status === 'active').length} 个` : ''),
           ),
-          accounts.length === 0 ? h(EmptyState, { text: '还没有平台账号。先在上方添加一个，再扫码登录。' })
-            : h('div', { className: 'pb-list' }, accounts.map((account) => h(AccountCard, {
+          h(ListState, { loading: !state && !error, error: null, empty: accounts.length === 0, emptyText: '还没有平台账号。先在上方添加一个，再扫码登录。' },
+            h('div', { className: 'pb-list' }, accounts.map((account) => h(AccountCard, {
               key: account.id, account, busy,
               onLogin: () => { void act(`login-${account.id}`, async () => {
                 await remote('startLogin', { id: account.id });
@@ -556,7 +593,7 @@ window.__ModuleLoader__.load({
               onClose: () => { void act(`close-${account.id}`, async () => { await remote('closeSession', { id: account.id }); return '已关闭浏览器窗口。'; }); },
               onEdit: () => { setEditing(account); setError(null); },
               onRemove: () => setRemoving(account),
-            }))),
+            })))),
         ),
 
         h('div', { className: 'pb-section' },
@@ -708,7 +745,7 @@ window.__ModuleLoader__.load({
       const liveJobs = useJobs(2000);
 
       return h('div', { className: 'pb-page' },
-        h(RunBanner, { jobs: liveJobs.jobs.length ? liveJobs.jobs : (state?.jobs || []), onOpenRecords: () => openPackMenu?.('records') }),
+        h(RunBanner, { jobs: liveJobs.jobs.length ? liveJobs.jobs : (state?.jobs || []), onOpenRecords: () => openPackMenu?.('records'), onRefresh: () => { liveJobs.reload?.(); return reload(); } }),
         h(PageTop, {
           title: '发布作品',
           copy: '选择一条已通过质检、且发布信息齐备的成片，挑一个平台账号提交。默认停在发布前，你在窗口里点最后一下。',
@@ -719,20 +756,21 @@ window.__ModuleLoader__.load({
         h(ErrorNotice, { error: error }),
         notice ? h('p', { className: 'pb-note' }, notice) : null,
 
-        !shelf ? null : !shelf.available ? h('p', { className: 'pb-warn' }, shelf.reason || '成片货架暂不可用。') : null,
+        // 冷启动时 shelf 为 null，旧实现整块渲染 null —— 页面只剩页头，用户以为坏了。
+        !shelf ? h('p', { className: 'pb-empty', 'aria-busy': 'true' }, '正在读取成片货架…')
+          : !shelf.available ? h('p', { className: 'pb-warn' }, shelf.reason || '成片货架暂不可用。') : null,
 
         h('div', { className: 'pb-section' },
           h('div', { className: 'pb-section-head' },
             h('h3', null, '可发布成片'),
             h('span', null, `${items.length} 条 · 已就绪 ${items.filter((item) => item.ready).length} 条`),
           ),
-          items.length === 0
-            ? h(EmptyState, { text: '还没有通过质检的成片。先到「视频制作」完成一条，再回到这里发布。' })
-            : h('div', { className: 'pb-shelf' }, items.map((item) => h(ShelfTile, {
+          h(ListState, { loading: !shelf, error: null, empty: items.length === 0, emptyText: '还没有通过质检的成片。先到「视频制作」完成一条，再回到这里发布。' },
+            h('div', { className: 'pb-shelf' }, items.map((item) => h(ShelfTile, {
               key: item.projectId, item, accounts: activeAccounts,
               onOpenAccounts: () => openPackMenu?.('accounts'),
               onPublish: (accountId) => { setTarget({ projectId: item.projectId, accountId }); setConfirmAuto(false); setError(null); },
-            }))),
+            })))),
         ),
 
         h('div', { className: 'pb-section' },
@@ -877,7 +915,7 @@ window.__ModuleLoader__.load({
       }
 
       return h('div', { className: 'pb-page' },
-        h(RunBanner, { jobs }),
+        h(RunBanner, { jobs, onRefresh: reload }),
         h(PageTop, {
           title: '发布记录',
           copy: '每条发布任务都保留状态、阶段与截图证据。失败时先看最后一张截图，它通常直接指出平台页面哪里变了。',
@@ -887,8 +925,8 @@ window.__ModuleLoader__.load({
 
         h(ErrorNotice, { error: error }),
 
-        jobs.length === 0 ? h(EmptyState, { text: '还没有发布记录。' })
-          : h('div', { className: 'pb-list' }, jobs.map((job) => h('article', { key: job.id, className: 'pb-card' },
+        h(ListState, { loading: !state && !error, error: null, empty: jobs.length === 0, emptyText: '还没有发布记录。' },
+          h('div', { className: 'pb-list' }, jobs.map((job) => h('article', { key: job.id, className: 'pb-card' },
             h('div', { className: 'pb-card-head' },
               h('div', { style: { minWidth: 0 } },
                 h('div', { className: 'pb-card-title' }, job.projectTitle || job.projectId),
@@ -915,7 +953,7 @@ window.__ModuleLoader__.load({
                 })(); },
               }, busy === `cancel-${job.id}` ? '取消中…' : '取消任务') : null,
             ),
-          ))),
+          )))),
 
         open ? h(Modal, { title: '发布证据', onClose: () => { setOpen(null); setShot(null); } },
           h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap' } },
