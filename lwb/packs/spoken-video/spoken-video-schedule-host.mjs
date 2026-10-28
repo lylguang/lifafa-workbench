@@ -1626,7 +1626,13 @@ export class SpokenVideoScheduleHost {
     const done = await this.#poll('packaging', signal,
       () => this.publish.task(agent, { taskId: started.id }),
       (task) => !LIVE.has(task.status))
-    if (done.status !== 'succeeded') throw new Error(done.error || '发布资料生成失败。')
+    // 并行触发的补资料任务（浏览器页的 autoStartPackaging）可能先一步提交
+    // packaging，把项目版本顶掉，本任务提交时撞 REVISION_CONFLICT。
+    // 阶段的目标是「发布资料就绪」，谁生成的无所谓——只要产物在，按成功走。
+    const superseded = done.status !== 'succeeded'
+      && /REVISION_CONFLICT/u.test(String(done.error || ''))
+      && (await this.projects.get(agent, { projectId })).artifacts?.packaging?.data?.content
+    if (done.status !== 'succeeded' && !superseded) throw new Error(done.error || '发布资料生成失败。')
     // Covers live on the committed artifact, not on the task summary.
     const packaged = await this.projects.get(agent, { projectId })
     const covers = packaged.artifacts?.packaging?.data?.covers || {}
@@ -1641,6 +1647,7 @@ export class SpokenVideoScheduleHost {
     const coverNote = coverState === 'disabled' ? '（未配置生图服务，封面需人工上传）'
       : coverState === 'both' ? '，横竖封面已生成'
         : `，封面${coverState === 'partial' ? '单侧' : ''}生成失败：${errors.landscape || errors.portrait || '未知原因'}`
+    if (superseded) return { refId: started.id, message: `发布资料已由并行的自动补资料任务生成${coverNote}` }
     return { refId: started.id, message: `发布资料已生成${coverNote}` }
   }
 

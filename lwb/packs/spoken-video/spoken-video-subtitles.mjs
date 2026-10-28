@@ -25,7 +25,8 @@ export function parseSrt(srt) {
     const startMs = timeToMs(start)
     const endMs = timeToMs(end)
     if (startMs === null || endMs === null) {
-      errors.push(`${label}时间码格式无效，应为 00:00:00,000 --> 00:00:02,000。`)
+      const raw = String(lines[offset] || '').replace(/\s+/gu, ' ').slice(0, 80)
+      errors.push(`${label}时间码格式无效，应为 00:00:00,000 --> 00:00:02,000。实际读到：${raw ? `「${raw}」` : '（空行）'}`)
       return
     }
     if (endMs <= startMs) {

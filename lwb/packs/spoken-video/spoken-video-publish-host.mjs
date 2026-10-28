@@ -373,7 +373,23 @@ export class SpokenVideoPublishHost {
       coverErrors: {},
       dsh: dshTrace(),
     }
-    await this.#serial(root, async () => { const data = await readTasks(root); data.tasks.unshift(task); await writeTasks(root, data) })
+    // 建任务必须在同一把串行锁里做「查重 + 插入」。
+    //
+    // 2026-10-28 实测：浏览器开着的视频页在成片后自动调 autoStartPackaging，
+    // 与定时任务的 #stagePackaging 相隔 384ms 各建了一个同版本任务。快的那个
+    // （不带封面）先提交 packaging、版本 +1，慢的那个提交时必撞
+    // SPOKEN_VIDEO_REVISION_CONFLICT——整轮流水线在最后一步报废。
+    let duplicated = null
+    await this.#serial(root, async () => {
+      const data = await readTasks(root)
+      const live = data.tasks.find((item) => item.projectId === id
+        && item.expectedRevision === expectedRevision
+        && ['queued', 'running'].includes(item.status))
+      if (live) { duplicated = { ...taskSummary(live), reused: true }; return }
+      data.tasks.unshift(task)
+      await writeTasks(root, data)
+    })
+    if (duplicated) return duplicated
     this.active.add(task.id)
     void this.background(this.#run(agent, root, task.id).finally(() => this.active.delete(task.id)))
     return taskSummary(task)

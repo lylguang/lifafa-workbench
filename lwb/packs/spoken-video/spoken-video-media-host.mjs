@@ -335,6 +335,8 @@ async function timelineSrtInner(timeline, referenceText, audioPath) {
   //    VAD 提供候选边界与真实起止，字数比例提供约束，两者互补。
   const sentenceWindows = []
   for (const seg of timeline.segments) {
+    // 段字段缺失/非数字时跳过，绝不让 NaN 渗进时间码。
+    if (!Number.isFinite(seg?.startMs) || !Number.isFinite(seg?.durMs) || seg.durMs <= 0) continue
     const segStart = seg.startMs / 1000
     const segEnd = (seg.startMs + seg.durMs) / 1000
     const sentences = seg.sentences || []
@@ -350,13 +352,29 @@ async function timelineSrtInner(timeline, referenceText, audioPath) {
       }
       continue
     }
-    // 回退：段内字符占比（无 VAD，或 runs 数与句数不匹配）
+    // 回退：段内字符占比（无 VAD，或 runs 数与句数不匹配）。
+    //
+    // 2026-10-28 实测事故：这里原先把 sentences[].start/end 当成「秒」用，
+    // 还引用了段对象上并不存在的 seg.start / seg.end（段只有 startMs / durMs）。
+    // 结果 segBase 是 NaN，整段的 cue 起止全变成 NaN，SRT 写出
+    // 「00:03:33,140 --> NaN:NaN:NaN,NaN」，字幕阶段直接失败、整轮流水线报废。
+    // 平时走 VAD 分组这条快路径不会触发，所以一直没暴露；一旦 VAD 不可用
+    // （自定义音色、异常静音分布）就必炸。
+    //
+    // 正确语义：sentences[].start/end 是**段内累计字符偏移**（0..总字数），
+    // 所以按「字数占比 × 段时长」换算，与 VAD 分支的口径一致。
+    const firstOffset = Number.isFinite(sentences[0]?.start) ? sentences[0].start : 0
+    const lastOffset = Number.isFinite(sentences.at(-1)?.end) ? sentences.at(-1).end : 0
+    const totalChars = Math.max(1, lastOffset - firstOffset)
     for (const sn of sentences) {
-      const segLen = Math.max(1, sn.end - sn.start || seg.end - seg.start)
-      const segBase = Math.max(1, seg.end - seg.start)
-      const relStart = (sn.start - seg.start) / segBase
-      const relEnd = (sn.end - sn.start) / segBase
-      sentenceWindows.push({ startMs: Math.round(segStart * 1000 + relStart * seg.durMs), durMs: Math.round(relEnd * seg.durMs) })
+      const from = Number.isFinite(sn?.start) ? sn.start : firstOffset
+      const to = Number.isFinite(sn?.end) ? sn.end : from
+      const relStart = (from - firstOffset) / totalChars
+      const relEnd = Math.max(0, to - from) / totalChars
+      sentenceWindows.push({
+        startMs: Math.round(segStart * 1000 + relStart * seg.durMs),
+        durMs: Math.max(1, Math.round(relEnd * seg.durMs)),
+      })
     }
   }
 
@@ -405,8 +423,15 @@ async function timelineSrtInner(timeline, referenceText, audioPath) {
       offsetMs += dur
     }
   }
-  const final = cues.map((cue, i) => {
-    const next = cues[i + 1]
+  // 最后一道闸：任何非有限时间都不能写进 SRT。
+  // 写出「NaN:NaN:NaN,NaN」会让整个字幕阶段失败、整轮流水线报废；
+  // 宁可丢掉个别算不出来的 cue（并如实计入 dropped），也不要污染整份字幕。
+  const finiteCues = cues.filter((cue) => Number.isFinite(cue?.startMs) && Number.isFinite(cue?.durMs) && cue.durMs > 0)
+  const dropped = cues.length - finiteCues.length
+  // 丢太多说明时间轴本身不可信，交给上层回退到 ASR 路径，而不是交一份残缺字幕。
+  if (!finiteCues.length || dropped > cues.length * 0.1) return null
+  const final = finiteCues.map((cue, i) => {
+    const next = finiteCues[i + 1]
     // 结束时间 = 本句语音末尾与「下一句开始」里更早的那个，再抬到至少 0.45s。
     // · 不能晚于下一句开头 60ms：否则用户在 7 秒已听到第二句、字幕却还显示第一句。
     // · 不越过本句语音末尾：否则会出现「话还没说完字幕就没了」。

@@ -60,3 +60,26 @@ test('subtitle commit stores cue metadata and blocks malformed SRT', async (t) =
   assert.equal(detail.artifacts.subtitles.data.cueCount, 1)
   assert.equal(Object.hasOwn(detail.artifacts.subtitles.data, 'warnings'), false)
 })
+
+// ── 时间码绝不允许出现 NaN ─────────────────────────────────────────────────
+//
+// 2026-10-28 实测事故：时间轴回退分支把 sentences[].start/end（段内累计字符
+// 偏移）当成秒数，又引用了段对象上不存在的 seg.start/seg.end，于是整段 cue
+// 的起止算成 NaN，SRT 写出「00:03:33,140 --> NaN:NaN:NaN,NaN」，
+// 字幕阶段失败、整轮流水线报废。平时走 VAD 分组快路径不会触发，
+// 一旦 VAD 不可用（自定义音色、异常静音分布）就必炸。
+// 这里守两件事：解析器给出可读的实际内容，且合法时间码不会被误判。
+
+test('时间码错误要报出实际读到的内容，而不是只有编号', () => {
+  const { errors } = parseSrt('1\n00:00:00,000 --> NaN:NaN:NaN,NaN\n文本')
+  assert.equal(errors.length, 1)
+  assert.match(errors[0], /NaN:NaN:NaN,NaN/u, '必须把实际读到的行报出来')
+})
+
+test('合法的多行字幕与 0 小时起点都能通过', () => {
+  const { cues, errors } = parseSrt('1\n00:00:00,000 --> 00:00:02,500\n第一行\n第二行\n\n2\n00:01:03,250 --> 00:01:05,000\n下一句')
+  assert.deepEqual(errors, [])
+  assert.equal(cues.length, 2)
+  assert.equal(cues[0].endMs, 2500)
+  assert.equal(cues[1].startMs, 63250)
+})
