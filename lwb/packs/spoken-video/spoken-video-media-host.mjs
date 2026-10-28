@@ -2974,23 +2974,9 @@ export class SpokenVideoMediaHost {
     if (review && (!Array.isArray(review.reviewEvidence) || review.reviewEvidence.length < 2)) {
       fail('SPOKEN_VIDEO_MEDIA_TASK_INVALID', '这条成片的审片报告缺少证据（少于 2 项），无法判断否决是否成立，因此不能放行。请点「重试」重跑一轮。')
     }
-    const committed = await this.projectsStore.commitProduced(agent, {
-      projectId: detail.id,
-      expectedRevision: detail.revision,
-      stage: 'qc',
-      idempotencyKey: `manual-release-editorial-${taskId}`,
-      source: 'spoken-video/manual-release',
-      payload: {
-        mode: run.pipeline?.engine === 'dsh-remotion-ai-director' || review ? 'ai-director' : 'automatic',
-        reportFile: cut.reportFile,
-        ...(cut.reviewFile ? { reviewFile: cut.reviewFile } : {}),
-        passed: false,
-        technical: technical.technical || technical,
-        ...(review ? { review } : {}),
-        userOverride: true,
-      },
-    })
-    // 放行后把成片与 qc 一并提交，让「发布」页能拿到视频。
+    // 顺序必须是 video → qc：qc 阶段的前置校验要求 video 已存在
+    // （SPOKEN_VIDEO_STAGE_BLOCKED「当前阶段需要先完成 video」）。反过来会卡在
+    // 那一步，而且 qc 已经提交成功、留下半截状态。
     const videoFile = cut.videoFile
     const videoAbs = resolve(root, videoFile)
     const info = await stat(videoAbs).catch(() => null)
@@ -2998,7 +2984,7 @@ export class SpokenVideoMediaHost {
     const probe = await this.#probe(videoAbs).catch(() => null)
     const videoCommit = await this.projectsStore.commitProduced(agent, {
       projectId: detail.id,
-      expectedRevision: committed.project.revision,
+      expectedRevision: detail.revision,
       stage: 'video',
       idempotencyKey: `manual-release-video-${taskId}`,
       source: 'spoken-video/manual-release',
@@ -3031,7 +3017,23 @@ export class SpokenVideoMediaHost {
         },
       },
     })
-    return { project: videoCommit.project, artifact: videoCommit.artifact, released: true }
+    const committed = await this.projectsStore.commitProduced(agent, {
+      projectId: detail.id,
+      expectedRevision: videoCommit.project.revision,
+      stage: 'qc',
+      idempotencyKey: `manual-release-editorial-${taskId}`,
+      source: 'spoken-video/manual-release',
+      payload: {
+        mode: run.pipeline?.engine === 'dsh-remotion-ai-director' || review ? 'ai-director' : 'automatic',
+        reportFile: cut.reportFile,
+        ...(cut.reviewFile ? { reviewFile: cut.reviewFile } : {}),
+        passed: false,
+        technical: technical.technical || technical,
+        ...(review ? { review } : {}),
+        userOverride: true,
+      },
+    })
+    return { project: committed.project, artifact: videoCommit.artifact, released: true }
   }
 
   async #start(agent, type, request, parseInput) {
