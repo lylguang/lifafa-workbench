@@ -65,12 +65,15 @@ const runContext = new AsyncLocalStorage()
 
 /** 各阶段的时间预算。数值来自实测耗时上限，留 2–3 倍余量。 */
 const STAGE_TIMEOUTS_MS = Object.freeze({
-  voiceover: 30 * 60 * 1000,
-  subtitles: 20 * 60 * 1000,
-  video: 60 * 60 * 1000,
-  'technical-qc': 15 * 60 * 1000,
+  voiceover: 60 * 60 * 1000,
+  subtitles: 40 * 60 * 1000,
+  // 视频是最长的一步：导演 + 渲染 + 质检 + 审片，再加最多 2 轮定向修复
+  // （每轮重写组件并重渲）。60 分钟在带修复的片子上必然不够——实测一条
+  // 473 秒的片子在修复轮被掐断，40 分钟成果作废。这里给到 3 小时。
+  video: 3 * 60 * 60 * 1000,
+  'technical-qc': 30 * 60 * 1000,
 })
-const DEFAULT_STAGE_TIMEOUT_MS = 30 * 60 * 1000
+const DEFAULT_STAGE_TIMEOUT_MS = 60 * 60 * 1000
 /** 单条 ffprobe 的上限：读元数据不该超过 30 秒。 */
 const FFPROBE_TIMEOUT_MS = 30 * 1000
 /** 单条 ffmpeg 的上限：超过这个时长基本可以判定卡死。 */
@@ -3565,15 +3568,26 @@ export class SpokenVideoMediaHost {
       })
     } catch (error) {
       const message = budget.aborted
-        ? `任务超过阶段时间预算（${Math.round((STAGE_TIMEOUTS_MS[run.type] ?? DEFAULT_STAGE_TIMEOUT_MS) / 60000)} 分钟）已自动停止。请检查网络与媒体服务后重试。`
+        ? `任务超过阶段时间预算（${Math.round((STAGE_TIMEOUTS_MS[run.type] ?? DEFAULT_STAGE_TIMEOUT_MS) / 60000)} 分钟）已自动停止。已完成阶段的产物保留，可以点「从断点继续」。`
         : mediaErrorMessage(error)
       const cancelled = abort.signal.aborted && !budget.aborted
+      // 超时 ≠ 故障：产物还在，应该允许续跑而不是判死。
+      const timedOut = budget.aborted
       await this.#mutateRun(root, run.id, (current) => {
         const completedAt = new Date().toISOString()
         const pipeline = current.type === 'video' && current.pipeline && typeof current.pipeline === 'object'
           ? { ...current.pipeline, phase: 'failed', completedAt, error: message.slice(0, 2000), stages: { ...(current.pipeline.stages || {}), ...(current.phase ? { [current.phase]: { ...(current.pipeline.stages?.[current.phase] || {}), status: 'failed', completedAt, error: message.slice(0, 1000) } } : {}) } }
           : current.pipeline
-        return { ...current, status: cancelled ? 'cancelled' : 'failed', phase: current.type === 'video' ? 'failed' : current.phase, completedAt, error: message.slice(0, 2000), ...(pipeline ? { pipeline } : {}) }
+        const status = cancelled ? 'cancelled' : timedOut ? 'interrupted' : 'failed'
+        return {
+          ...current,
+          status,
+          ...(timedOut ? { resumeFrom: resumeStageOf(current) } : {}),
+          phase: current.type === 'video' && !timedOut ? 'failed' : current.phase,
+          completedAt,
+          error: message.slice(0, 2000),
+          ...(pipeline ? { pipeline } : {}),
+        }
       })
     } finally {
       combined.removeEventListener('abort', onAbort)

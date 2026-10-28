@@ -3156,8 +3156,9 @@ test('媒体任务带独立中止开关与阶段预算，取消能真的停下�
   assert.match(source, /AbortSignal\.timeout\(STAGE_TIMEOUTS_MS\[run\.type\]/u, '每个 run 必须挂上自己的预算')
   assert.match(source, /async cancelRun\(agent, request\)/u, '需要可调用的取消入口')
   assert.match(source, /abort\.abort\(new Error\('cancelled by user'\)\)/u, '取消必须真的 abort，而不是只改状态')
-  // 取消后要落成 cancelled，而不是伪装成 failed —— 界面文案与续跑判定都依赖它。
-  assert.match(source, /cancelled \? 'cancelled' : 'failed'/u, '取消要落成 cancelled 状态')
+  // 取消要落成 cancelled，超时要落成 interrupted（可续跑），两者都不能
+  // 伪装成 failed —— 界面文案与续跑判定都依赖它们。
+  assert.match(source, /const status = cancelled \? 'cancelled' : timedOut \? 'interrupted' : 'failed'/u, '取消落成 cancelled、超时落成 interrupted')
 })
 
 test('ffmpeg / ffprobe 有超时，且超时后不放弃杀进程', async () => {
