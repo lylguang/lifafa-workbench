@@ -2194,6 +2194,9 @@ window.__ModuleLoader__.load({
         try {
           const result = editingAccount ? await remote(packId, 'updateAccount', { accountId: editingAccount.id, ...payload }) : await remote(packId, 'createAccount', payload);
           setLibrary(result.library); setError(null); closeDrawer();
+          // 保存成功要有一句回执：抽屉直接关掉时，用户无法区分「保存成功」
+          // 和「误触关闭」，只能重开抽屉确认。
+          setCompletionNote(editingAccount ? `账号「${result.library.accounts.find((item) => item.id === (editingAccount.id))?.name || form.name}」已保存。` : `账号「${form.name}」已创建，可以在选题时选择它。`);
         } catch (cause) { setError(cause.message); } finally { setSaving(false); }
       };
       const setStatus = async (account, status) => {
@@ -2311,6 +2314,8 @@ window.__ModuleLoader__.load({
       );
       return h(PackFrame, { packId, openConversation, title: '账号定位', copy: '管理本工作区的账号定位库。选题时明确选择一个账号，确认后会将定位快照绑定到项目；写稿自动继承该项目的账号上下文。', hero: accountHero },
         h(Notice, { error }),
+        // 保存/创建成功的回执：抽屉关闭后页面要告诉用户刚才那一下生效了。
+        completionNote && !editing ? h('p', { className: 'sv-note', role: 'status' }, completionNote) : null,
         h(ExecutionHistory, { kind: 'account', refreshKey: completing }),
         h('section', { className: 'sv-section' },
           h('div', { className: 'sv-section-head' },
@@ -3463,6 +3468,8 @@ window.__ModuleLoader__.load({
      * 只覆盖实测存在的音名；不在表里的（比如后端以后加了新的）照样进下拉，
      * 只是没有说明——不能因为说明表没更新就把新音色挡在门外。
      */
+    /** 下拉里只显示中文名与说明，内部 id（mimo_default 等）只作为 value 传输。 */
+    const voiceDisplayName = (voice) => (voice === 'mimo_default' ? '平台默认（随集群不同）' : voice);
     const SV_MIMO_VOICE_HINTS = {
       '冰糖': '偏甜的年轻女声，适合生活方式、好物与轻松话题',
       '茉莉': '中性偏稳的女声，知识讲解与资讯播报都比较稳',
@@ -3787,7 +3794,7 @@ window.__ModuleLoader__.load({
         SV_MIMO_VOICE_GROUPS.map((group) => {
           const voices = group.voices.filter((voice) => options.includes(voice));
           if (!voices.length) return null;
-          return h('optgroup', { key: group.label, label: group.label }, voices.map((voice) => h('option', { key: voice, value: voice }, SV_MIMO_VOICE_HINTS[voice] ? `${voice} — ${SV_MIMO_VOICE_HINTS[voice]}` : voice)));
+          return h('optgroup', { key: group.label, label: group.label }, voices.map((voice) => h('option', { key: voice, value: voice }, SV_MIMO_VOICE_HINTS[voice] ? `${voiceDisplayName(voice)} — ${SV_MIMO_VOICE_HINTS[voice]}` : voiceDisplayName(voice))));
         }),
         extra.map((voice) => h('option', { key: voice, value: voice }, voice)));
     }
@@ -5463,7 +5470,7 @@ window.__ModuleLoader__.load({
         h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭连接设置', onClick: () => setConfigOpen(false) }),
         h('aside', { className: 'sv-drawer sv-media-config-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '连接设置' },
           h('div', { className: 'sv-drawer-head' },
-            h('div', null, h('p', { className: 'sv-eyebrow' }, 'CONNECTION'), h('h3', { className: 'sv-media-drawer-title' }, '连接设置'), h('p', { className: 'sv-media-drawer-copy' }, '密钥保存到 DSH 私有凭据库，重启后仍可用；不会写入项目、媒体任务或浏览器存储。')),
+            h('div', null, h('p', { className: 'sv-eyebrow' }, '配音服务'), h('h3', { className: 'sv-media-drawer-title' }, '连接设置'), h('p', { className: 'sv-media-drawer-copy' }, '密钥保存到 DSH 私有凭据库，重启后仍可用；不会写入项目、媒体任务或浏览器存储。')),
             h('button', { type: 'button', className: 'sv-ghost-btn', title: '关闭', 'aria-label': '关闭连接设置', onClick: () => setConfigOpen(false) }, '×'),
           ),
           h('div', { className: 'sv-media-drawer-body' },
@@ -5475,7 +5482,7 @@ window.__ModuleLoader__.load({
                   'data-active': providerId === id ? 'true' : 'false',
                   onClick: () => setApiKey(''),
                 }, SV_VOICE_PROVIDER_LABEL[id] || id))),
-              h('p', { className: 'sv-note' }, '配音统一走小米 MiMo；其他渠道已在界面隐藏，如需切回请改代码里的 SV_VOICE_PROVIDERS。'),
+              h('p', { className: 'sv-note' }, '当前配音统一使用小米 MiMo 云端服务。'),
             ),
             h('section', { className: 'sv-media-settings-section' },
               h('h4', null, '访问凭据'),
@@ -5496,7 +5503,7 @@ window.__ModuleLoader__.load({
         detail ? h('div', { className: 'sv-audio-project' }, h('strong', null, detail.title), h('span', null, `已确认 · ${charCount(scriptBody)} 字 · ${scriptDurationLabel(scriptBody)} 预计口播`)) : null,
         h('label', { className: 'sv-media-field' }, h('span', null, '文本内容'), h('textarea', { className: 'sv-textarea sv-audio-script', value: scriptBody, readOnly: true, placeholder: '选择已确认稿件后显示正文' })),
         h('p', { className: 'sv-note' }, '文本与已确认稿件绑定。需要改文案时，请返回写稿模块修改并重新确认。'),
-        h('label', { className: 'sv-media-field' }, h('span', null, '音色'), h('select', { className: 'sv-select', value: voiceId, onChange: (event) => setVoiceId(event.target.value) }, mimoVoices.map((voice) => h('option', { key: voice, value: voice }, SV_MIMO_VOICE_HINTS[voice] ? `${voice} — ${SV_MIMO_VOICE_HINTS[voice]}` : voice)))),
+        h('label', { className: 'sv-media-field' }, h('span', null, '音色'), h('select', { className: 'sv-select', value: voiceId, onChange: (event) => setVoiceId(event.target.value) }, mimoVoices.map((voice) => h('option', { key: voice, value: voice }, SV_MIMO_VOICE_HINTS[voice] ? `${voiceDisplayName(voice)} — ${SV_MIMO_VOICE_HINTS[voice]}` : voiceDisplayName(voice))))),
         h('p', { className: 'sv-note' }, `由${providerLabel}合成。不确定选哪个音色时用「${SV_MIMO_DEFAULT_VOICE}」；「mimo_default」跟随平台集群，中国集群是「冰糖」、其他集群是「Mia」，想要确定的声音请选具体音名。`),
         h('label', { className: 'sv-media-field' }, h('span', null, '语气（选填）'), h('input', { className: 'sv-input', value: stylePrompt, maxLength: 200, list: 'sv-style-preset-list', placeholder: '留空则按音色默认语气合成', onChange: (event) => setStylePrompt(event.target.value) }), h('datalist', { id: 'sv-style-preset-list' }, SV_VOICE_STYLE_PRESETS.map((style) => h('option', { key: style, value: style })))),
         SV_VOICE_STYLE_PRESETS.length ? h('div', { className: 'sv-style-presets' }, h('span', { className: 'sv-meta' }, '常用语气'), SV_VOICE_STYLE_PRESETS.map((style) => h('button', { key: style, type: 'button', className: 'sv-filter-chip', 'data-on': stylePrompt === style ? 'true' : 'false', onClick: () => setStylePrompt((current) => current === style ? '' : style) }, style.replace(/[，。]$/u, '')))) : null,
