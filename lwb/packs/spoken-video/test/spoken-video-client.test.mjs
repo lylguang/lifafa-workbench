@@ -585,11 +585,16 @@ test('publish shelf deletes media one at a time or as a checked batch', async ()
   assert.match(page, /const deleteItems = async \(targets\) => \{/u)
   assert.match(page, /remote\(packId, 'remove', \{ projectIds: targets\.map\(\(item\) => item\.id\) \}\)/u)
   // 单个删除在卡片上，批量删除在工具条上，两者都先确认再删。
+  // 2026-10-27：标题改为「删除整个项目（含成片）」——旧文案「删除素材」
+  // 名实不符，实际删掉的是整个项目（稿件/配音/字幕/成片/封面），
+  // 用户点之前不知道范围有多大。
   assert.match(page, /const askDelete = \(targets\) => \{/u)
-  assert.match(page, /title: single \? '删除素材' : `删除 \$\{targets\.length\} 个素材`/u)
+  assert.match(page, /title: single \? '删除整个项目（含成片）' : `删除 \$\{targets\.length\} 个项目（含成片）`/u)
   assert.match(page, /danger: true/u)
   assert.match(page, /confirm: '永久删除'/u)
-  assert.match(page, /包括它的稿件、配音、字幕、成片和封面，无法恢复/u)
+  // 确认文案要说清范围与后果，并指出「只想删成片」的正确入口。
+  assert.match(page, /稿件、配音、字幕、成片和封面。它也会从发布列表与视频任务列表中消失，无法恢复/u)
+  assert.match(page, /到「视频 \/ 预览」页删除那条视频任务/u)
   // 多选：卡片复选框 + 本页全选 + 已选计数。
   assert.match(page, /const \[selected, setSelected\] = React\.useState\(\(\) => new Set\(\)\)/u)
   assert.match(page, /'aria-label': `选择素材「\$\{item\.title\}」`/u)

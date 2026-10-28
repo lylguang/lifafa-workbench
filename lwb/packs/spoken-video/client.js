@@ -3256,7 +3256,8 @@ window.__ModuleLoader__.load({
           : scriptModal === 'polish'
             ? { title: '润色当前稿件', copy: '生成完成后会自动保存为当前稿件版本。', content: polishContent }
           : scriptModal === 'regenerate'
-              ? { title: '重新起稿', copy: '重新生成完成后会自动保存为当前稿件版本。', content: regenerateContent }
+              // 覆盖性操作必须把后果说全：确认掉的稿件、配音、字幕、成片都会失效。
+              ? { title: '重新起稿', copy: `将围绕当前选题重新生成一稿，并自动替换当前稿件版本${detail?.artifacts?.script?.revision ? `（当前版本 ${detail.artifacts.script.revision}）` : ''}。此前的稿件确认与下游产物（配音、字幕、成片、发布资料）会一并失效，需要重新生成。此操作不可撤销。`, content: regenerateContent }
               : scriptModal === 'candidate'
                 ? { title: '未采用的新稿', copy: '这是一份与当前正式稿不同的候选版本。', content: candidateContent }
                 : scriptModal === 'quality'
@@ -3266,7 +3267,7 @@ window.__ModuleLoader__.load({
       const scriptModalFoot = scriptModal === 'polish'
         ? h(React.Fragment, null, h('button', { type: 'button', className: 'lwb-plain-button', disabled: busy || saving || projectBusy, onClick: closeScriptModal }, '取消'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: busy || saving || projectBusy || !body.trim(), onClick: () => { void startPolish(); } }, '开始润色'))
         : scriptModal === 'regenerate'
-          ? h(React.Fragment, null, h('button', { type: 'button', className: 'lwb-plain-button', disabled: busy || saving || projectBusy, onClick: closeScriptModal }, '取消'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: busy || saving || projectBusy, onClick: () => { void startRegenerate(); } }, '开始生成'))
+          ? h(React.Fragment, null, h('button', { type: 'button', className: 'lwb-plain-button', disabled: busy || saving || projectBusy, onClick: closeScriptModal }, '取消'), h('button', { type: 'button', className: 'lwb-danger-button', disabled: busy || saving || projectBusy, onClick: () => { void startRegenerate(); } }, '覆盖当前稿件，开始生成'))
           : scriptModal === 'candidate'
             ? h(React.Fragment, null, h('button', { type: 'button', className: 'lwb-plain-button', onClick: closeScriptModal }, '关闭'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: busy || projectBusy, onClick: useCandidateForEditing }, '以此版本继续编辑'))
             : scriptModal === 'quality'
@@ -6708,11 +6709,11 @@ window.__ModuleLoader__.load({
         if (!targets.length) return;
         const single = targets.length === 1;
         ask({
-          title: single ? '删除素材' : `删除 ${targets.length} 个素材`,
+          title: single ? '删除整个项目（含成片）' : `删除 ${targets.length} 个项目（含成片）`,
           danger: true,
           confirm: '永久删除',
           copy: single
-            ? `将永久删除「${targets[0].title}」，包括它的稿件、配音、字幕、成片和封面，无法恢复。`
+            ? `将永久删除项目「${targets[0].title}」的全部内容：稿件、配音、字幕、成片和封面。它也会从发布列表与视频任务列表中消失，无法恢复。只想删掉成片本身的话，请到「视频 / 预览」页删除那条视频任务。`
             : `将永久删除选中的 ${targets.length} 个素材，包括各自的稿件、配音、字幕、成片和封面，无法恢复。`,
           onConfirm: () => { void deleteItems(targets); },
         });
@@ -6815,7 +6816,13 @@ window.__ModuleLoader__.load({
           setTriggerError(cause.message); setError(cause.message); return false;
         } finally { setBusy(false); }
       };
-      // Opening a video without publish info starts one generation automatically.
+      // 打开抽屉不再静默扣额度。
+      //
+      // 旧实现：打开一条成片的发布抽屉，若还没有发布资料就自动开始一次
+      // AI 文案 + 两张生图——用户只是想「看看」，什么都没点就被扣了一次
+      // 模型与生图额度。现在改为显式确认：抽屉里给出说明与「开始生成」按钮。
+      // autoTriggered 仍保留：同一条成片的同一版本只提示一次，不反复打扰。
+      const [autoPrompt, setAutoPrompt] = React.useState(null);
       React.useEffect(() => {
         if (!packId || !openProject || !detail || busy) return;
         if (detail.artifacts?.packaging) return;
@@ -6824,7 +6831,7 @@ window.__ModuleLoader__.load({
         const key = `${detail.id}:${detail.revision}`;
         if (autoTriggered.current.has(key)) return;
         autoTriggered.current.add(key);
-        void startPackaging(detail.id, detail.revision);
+        setAutoPrompt({ projectId: detail.id, revision: detail.revision });
       }, [packId, openProject, detail?.id, detail?.revision, items, busy]);
 
       const saveContent = async () => {
@@ -6975,7 +6982,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'sv-pb-card-foot' },
           h('span', { className: 'sv-pb-card-meta' }, publishFootNote(item)),
           h('span', { className: 'sv-actions' },
-            h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(deleting), onClick: () => askDelete([item]) }, deleting === item.id ? '正在删除…' : '删除'),
+            h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(deleting), onClick: () => askDelete([item]) }, deleting === item.id ? '正在删除…' : '删除项目'),
             h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(deleting), onClick: () => setOpenProject(item.id) }, '发布'),
           ),
         ),
@@ -7078,7 +7085,13 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
                         h('p', { className: 'sv-pb-cover-error' }, triggerError),
                         h('button', { type: 'button', className: 'lwb-primary-button', disabled: busy, onClick: () => { autoTriggered.current.delete(`${detail.id}:${detail.revision}`); void startPackaging(detail.id, detail.revision); } }, busy ? '正在提交…' : '重试生成'),
                       )
-                    : h(React.Fragment, null, h('p', null, '正在自动触发一次发布信息生成…'), h('p', { className: 'sv-sc-report-empty' }, '将生成标题、文案、描述、标签与封面提示词' + (service?.configured ? '，并生成横竖封面。' : '；未配置生图服务时可自行上传封面。'))),
+                    // 不再静默触发：生成会调用模型与生图服务、产生费用，
+                    // 所以把「做什么、花什么」说清楚，由用户点按钮开始。
+                    : h(React.Fragment, null,
+                        h('p', null, '这条成片还没有发布资料。'),
+                        h('p', { className: 'sv-sc-report-empty' }, '点「开始生成」将调用模型生成标题、文案、描述、标签与封面提示词' + (service?.configured ? '，并生成横竖两版封面（会调用生图服务）。' : '；未配置生图服务时可自行上传封面。')),
+                        h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-primary-button', disabled: busy, onClick: () => { setAutoPrompt(null); void startPackaging(detail.id, detail.revision); } }, busy ? '正在提交…' : '开始生成')),
+                      ),
             )
           : h(React.Fragment, null,
               running ? h('section', { className: 'sv-sc-run-status' }, h('div', { className: 'sv-sc-ai-action-head' }, h('strong', null, openTask?.coverKind ? '生图服务正在重新生成封面' : 'DSH 正在重新生成发布信息'), h('span', null, relativeTime(openTask.createdAt))), stepBlock(openTask), h('p', { className: 'sv-note' }, '完成后会自动更新下方内容；关闭抽屉不会中断。')) : null,
