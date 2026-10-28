@@ -1459,6 +1459,38 @@ window.__ModuleLoader__.load({
       );
       return [node, setMeta];
     }
+    /**
+     * 带输入框的站内弹窗（替代 window.prompt）。
+     *
+     * 原生 prompt 在暗色主题下是白底黑字、不可样式化、会阻塞渲染线程；
+     * 与同文件其它操作（走 useSvConfirm）视觉上完全割裂。
+     */
+    function useSvPrompt() {
+      const [meta, setMeta] = React.useState(null);
+      const [value, setValue] = React.useState('');
+      React.useEffect(() => {
+        if (!meta) return undefined;
+        setValue(meta.initialValue || '');
+        const onKey = (event) => { if (event.key === 'Escape') setMeta(null); };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, [meta]);
+      const node = meta && h('div', { className: 'sv-confirm-backdrop', role: 'presentation', onClick: () => setMeta(null) },
+        h('div', { className: 'lwb-card lwb-pack-detail sv-confirm-card', role: 'dialog', 'aria-modal': 'true', 'aria-label': meta.title, onClick: (event) => event.stopPropagation() },
+          h('div', { className: 'lwb-pack-detail-head' },
+            h('div', null, h('h2', { className: 'lwb-modal-title' }, meta.title), meta.copy ? h('p', { className: 'lwb-modal-copy' }, meta.copy) : null),
+            h('button', { type: 'button', className: 'lwb-detail-close', title: '取消', 'aria-label': '取消', onClick: () => setMeta(null) }, '×'),
+          ),
+          h('input', { className: 'sv-input', value, maxLength: meta.maxLength || 80, autoFocus: true, 'aria-label': meta.title, onChange: (event) => setValue(event.target.value), onKeyDown: (event) => { if (event.key === 'Enter' && value.trim()) { const action = meta.onConfirm; setMeta(null); action(value.trim()); } } }),
+          h('div', { className: 'lwb-row-actions', style: { justifyContent: 'flex-end' } },
+            h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setMeta(null) }, '取消'),
+            h('button', { type: 'button', className: 'lwb-primary-button', disabled: !value.trim(), onClick: () => { const action = meta.onConfirm; setMeta(null); action(value.trim()); } }, meta.confirm || '确定'),
+          ),
+        ),
+      );
+      const open = (options) => setMeta(options);
+      return [node, open];
+    }
     function NeedPack() { return h('section', { className: 'sv-form' }, h('p', null, '正在准备能力包工作区…')); }
     function useProjects(packId) {
       const [projects, setProjects] = React.useState([]); const [error, setError] = React.useState(null); const [loading, setLoading] = React.useState(false);
@@ -4134,6 +4166,7 @@ window.__ModuleLoader__.load({
       const [historySchedule, setHistorySchedule] = React.useState(null);
       const [historyRefresh, setHistoryRefresh] = React.useState(0);
       const [confirmNode, ask] = useSvConfirm();
+      const [schedulePromptNode, schedulePrompt] = useSvPrompt();
       const [voiceRefBusy, setVoiceRefBusy] = React.useState(false);
       const [voiceRefError, setVoiceRefError] = React.useState('');
       // 音色库（与音频页共享同一份）：克隆模式点选即用，无需重复上传。
@@ -4399,18 +4432,31 @@ window.__ModuleLoader__.load({
         setVoiceRefError('');
         patchForm((current) => ({ ...current, voiceReference: savedVoiceReference(voice) }));
       };
-      const renameScheduleSavedVoice = async (voice) => {
-        const next = window.prompt('修改音色名称', voice.name || '');
-        if (next === null) return;
-        const name = String(next).trim();
-        if (!name) { setVoiceRefError('音色名称不能为空。'); return; }
+      const renameScheduleSavedVoice = (voice) => {
+        schedulePrompt({
+          title: '修改音色名称',
+          copy: '只改显示名，音频文件不动。',
+          initialValue: voice.name || '',
+          confirm: '保存',
+          onConfirm: (name) => { void doRenameScheduleSavedVoice(voice, name); },
+        });
+      };
+      const doRenameScheduleSavedVoice = async (voice, name) => {
         setVoiceRefBusy(true);
         try { await remoteStatic('renameSavedVoice', { id: voice.id, name }); await refreshScheduleSavedVoices(); }
         catch (cause) { setVoiceRefError(`重命名失败：${cause.message}`); }
         finally { setVoiceRefBusy(false); }
       };
-      const deleteScheduleSavedVoice = async (voice) => {
-        if (!window.confirm(`从音色库删除「${voice.name}」？音频文件会一并删除，已生成的配音与已保存的任务预设不受影响。`)) return;
+      const deleteScheduleSavedVoice = (voice) => {
+        ask({
+          title: '删除这个音色？',
+          copy: `将从音色库删除「${voice.name}」，音频文件一并删除。已生成的配音与已保存的任务预设不受影响。`,
+          confirm: '删除',
+          danger: true,
+          onConfirm: () => { void doDeleteScheduleSavedVoice(voice); },
+        });
+      };
+      const doDeleteScheduleSavedVoice = async (voice) => {
         setVoiceRefBusy(true);
         try {
           await remoteStatic('deleteSavedVoice', { id: voice.id });
@@ -4824,6 +4870,7 @@ window.__ModuleLoader__.load({
         signalsDrawerNode,
         runDetailDrawer,
         confirmNode,
+        schedulePromptNode,
       );
     }
     function mediaRunLabel(type) { return ({ voiceover: '配音生成', subtitles: '字幕对齐', video: '视频渲染', qc: '技术质检' })[type] || type; }
@@ -5565,6 +5612,9 @@ window.__ModuleLoader__.load({
       const [autoProjectId, setAutoProjectId] = React.useState('');
       const [autoProjects, setAutoProjects] = React.useState([]);
       const [confirmNode, ask] = useSvConfirm();
+      // 音色库的重命名改用站内输入弹窗：原生 prompt 暗色主题下白底黑字、
+      // 阻塞渲染线程，与本页其它操作风格断裂。
+      const [promptNode, prompt] = useSvPrompt();
       const textRef = React.useRef(null);
       // 三模式互斥：preset 用音色表，design 用一段描述，upload 用上传的参考音频。
       // 只有当前模式那一个 state 会被读，其余两个留着但绝不进 payload——
@@ -5632,11 +5682,16 @@ window.__ModuleLoader__.load({
         setVoiceReference(savedVoiceReference(voice));
       };
       /** 库内重命名：只改显示名，音频不动。 */
-      const renameSavedVoice = async (voice) => {
-        const next = window.prompt('修改音色名称', voice.name || '');
-        if (next === null) return;
-        const name = String(next).trim();
-        if (!name) { setError('音色名称不能为空。'); return; }
+      const renameSavedVoice = (voice) => {
+        prompt({
+          title: '修改音色名称',
+          copy: '只改显示名，音频文件不动。',
+          initialValue: voice.name || '',
+          confirm: '保存',
+          onConfirm: (name) => { void doRenameSavedVoice(voice, name); },
+        });
+      };
+      const doRenameSavedVoice = async (voice, name) => {
         setSavedVoiceBusy(true);
         try {
           await remoteStatic('renameSavedVoice', { id: voice.id, name });
@@ -5646,8 +5701,16 @@ window.__ModuleLoader__.load({
         finally { setSavedVoiceBusy(false); }
       };
       /** 从库里删除：元数据与音频文件一起删；若当前选中正引用它，一并清掉。 */
-      const deleteSavedVoice = async (voice) => {
-        if (!window.confirm(`从音色库删除「${voice.name}」？音频文件会一并删除，已生成的配音不受影响。`)) return;
+      const deleteSavedVoice = (voice) => {
+        ask({
+          title: '删除这个音色？',
+          copy: `将从音色库删除「${voice.name}」，音频文件一并删除。已生成的配音不受影响。`,
+          confirm: '删除',
+          danger: true,
+          onConfirm: () => { void doDeleteSavedVoice(voice); },
+        });
+      };
+      const doDeleteSavedVoice = async (voice) => {
         setSavedVoiceBusy(true);
         try {
           await remoteStatic('deleteSavedVoice', { id: voice.id });
@@ -6036,7 +6099,7 @@ window.__ModuleLoader__.load({
       const sourceDrawerNode = sourceDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭稿件内容', onClick: () => setSourceDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '稿件内容' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, sourceDrawer.source?.title || '稿件内容'), h('p', { className: 'sv-meta' }, sourceDrawer.source?.kind === 'manual-text' ? '手动输入文稿快照' : '任务创建时冻结的稿件快照')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSourceDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll' }, h('article', { className: 'sv-sc-manuscript' }, sourceDrawer.source?.text || ''))));
       const subtitleDrawerNode = subtitleDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭字幕内容', onClick: () => setSubtitleDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '编辑字幕' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, `字幕 · ${subtitleDrawer.task.source?.title || '手动文稿'}`), h('p', { className: 'sv-meta' }, `${subtitleDrawer.cues.length} 条字幕，可直接校对错别字并保存。`)), h('button', { type: 'button', className: 'lwb-plain-button', disabled: subtitleDrawer.saving, onClick: () => setSubtitleDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll sv-audio-subtitle-editor' }, h('div', { className: 'sv-subtitle-cues' }, subtitleDrawer.cues.map((cue, index) => h('article', { key: cue.id, className: 'sv-subtitle-cue' }, h('time', null, cue.time), h('textarea', { className: 'sv-textarea sv-subtitle-text', value: cue.text, maxLength: 30000, 'aria-label': `第 ${index + 1} 条字幕文本`, onChange: (event) => setSubtitleDrawer((current) => ({ ...current, cues: current.cues.map((currentCue, currentIndex) => currentIndex === index ? { ...currentCue, text: event.target.value } : currentCue) })) }))))), h('div', { className: 'sv-media-drawer-foot' }, h('span', { className: 'sv-meta' }, '时间码来自音频对齐结果，保存将更新字幕文本。'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: subtitleDrawer.saving || !subtitleDrawer.cues.length || subtitleDrawer.cues.some((cue) => !cue.text.trim()), onClick: () => ask({ title: '保存字幕', copy: `将保存这 ${subtitleDrawer.cues.length} 条字幕的文本修改，时间码保持不变。`, confirm: '确认保存', onConfirm: () => { void saveSubtitles(); } }) }, subtitleDrawer.saving ? '正在保存…' : '保存字幕'))));
       const accountTabs = h(AccountTabs, { accountLibrary, activeTab, onChange: setActiveTab, label: '按账号查看配音任务' });
-      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
+      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode, promptNode);
     }
     /**
      * 视频制作任务的实时进度：步骤条 + 当前阶段用时 + 总耗时 + 阶段明细。
