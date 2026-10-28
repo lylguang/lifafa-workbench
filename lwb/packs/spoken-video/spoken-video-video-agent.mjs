@@ -62,6 +62,11 @@ export function buildVideoCreatorPrompt({ runDir }) {
     // (2) 幕内仍要有语义推进，不能靠"一个场景撑四十秒"来回避设计。
     '第一个场景的起点用 inputs/subtitles.srt 里第一条 cue 的真实起点，不要凭感觉写 0。实测历史成片的首 cue 起点从 0s 到 5.16s 不等，那是配音音频真实的前导静音——语音还没开始时不要硬造内容，那段留白是合理的；但反过来，也不要因为首 cue 较晚就把钩子往后拖，钩子必须落在第一条 cue 开始的瞬间。',
 
+    // 横屏版式失衡是审片反复否决的高频项（2026-10-27 实测：多个场景内容只占
+    // 左侧 45%–55%，右侧大面积空白，16:9 下观感空洞、信息密度低）。这条必须写成
+    // 可检查的硬约束，而不是"注意构图"这种没法验收的措辞。
+    '横屏（1920×1080）下内容必须铺满可用宽度：主体内容的左右边界各不超过画面宽度的 8%（即内容至少占中间 84% 的宽度）。禁止把内容挤在左半边、右半边留空——这是实测被审片反复判 major 的版式缺陷。若某场景天然信息少，就用更大的字号、更宽的卡片、横向三栏或左右对照把宽度撑起来，而不是缩小内容留白。竖屏（1080×1920）同理适用于高度方向。',
+
     '钩子本身要短。实测历史成片的第一条 cue 中位数 2.62 秒、最长约 5 秒，所以开场钩子就是第一句话本身，不要另加标题卡或 logo 铺垫独占开头。不要从选题自我介绍、背景铺垫或「今天聊聊……」开始；直接从冲突、反常识、具体数字或结论切入。钩子的呈现可以用 StageTypeOn 逐字写出，或用 KeywordRelay 强调其中的关键词，但开场不要叠加两个以上强调组件。',
 
     '幕长没有硬指标，但每个场景内部必须有语义推进：如果一个场景超过约 20 秒，检查它是否真的只讲一件事——若其实是 2-3 个论点挤在一幕里，就拆成相邻的短场景（相邻两幕可以复用同一组对象与配色，视觉上是延续而非换页）；若确实是一件事，就靠语义节点让对象分步变化，而不是让观众盯着静止画面听完。判断依据是字幕：数一数这段覆盖了几条语义不同的 cue。',
@@ -166,7 +171,36 @@ export function buildVideoEditorialRepairPrompt({ runDir, review, frameFiles, ti
   ].join('\n\n')
 }
 
-export function buildVideoReviewerPrompt({ runDir, technicalReportFile, frameFiles, timestamps, contactSheetFile }) {
+/**
+ * 每个采样时刻正在念的那句字幕。
+ *
+ * 为什么必须由代码算好再交给审片：
+ * 审片 Agent 只拿到整篇稿件（inputs/draft.json，无时间戳），过去要判断
+ * 「画面与配音是否对得上」只能自己估算「第 38 秒大概在念稿件的哪一段」——
+ * 这是纯粹的猜。2026-10-27 实测：38.27 秒的真实字幕是
+ * 「不是官方通报，也不是实验室报告」，审片却断言那句在讲「铰链正上方」，
+ * 并据此判 major、要求定向修复。整轮渲染+修复白跑。
+ *
+ * 字幕时间轴是确定性事实（和音轨时长、帧率同级），不该让模型猜。
+ */
+export function subtitleSamplesAt(cues, timestamps) {
+  const list = Array.isArray(cues) ? cues : []
+  const samples = Array.isArray(timestamps) ? timestamps : []
+  return samples.map((raw) => {
+    const t = Number(raw)
+    if (!Number.isFinite(t)) return { timestampSeconds: raw, text: '' }
+    const ms = t * 1000
+    const active = list.filter((cue) => Number.isFinite(cue.startMs) && Number.isFinite(cue.endMs) && cue.startMs <= ms && ms < cue.endMs)
+    if (active.length) return { timestampSeconds: t, text: active.map((cue) => String(cue.text || '').trim()).filter(Boolean).join(' ') }
+    // 落在两句之间的空隙：取前一句（观众刚听到的那句）作为参照，并标注它是上一句。
+    const before = list.filter((cue) => Number.isFinite(cue.endMs) && cue.endMs <= ms).sort((a, b) => b.endMs - a.endMs)[0]
+    if (before) return { timestampSeconds: t, text: String(before.text || '').trim(), previous: true }
+    const after = list.filter((cue) => Number.isFinite(cue.startMs) && cue.startMs > ms).sort((a, b) => a.startMs - b.startMs)[0]
+    return { timestampSeconds: t, text: after ? String(after.text || '').trim() : '', upcoming: Boolean(after) }
+  })
+}
+
+export function buildVideoReviewerPrompt({ runDir, technicalReportFile, frameFiles, timestamps, contactSheetFile, subtitleSamples = null }) {
   const contactSheetLine = contactSheetFile
     ? `\n另外还有一张全片接触表（contact sheet）：${contactSheetFile}。它把全片按时间均匀采样拼成 4 列网格（从左到右、从上到下时间递增），用于纵览全片节奏、场景变化和重复版式；网格缩略图较小，只用于发现整体节奏与版式重复问题，精确判断仍以下面的逐帧图片为准。`
     : ''
@@ -188,6 +222,12 @@ export function buildVideoReviewerPrompt({ runDir, technicalReportFile, frameFil
     '禁止用 pwsh/shell 处理图片：不要运行 ffmpeg/ffprobe、不要写或运行任何脚本去解析 PNG（例如把图片转成 ASCII 字符画、色彩网格、像素直方图、边缘密度或 bounding box 来"推断"画面）。这类间接手段既看不见构图与文字，又会产出海量文本撑爆上下文，是已知的失控路径。你不需要做任何图像处理，只需要看图、判断、给结论。',
     '除读取 task.json、inputs/draft.json 和技术报告外，不要执行 shell 命令；不要创建、修改或删除任何文件；不要新建临时脚本或辅助工具。你的产出只有最后那一次 structured_output 提交。',
     '技术报告是音轨、尺寸、帧率、时长和画面变化的确定性事实，不得用主观判断推翻。若技术报告未通过，technicalPass 必须为 false。',
+    // 把「此刻在念什么」作为确定性事实交给审片，而不是让它从整篇稿子里猜。
+    ...(Array.isArray(subtitleSamples) && subtitleSamples.length
+      ? [`每个采样时刻正在念的字幕（由字幕时间轴确定性算出，不是估算，不得质疑）：
+${subtitleSamples.map((item) => `- ${item.timestampSeconds} 秒：${item.text ? `「${item.text}」${item.previous ? '（该时刻处于两句之间的停顿，这是刚念完的上一句）' : item.upcoming ? '（该时刻处于两句之间，这是即将念的下一句）' : ''}` : '（该时刻没有字幕）'}`).join('\n')}`]
+      : []),
+    '判断「画面与配音是否对应」时，必须以上面给出的每个时刻的实际字幕文本为准，不得用 inputs/draft.json 的段落顺序去推算某时刻在讲什么。若画面主题与该时刻字幕内容一致，就属于对应正确；只有在同一时刻画面主题明确是另一件事时才判错位。',
     '重点审核：主画面是否忠实对应稿件；是否具有清楚的视觉叙事与场景变化；机制、对比、数字和结论是否被视觉化；是否退化成文字卡片；横竖屏构图、字幕安全区、可读性和信息密度是否合格。若有接触表，先用它纵览全片：场景时长是否失衡、连续多帧版式雷同、节奏是否前紧后松这类全局问题优先从接触表发现，再回到对应时间点的全帧图确认。',
     '接触表本身的局限：它是按时间均匀采样的，可能落在某个场景的入场动画期或场景边界附近，缩略图又小，细节不可辨。因此接触表只用来发现全局问题（节奏失衡、版式雷同、场景时长突变），接触表按时间均匀采样，可能落在场景的入场动画期或场景边界附近；不要只凭接触表下结论——任何要写进 findings 的具体缺陷，都必须回到对应时间点的全帧图确认后才能判定。',
     // 创作侧被硬性禁止使用外部素材与实拍，审片不能拿它的缺失当缺陷，否则无论怎么画都永远不通过。

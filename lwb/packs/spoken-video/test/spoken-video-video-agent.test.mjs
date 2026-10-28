@@ -7,6 +7,7 @@ import {
   buildVideoEditorialRepairPrompt,
   buildVideoReviewerPrompt,
   normalizeVideoReview,
+  subtitleSamplesAt,
   VIDEO_REVIEW_SCHEMA,
 } from '../spoken-video-video-agent.mjs'
 
@@ -219,4 +220,48 @@ test('审片提示词强制 read_image 看图，并禁止自制图像解析脚�
   assert.match(prompt, /不要执行 shell 命令/u)
   assert.match(prompt, /不要新建临时脚本/u)
   assert.match(prompt, /只有最后那一次 structured_output 提交/u)
+})
+
+// ── 审片拿到的「此刻在念什么」必须是确定性事实 ───────────────────────────────
+//
+// 2026-10-27 实测事故：审片只拿到整篇稿件（无时间戳），于是自己估算
+// 「38.27 秒大概在念稿件的哪一段」，断言那句在讲「铰链正上方」——
+// 而该时刻的真实字幕是「不是官方通报，也不是实验室报告」。
+// 这个假缺陷被判 major，触发一轮定向修复，整轮渲染+修复白跑。
+// 字幕时间轴和帧率、时长一样是确定性事实，必须由代码算好交给模型。
+
+test('subtitleSamplesAt 按时间轴取到该时刻正在念的那句', () => {
+  const cues = [
+    { startMs: 0, endMs: 2000, text: '第一句。' },
+    { startMs: 2000, endMs: 5000, text: '第二句。' },
+    { startMs: 6000, endMs: 8000, text: '第三句。' },
+  ]
+  const [a, b, gap, tail] = subtitleSamplesAt(cues, [1.2, 3.5, 5.5, 9])
+  assert.equal(a.text, '第一句。')
+  assert.equal(b.text, '第二句。')
+  // 落在两句之间的停顿：给刚念完的上一句，并标记 previous。
+  assert.equal(gap.text, '第二句。')
+  assert.equal(gap.previous, true)
+  // 片尾之后：仍然给最后一句并标记 previous，不凭空造句。
+  assert.equal(tail.text, '第三句。')
+  assert.equal(tail.previous, true)
+})
+
+test('审片提示词带上每个采样时刻的真实字幕，并禁止用稿件顺序推算', () => {
+  const prompt = buildVideoReviewerPrompt({
+    runDir: '/tmp/run',
+    technicalReportFile: 'outputs/technical-qc.json',
+    frameFiles: ['f1.png'],
+    timestamps: [38.27],
+    subtitleSamples: [{ timestampSeconds: 38.27, text: '不是官方通报，也不是实验室报告。' }],
+  })
+  assert.match(prompt, /每个采样时刻正在念的字幕/u, '必须把字幕事实交给审片')
+  assert.match(prompt, /38\.27 秒：「不是官方通报，也不是实验室报告。」/u, '采样时刻与字幕文本要成对出现')
+  assert.match(prompt, /不得用 inputs\/draft\.json 的段落顺序去推算/u, '必须禁止按稿件顺序猜时间')
+})
+
+test('导演提示词把横屏铺满宽度写成可检查的硬约束', () => {
+  const prompt = buildVideoCreatorPrompt({ runDir: '/tmp/run' })
+  assert.match(prompt, /左右边界各不超过画面宽度的 8%/u, '横屏留白要有量化上限')
+  assert.match(prompt, /禁止把内容挤在左半边/u, '要直接点出被反复否决的具体形态')
 })

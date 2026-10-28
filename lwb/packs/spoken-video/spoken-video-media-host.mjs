@@ -42,7 +42,7 @@ import {
   renderSpokenVideoAgentProject,
 } from './spoken-video-remotion.mjs'
 import { cueChars, splitLongCues, validateSrt } from './spoken-video-subtitles.mjs'
-import { buildVideoCreatorPrompt, buildVideoCreatorRepairPrompt, buildVideoEditorialRepairPrompt, buildVideoReviewerPrompt, normalizeVideoReview, VIDEO_REVIEW_SCHEMA } from './spoken-video-video-agent.mjs'
+import { buildVideoCreatorPrompt, buildVideoCreatorRepairPrompt, buildVideoEditorialRepairPrompt, buildVideoReviewerPrompt, normalizeVideoReview, subtitleSamplesAt, VIDEO_REVIEW_SCHEMA } from './spoken-video-video-agent.mjs'
 import { DEFAULT_LOCAL_QC_THRESHOLDS, judgeLocalQc, parseBlackDetect, parseFreezeDetect, parseSilenceDetect, parseVolumeDetect } from './spoken-video-local-qc.mjs'
 
 const execFilePromise = promisify(execFile)
@@ -5003,7 +5003,14 @@ async #mimoReferenceDataUrl(root, input) {
       await this.#setVideoPhase(root, run.id, 'editorial-review')
       const reviewerRole = repairAttempt ? `reviewer-${attemptNumber}` : 'reviewer'
       const rawReview = await this.videoReviewer({
-        prompt: buildVideoReviewerPrompt({ runDir: workspace.projectDir, technicalReportFile: technicalReportPath, frameFiles: sampled.frameFiles, timestamps: sampled.timestamps, contactSheetFile: contactSheet?.file ?? null }),
+        // 把「每个采样时刻正在念的字幕」算好一起交给审片：字幕时间轴是确定性事实，
+        // 不该让模型拿整篇稿子去猜第 38 秒在讲什么（猜错就变成假缺陷，整轮白跑）。
+        prompt: buildVideoReviewerPrompt({
+          runDir: workspace.projectDir, technicalReportFile: technicalReportPath,
+          frameFiles: sampled.frameFiles, timestamps: sampled.timestamps,
+          contactSheetFile: contactSheet?.file ?? null,
+          subtitleSamples: subtitleSamplesAt(cues, sampled.timestamps),
+        }),
         schema: VIDEO_REVIEW_SCHEMA,
         agent,
         onDshStarted: (started) => this.#recordRunDshStarted(root, run.id, reviewerRole, repairAttempt ? `独立复审 ${repairAttempt}/${VIDEO_EDITORIAL_REPAIR_MAX_ATTEMPTS}` : '独立审片', started),
