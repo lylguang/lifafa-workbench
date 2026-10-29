@@ -3,7 +3,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import assert from 'node:assert/strict'
-import douyin, { parseCount, parseRowStats, parseLabeledNumber, videoIdFromHref, readWorksFromPage, parseCsv, worksFromExport, worksFromRows, xlsxToRows, collectAccount, collectContents } from '../analytics-douyin.mjs'
+import douyin, { parseCount, parseRowStats, parseLabeledNumber, videoIdFromHref, readWorksFromPage, parseCsv, worksFromExport, worksFromRows, xlsxToRows, matchWorkToContent, collectAccount, collectContents } from '../analytics-douyin.mjs'
 
 /**
  * 假 page：只实现 adapter 用到的 locator/goto/waitForTimeout/url。
@@ -348,4 +348,25 @@ test('xlsxToRows 读出平台导出文件里的表头与数据行', () => {
   const { works } = worksFromRows(rows)
   assert.equal(works[0].metrics.views, 12000)
   assert.equal(works[1].metrics.likes, 88)
+})
+
+test('matchWorkToContent：发布日期 + 标题前缀双条件，歧义即弃', () => {
+  const local = [
+    { title: '别再信「AI 帮你炒股看盘」了！连专业研究都说，它离交易还有明确边界', publishedAt: '2026-10-29T19:00:00.000Z', contentId: 'c1' },
+    { title: '别再拿「AI 写养生科普、替人做健康建议」当副业了！一句话进别人身体', publishedAt: '2026-10-29T08:11:26.000Z', contentId: 'c2' },
+  ]
+  // 导出的作品名称是「标题×2 + 正文全文」，本地标题只是它的前缀
+  const work1 = { title: '别再信「AI 帮你炒股看盘」了！连专业研究都说，它离交易还有 别再信「AI 帮你炒股看盘」了！连专业研究都说，它离交易还有\n*AI能不能帮你炒股看盘？正文很长很长', publishedAt: '2026-10-29 19:00:00' }
+  const hit = matchWorkToContent(work1, local)
+  assert.equal(hit?.contentId, 'c1')
+  // 日期对不上：不绑
+  const workWrongDate = { ...work1, publishedAt: '2026-10-28 19:00:00' }
+  assert.equal(matchWorkToContent(workWrongDate, local), null)
+  // 两条本地内容标题重复（同日、同前缀）：歧义即弃
+  const workAmbiguous = { ...work1, publishedAt: '2026-10-29 23:00:00' }
+  const localDuplicate = [local[0], { ...local[0], contentId: 'b' }]
+  assert.equal(matchWorkToContent(workAmbiguous, localDuplicate), null)
+  // 没有发布时间时只靠标题前缀
+  const workNoDate = { title: work1.title, publishedAt: null }
+  assert.equal(matchWorkToContent(workNoDate, local)?.contentId, 'c1')
 })

@@ -614,9 +614,9 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
 
   const collected = []
   for (const work of works) {
-    // 标题精确匹配（归一化后）：宁可待绑定，也不静默绑错。
-    const target = bound.find((item) => normalizeTitle(item.title) === normalizeTitle(work.title))
-      ?? [...boundNow.values()].find((item) => normalizeTitle(item.title) === normalizeTitle(work.title))
+    // 双条件匹配：发布日期相同 + 标题前缀重叠（导出的作品名称是
+    // 「标题×2 + 正文全文」，与本地标题永远不相等，见 matchWorkToContent）。
+    const target = matchWorkToContent(work, [...bound, ...boundNow.values()])
     if (!target) continue
     const metrics = work.metrics ?? parseRowStats(work.stats)
     // 一个数都读不到时不要落一条全 null 的记录——那会让「采集成功」变成假象。
@@ -628,6 +628,35 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
     if (collected.length >= 50) break
   }
   return collected
+}
+
+/**
+ * 把平台作品对回本地内容。
+ *
+ * 为什么不用「标题相等」：导出的作品名称是「标题重复两遍 + 正文全文」
+ * （2026-10-29 实测），与本地标题永远不相等。
+ * 双条件匹配，两者都要成立：
+ *  1. 发布日期相同（本地 publishedAt 与导出「发布时间」取日期部分）；
+ *  2. 标题前缀重叠：归一化后取前 12 字，一方包含另一方。
+ * 命中多个就返回 null——歧义即弃，宁缺勿错。
+ */
+export function matchWorkToContent(work, contents) {
+  const workTitle = normalizeTitle(work.title)
+  const workDate = dateKeyOf(work.publishedAt)
+  const hits = (contents || []).filter((content) => {
+    const contentTitle = normalizeTitle(content.title)
+    if (!contentTitle || !workTitle) return false
+    const probe = contentTitle.slice(0, 12)
+    if (!probe || (!workTitle.includes(probe) && !contentTitle.includes(workTitle.slice(0, 12)))) return false
+    if (workDate && content.publishedAt) return dateKeyOf(content.publishedAt) === workDate
+    return true
+  })
+  return hits.length === 1 ? hits[0] : null
+}
+
+function dateKeyOf(value) {
+  const match = /(\d{4})-(\d{2})-(\d{2})/u.exec(String(value ?? ''))
+  return match ? match[1] + '-' + match[2] + '-' + match[3] : null
 }
 
 /** 从作品链接里取 video id：`https://www.douyin.com/video/7412...` 或 `?modal_id=`。 */
