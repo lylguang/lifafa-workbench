@@ -123,11 +123,29 @@ async function textOf(page, selectors) {
   try { return (await locator.innerText()).trim().slice(0, 200) || null } catch { return null }
 }
 
-/** 登录页判定：URL 跳转与页面元素两条都要看——SPA 有时不换 URL。 */
+/** 登录墙的文案特征。抖音掉登录时 URL 不变，只在页面里渲染扫码/验证码登录。 */
+const LOGIN_WALL_MARKERS = ['扫码登录', '验证码登录', '密码登录', '登录即代表同意']
+
+/**
+ * 登录页判定：URL、页面文本、可见元素三条都看。
+ *
+ * 为什么必须看文本：抖音掉登录时**不会**跳转 URL，只在原来的
+ * creator-micro 路径下渲染登录墙（2026-10-29 实测：data/overview 与
+ * content/manage 都停在扫码登录页，URL 仍是原路径）。
+ * 只靠选择器判定会漏，于是把登录墙误报成「页面结构已变化」，
+ * 用户拿到的提示是「平台改版」，而真正该做的是重新扫码。
+ */
 async function assertLoggedIn(page) {
   if (/login/iu.test(page.url())) throw loginRequired()
   const out = await firstMatch(page, SELECTORS.loggedOut)
   if (out) throw loginRequired()
+  let text = ''
+  try {
+    text = typeof page.evaluate === 'function'
+      ? await page.evaluate(() => (globalThis.document?.body?.innerText ?? '').slice(0, 4000))
+      : ''
+  } catch { text = '' }
+  if (text && LOGIN_WALL_MARKERS.some((marker) => text.includes(marker))) throw loginRequired()
 }
 
 /**

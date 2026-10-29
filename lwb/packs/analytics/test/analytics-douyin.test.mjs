@@ -142,3 +142,14 @@ test('adapter 导出形态符合采集器契约', () => {
   assert.equal(typeof douyin.collectAccount, 'function')
   assert.equal(typeof douyin.collectContents, 'function')
 })
+
+test('登录墙按页面文本识别：URL 不变也要判成登录失效', async () => {
+  // 抖音掉登录时不跳 URL，只在原路径下渲染登录墙（2026-10-29 实测）。
+  // 只靠选择器判定会漏，把登录墙误报成「页面结构已变化」。
+  const page = fakePage({ url: 'https://creator.douyin.com/creator-micro/data/overview' })
+  page.evaluate = async () => '抖音创作者的一站式创作与服务平台\n扫码登录\n验证码登录'
+  await assert.rejects(
+    () => collectAccount({ accountId: 'a1', platform: 'douyin', page, signal: null }, { runId: 'r1', store: fakeStore() }),
+    (error) => error.code === 'PUBLISHER_LOGIN_REQUIRED',
+  )
+})
