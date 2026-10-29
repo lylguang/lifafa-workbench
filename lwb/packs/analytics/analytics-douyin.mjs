@@ -325,7 +325,7 @@ export function worksFromExport(csvText) {
  * 列表懒加载只渲染 1 条（2026-10-29 诊断证据 works:1 / withHref:0）。
  * 平台自己的导出文件是按作品一行、带完整标题与全部指标的最可靠来源。
  */
-export async function downloadExport(page, { timeoutMs = 60_000 } = {}) {
+export async function downloadExport(page, { timeoutMs = 60_000, evidence = null } = {}) {
   if (typeof page.waitForEvent !== 'function') return null
   const downloadPromise = page.waitForEvent('download', { timeout: timeoutMs }).catch(() => null)
   const clickText = async (labels) => {
@@ -339,12 +339,20 @@ export async function downloadExport(page, { timeoutMs = 60_000 } = {}) {
     return null
   }
   const opened = await clickText(['导出数据', '导出作品数据', '下载数据'])
-  if (!opened) return null
-  // 可能弹二级菜单：作品数据 / 全部作品 / 确认导出
-  await page.waitForTimeout(1200)
-  await clickText(['作品数据', '导出作品', '全部作品', '确认导出', '下载'])
+  if (!opened) {
+    await evidence?.('douyin-export-no-button').catch(() => {})
+    return null
+  }
+  // 可能弹二级菜单：作品数据 / 全部作品 / 确认导出；也可能弹确认弹窗。
+  await page.waitForTimeout(1500)
+  const second = await clickText(['作品数据', '导出作品', '全部作品', '确认导出', '下载', '导出'])
   const download = await downloadPromise
-  if (!download) return null
+  if (!download) {
+    // 没等到下载：留一张点击后的截图。导出很可能要走「导出任务列表」二次下载，
+    // 或弹窗里有表单没填——不看截图永远猜不出是哪种。
+    await evidence?.(`douyin-export-after-click-${second || opened}`).catch(() => {})
+    return null
+  }
   const path = await download.path().catch(() => null)
   if (!path) return null
   const buffer = await readFile(path).catch(() => null)
@@ -452,7 +460,7 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
   //  2. DOM 结构读取——页面不给作品 id、标题还会被拼接重复，只作兜底。
   let works = []
   let exportHeader = null
-  const exported = await downloadExport(page).catch(() => null)
+  const exported = await downloadExport(page, { evidence: lease.evidence }).catch(() => null)
   if (exported?.text) {
     const parsed = worksFromExport(exported.text)
     exportHeader = parsed.header
