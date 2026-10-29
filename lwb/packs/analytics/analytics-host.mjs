@@ -47,12 +47,51 @@ export class AnalyticsHost extends AnalyticsLocalSource {
 
   /** RPC 5：手动触发采集。已有 run 在跑时返回 alreadyRunning，不报错。 */
   async startCollection(request = {}) {
+    // 采集前先把本地内容同步进 store。
+    //
+    // 内容级指标要按「本地内容 ↔ 平台作品」的对应关系落库，而 store 的
+    // contents.json 只保存已绑定/已采集过的行；本地内容的真源是 publisher
+    // 的发布记录（运行时投影，不落盘）。不同步的话采集器面对的是一张空表，
+    // 标题匹配无从谈起——2026-10-29 实测：内容级指标恒为 0 条，账号级却正常。
+    await this.#seedContents(request).catch(() => {})
     return this.collector.start({
       accountIds: request.accountIds,
       contentIds: request.contentIds,
       trigger: 'manual',
       background: this.background,
     })
+  }
+
+  /**
+   * 把本地内容投影写进 store（只写元数据）。
+   *
+   * 刻意**不写 remoteUrl**：发布记录里的地址是「作品管理页」，不是单个作品页，
+   * 写进来会让 bound 变成 true——看起来已绑定、实际采集器拿到的是列表页，
+   * 属于 analytics-bind.mjs 开头点名的「绑错比不绑更坏」。
+   * 真正的 remoteId 由采集器从作品管理页的行链接里读出来。
+   */
+  async #seedContents(request = {}) {
+    if (typeof this.contents !== 'function') return 0
+    const to = new Date(this.now())
+    const from = new Date(to.getTime() - 365 * 24 * 60 * 60 * 1000)
+    const page = await this.contents({
+      from: from.toISOString(),
+      to: to.toISOString(),
+      accountIds: request.accountIds,
+      limit: 500,
+    }).catch(() => null)
+    const rows = (Array.isArray(page?.items) ? page.items : [])
+      .filter((row) => row?.contentId && row?.title)
+      .map((row) => ({
+        contentId: row.contentId,
+        title: row.title,
+        platform: row.platform ?? null,
+        accountId: row.accountId ?? null,
+        publishedAt: row.publishedAt ?? null,
+      }))
+    if (!rows.length) return 0
+    await this.store.saveContents(rows).catch(() => {})
+    return rows.length
   }
 
   /** RPC 6：不传 runId 返回最近一次。 */

@@ -130,3 +130,39 @@ test('store 读失败时退化成 never，不让账号页整页报错', async ()
   const res = await host.accounts(RANGE)
   assert.equal(res.items[0].collectionStatus, 'never')
 })
+
+// ── 采集前同步本地内容 ─────────────────────────────────────────────────────
+//
+// 2026-10-29 实测：内容级指标恒为 0 条。根因是 store 的 contents.json 只存
+// 已绑定/已采集的行，而本地内容的真源是 publisher 的发布记录（运行时投影）。
+// 采集器读 store 得到空表 → 标题匹配无从谈起。startCollection 现在会先同步。
+
+test('startCollection 先把本地内容同步进 store，且不写 remoteUrl（避免假绑定）', async () => {
+  const workspacePath = await mkdtemp(join(tmpdir(), 'an-seed-'))
+  await mkdir(join(workspacePath, 'data', 'metrics'), { recursive: true })
+  const host = new AnalyticsHost({
+    workspacePath,
+    publisher: {
+      listAccounts: async () => [{ id: 'a1', platform: 'douyin', status: 'active' }],
+      listJobs: async () => [{
+        id: 'job-1', projectId: 'p1', projectTitle: '折叠屏首发翻车', platform: 'douyin',
+        accountId: 'a1', status: 'succeeded', createdAt: '2026-06-14T00:00:00.000Z',
+        // 发布记录里的地址是作品管理页，不是单个作品页
+        proof: { remoteUrl: 'https://creator.douyin.com/creator-micro/content/manage', submittedAt: '2026-06-14T00:00:00.000Z' },
+      }],
+    },
+    spokenVideo: null,
+    now: () => new Date('2026-06-15T00:00:00.000Z'),
+  })
+  // 不真的去开浏览器：把 collector.start 换成记录参数
+  let started = null
+  host.collector.start = async (options) => { started = options; return { runId: 'r', alreadyRunning: false } }
+  await host.startCollection({ accountIds: ['a1'] })
+  assert.ok(started, 'collector.start 必须被调用')
+  const rows = await host.store.listContents()
+  assert.equal(rows.length, 1, '本地内容要写进 store')
+  assert.equal(rows[0].contentId, 'job-1')
+  assert.equal(rows[0].title, '折叠屏首发翻车')
+  assert.equal(rows[0].remoteUrl, null, '管理页地址不能当作品地址写进去')
+  assert.equal(rows[0].bound, false, '没有真实作品 id 时不能标成已绑定')
+})
