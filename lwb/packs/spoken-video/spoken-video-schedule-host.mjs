@@ -45,6 +45,7 @@ import {
   waitingWithPosition,
 } from './spoken-video-queue.mjs'
 import { ensureLocalBridge as ensureBridgeDefault, ensureLocalEngine as ensureEngineDefault, preflightSummary, runPreflight } from './spoken-video-runtime-preflight.mjs'
+import { foldLegacyProvider } from './spoken-video-media.mjs'
 const TICK_INTERVAL_MS = 30_000
 /**
  * 等外部依赖（桥接/引擎）恢复的上限。保活计划任务每 5 分钟一轮，两轮足够；
@@ -345,7 +346,9 @@ export class SpokenVideoScheduleHost {
     let publish = null
     try { media = await this.media.status() } catch { /* surfaced as unavailable below */ }
     try { publish = await this.publish.status() } catch { /* same */ }
-    const provider = media?.connection?.provider || 'bailian'
+    // 旧连接设置里可能还存着已下线的 bailian：折到 scitiger 再查凭据状态，
+    // 否则 providers 表里查不到，表单会误报「未配置 TTS 凭据」。
+    const provider = foldLegacyProvider(media?.connection?.provider) || 'scitiger'
     // `connection.providers[p]` IS the credential status ({ configured, source,
     // writable }) — it has no nested `.credential`. The audio page reads the very
     // same object through `providers[p].credential`, so both paths must agree.
@@ -1515,9 +1518,9 @@ export class SpokenVideoScheduleHost {
     return { message: `稿件版本 ${summary.scriptApproval?.revision || '?'} 已由自动化确认` }
   }
 
-  /** The configured voiceover channel; the request normalizer would otherwise pin media runs to bailian. */
+  /** The configured voiceover channel; the request normalizer would otherwise pin media runs to bridge. */
   async #mediaProvider() {
-    try { return (await this.media.status())?.connection?.provider || 'bailian' } catch { return 'bailian' }
+    try { return foldLegacyProvider((await this.media.status())?.connection?.provider) || 'scitiger' } catch { return 'scitiger' }
   }
 
   async #stageVoiceover(agent, schedule, projectId, step, signal, paths, runId) {
@@ -1527,8 +1530,8 @@ export class SpokenVideoScheduleHost {
     if (step === 'subtitles') {
       Object.assign(request, { language: 'zh', aiOptimize: true, provider: await this.#mediaProvider() })
     } else {
-      // Follow the configured voiceover channel every round, preset or not:
-      // bailian is cloud TTS, scitiger is the local bridge endpoint.
+      // Follow the configured voiceover channel every round, preset or not.
+      // 百炼直连下线后，配音统一走本机桥接（scitiger）。
       const preset = { provider: await this.#mediaProvider(), voiceSource: voice?.voiceSource || 'system', rate: voice?.rate ?? 1, volume: voice?.volume ?? 1, pitch: voice?.pitch ?? 0 }
       if (voice?.voiceId) preset.voiceId = voice.voiceId
       if (voice?.voiceName) preset.voiceName = voice.voiceName

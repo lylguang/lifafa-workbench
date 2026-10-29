@@ -53,16 +53,17 @@ export function fieldFilled(input, field) {
 
 /** Build the DSH prompt for draft-polish account completion. */
 export function buildAccountCompletionPrompt({ input }) {
-  const sections = ['你是口播视频账号的定位顾问。用户给出的信息可能非常简略，把它当作草稿：基于草稿完善全部账号定位资料。只输出结构化结果。']
+  const sections = ['你是「GitHub 今日热榜推荐」账号的定位顾问：每天从 GitHub Trending 里挑出值得推荐的开源项目，用口播讲清它是什么、解决什么问题、适合谁用。用户给出的信息可能非常简略，把它当作草稿：基于草稿完善全部账号定位资料。只输出结构化结果。']
   const rules = [
     '用户已提供的字段是草稿：保留其核心意图，可以润色、扩写、规范化成完整表达，不要偏离原意。',
     '未提供的字段必须补齐。',
-    'positioning（账号定位）用一两句话说明这个账号做什么内容、给谁看、有什么不同。',
-    'audience（目标受众）描述具体人群和他们想被满足的需求。',
-    'pillars（内容方向）给出 3-5 个能长期更新的方向，每个不超过 10 个字。',
-    'boundary（内容边界）写明允许与禁止的内容，并补充常见风险红线，例如不做医疗与投资建议。',
+    'positioning（账号定位）用一两句话说明这个账号每天推荐 GitHub 上的什么项目、给谁看、和其他热榜号有什么不同。',
+    'audience（目标受众）描述具体人群和他们想被满足的需求，默认围绕想找好用工具、想跟上开源动向的开发者与技术爱好者。',
+    'pillars（内容方向）给出 3-5 个能长期更新的方向，每个不超过 10 个字；优先从热榜推荐、项目解读、开发者工具、AI 开源项目这类方向里选。',
+    'boundary（内容边界）写明允许与禁止的内容，并补充常见风险红线，例如不做医疗与投资建议；同时明确不推荐需付费授权才能使用的项目、不替项目方背书。',
     'name（账号名称）若用户已提供，保留原名或在其基础上微调；未提供时给出贴合定位、便于记忆的名称，避免夸大或绝对化用词。',
     '不得编造用户的真实情况、数据或背景，所有内容都应是合理假设与建议。',
+    '不得编造 GitHub 项目的 Star 数、贡献者、许可证或版本号，这些信息只能来自用户草稿。',
   ]
   sections.push(rules.map((rule) => `- ${rule}`).join('\n'))
   const fields = ACCOUNT_COMPLETION_FIELDS.map((field) => ({ field, label: ACCOUNT_COMPLETION_LABELS[field], value: field === 'pillars' ? (input.pillars.length ? input.pillars.join('、') : null) : input[field] }))

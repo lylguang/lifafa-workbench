@@ -35,6 +35,15 @@ function pathInside(root, target) {
 }
 
 /**
+ * 视频号等平台的登录态是服务端下发的短时效 cookie，无人操作几小时就会过期，
+ * 与本地实现无关。唯一能延长它的办法是周期性真的打开一次平台首页，让服务端
+ * 续期；这里就是干这件事的定时巡检，默认 30 分钟一轮。
+ */
+const KEEP_ALIVE_INTERVAL_MS = 30 * 60 * 1000
+/** 启动后先等一会儿再跑第一轮，避免和 recoverInterrupted 抢 Chrome。 */
+const KEEP_ALIVE_FIRST_DELAY_MS = 15 * 1000
+
+/**
  * Publish orchestrator.
  *
  * It owns three things the browser and adapters must not: the gate that decides
@@ -186,8 +195,16 @@ export class PublisherHost {
     }
   }
 
-  /** Re-check an existing account without opening a visible window. */
-  async checkAccount(id) {
+  /**
+   * Re-check an existing account without opening a visible window.
+   *
+   * 关键修复（C1 / 评审 #4）：`isLoggedIn` 抛错只代表「平台不可达 / 页面异常 /
+   * 验证码页 / 网络抖动」，绝不等于「未登录」。之前 `.catch(() => false)` 把任何
+   * 异常折叠成 false，保活每半小时就把正常账号误标 expired 并提示重新扫码（还会
+   * 触发平台风控）。这里把「读不到」与「真没登录」分开：抛错时保留原状态、记录
+   * 真实错误文案；只有拿到明确的未登录结论才改 expired。
+   */
+  async checkAccount(id, { onUnreachable = 'keep' } = {}) {
     const account = await this.store.getAccount(id)
     const adapter = adapterFor(account.platform)
     if (this.busy.has(account.id)) fail('PUBLISHER_ACCOUNT_BUSY', '该账号正在执行其他操作，请稍候。')
@@ -195,7 +212,21 @@ export class PublisherHost {
     try {
       const session = await this.browser.acquire(account, { headless: true })
       const page = await this.browser.page(session)
-      const loggedIn = await adapter.isLoggedIn(page).catch(() => false)
+      let loggedIn
+      try {
+        loggedIn = await adapter.isLoggedIn(page)
+      } catch (error) {
+        // 不可达：本轮无法判断，保留原状态，记录真实错误，不写 expired。
+        if (onUnreachable === 'keep') {
+          const updated = await this.store.patchAccountState(account.id, {
+            status: account.status,
+            lastCheckedAt: this.now(),
+            lastError: `账号状态暂无法确认（${error?.message || String(error)}）；不影响当前状态，下次巡检再试。`,
+          })
+          return { ...updated, loggedIn: null, unreachable: true }
+        }
+        throw error
+      }
       this.browser.touch(account.id)
       if (!loggedIn) {
         const updated = await this.store.patchAccountState(account.id, {
@@ -522,6 +553,64 @@ export class PublisherHost {
     for (const controller of this.active.values()) controller.abort(new Error('发布能力包已停止。'))
     this.active.clear()
     await this.browser.closeAll()
+  }
+
+  /* ------------------------------ keep-alive ------------------------------ */
+
+  /**
+   * 周期性打开每个 active 账号的平台首页，让服务端续期 cookie。
+   * 视频号的登录态本来就是几小时的短时效票据，只能靠真实访问续期，
+   * 所以这一步是「缓解」而不是「修复」；掉线时它也会立刻把状态标成 expired，
+   * 让用户在发起发布前而不是发布中途才发现要重新扫码。
+   */
+  startKeepAlive({ intervalMs = KEEP_ALIVE_INTERVAL_MS, firstDelayMs = KEEP_ALIVE_FIRST_DELAY_MS } = {}) {
+    this.stopKeepAlive()
+    this.keepAliveTimer = setTimeout(() => { void this.keepAliveActiveAccounts() }, firstDelayMs)
+    if (typeof this.keepAliveTimer.unref === 'function') this.keepAliveTimer.unref()
+    this.keepAliveInterval = setInterval(() => { void this.keepAliveActiveAccounts() }, intervalMs)
+    if (typeof this.keepAliveInterval.unref === 'function') this.keepAliveInterval.unref()
+    return true
+  }
+
+  stopKeepAlive() {
+    if (this.keepAliveTimer) clearTimeout(this.keepAliveTimer)
+    if (this.keepAliveInterval) clearInterval(this.keepAliveInterval)
+    this.keepAliveTimer = null
+    this.keepAliveInterval = null
+    return true
+  }
+
+  /** One pass over every active account; never throws, never blocks a job. */
+  async keepAliveActiveAccounts() {
+    let accounts = []
+    try {
+      accounts = await this.store.listAccounts()
+    } catch {
+      return { checked: 0, active: 0, expired: 0 }
+    }
+    let checked = 0
+    let active = 0
+    let expired = 0
+    for (const account of accounts) {
+      if (account.status !== 'active') continue
+      // 正在登录/发布/被用户操作的账号不碰，避免抢同一个 Chrome profile。
+      if (this.busy.has(account.id)) continue
+      checked += 1
+      try {
+        const result = await this.checkAccount(account.id)
+        // 不可达（网络抖动 / 页面异常）不是「未登录」，不动状态，也不计入 expired。
+        if (result?.unreachable) continue
+        if (result?.loggedIn) active += 1
+        else expired += 1
+      } catch (error) {
+        expired += 1
+        this.onLog('keepalive', `账号「${account.label || account.id}」保活巡检失败：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (checked > 0) {
+      this.onLog('keepalive', `登录态巡检完成：${active} 个在线${expired ? `，${expired} 个需要重新登录` : ''}。`)
+    }
+    return { checked, active, expired }
   }
 }
 

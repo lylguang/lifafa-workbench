@@ -188,6 +188,8 @@ export function buildTopicPrompt({ input, material, profile, sourceLabels, platf
     'signalIds 只能引用输入素材中出现的信号标识；没有可用素材时留空。',
     '避免重复近期已经生成过的选题；除非用户明确要求换角度，否则不要仅改写标题后重复同一内容核心。',
     '不要输出大纲、脚本或评分表。',
+    '每个候选必须从宏观信号收敛到一个具体类目（3C配件、家居、户外、服饰、汽配周边等）与一个具体动作（现在该不该做、怎么备货、怎么避开坑）；纯趋势层判断不算合格选题，必须给出中小卖家能直接选品上手的落点。',
+    '反向劝退类选题（如「这个品别做」）必须在结尾给出可落地的替代类目或动作，让观众知道「那做什么」，不能只停留在「别碰」。',
   ]
   if (input.angle) rules.push(`全部候选都要满足选题角度：${input.angle}。`)
   const account = profileLines(profile)

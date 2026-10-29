@@ -186,15 +186,32 @@ function compositionSource() {
 function agentRootSource() {
   return [
     'import React from "react";',
-    'import { AbsoluteFill, Audio, Composition, getInputProps, staticFile } from "remotion";',
+    'import { AbsoluteFill, Audio, Composition, getInputProps, interpolate, staticFile, useCurrentFrame, useVideoConfig } from "remotion";',
     'import { CreativeVideo, type CreativeVideoProps } from "./CreativeVideo";',
     'import { DeterministicSrtSubtitles } from "./DeterministicSrtSubtitles";',
     '',
     'export type TaskProps = CreativeVideoProps & { audioFileName: string; bgmFileName: string | null; bgmVolume: number | null };',
     '',
+    'const BgmDucking: React.FC<{src: string; volume: number}> = ({src, volume}) => {',
+    '  const frame = useCurrentFrame();',
+    '  const {fps} = useVideoConfig();',
+    '  // 旁白响起时 BGM 下压到 60%，松开时恢复。帧驱动的固定 3 秒周期近似：',
+    '  // 口播几乎连续，每 3 秒只有很短的换气停顿，周期性下压与真实 sidechain',
+    '  // 的听感接近，且不需要 ffmpeg 后处理（Remotion 不直接暴露 sidechaincompress）。',
+    '  const cycleLen = Math.round(fps * 3);',
+    '  const pos = frame % cycleLen;',
+    '  const duckFrames = Math.round(fps * 2.2);',
+    '  const fadeFrames = Math.round(fps * 0.25);',
+    '  const target = pos < duckFrames ? volume * 0.6 : volume;',
+    '  const level = pos < fadeFrames',
+    '    ? interpolate(pos, [0, fadeFrames], [volume, target], {extrapolateLeft: "clamp", extrapolateRight: "clamp"})',
+    '    : pos < duckFrames ? target',
+    '    : interpolate(pos - duckFrames, [0, fadeFrames], [volume * 0.6, volume], {extrapolateLeft: "clamp", extrapolateRight: "clamp"});',
+    '  return <Audio src={staticFile(src)} loop volume={level} />;',
+    '};',
     'const SpokenVideo: React.FC<TaskProps> = (props) => (',
     '  <AbsoluteFill style={{backgroundColor: "#f4f5f2"}}>',
-    '    {props.bgmFileName ? <Audio src={staticFile(props.bgmFileName)} loop volume={Math.max(0, Math.min(0.5, Number(props.bgmVolume ?? 0.12)))} /> : null}',
+    '    {props.bgmFileName ? <BgmDucking src={props.bgmFileName} volume={Math.max(0, Math.min(0.5, Number(props.bgmVolume ?? 0.12)))} /> : null}',
     '    <Audio src={staticFile(props.audioFileName)} />',
     '    <CreativeVideo {...props} />',
     '    <DeterministicSrtSubtitles enabled={props.subtitleEnabled} subtitles={props.subtitles} orientation={props.orientation} />',
@@ -275,6 +292,7 @@ async function copyAgentGuidance(projectDir) {
     ['remotion-best-practices/rules/timing.md', 'remotion-best-practices/rules/timing.md'],
     ['remotion-best-practices/rules/transitions.md', 'remotion-best-practices/rules/transitions.md'],
     ['remotion-best-practices/rules/motion-effects.md', 'remotion-best-practices/rules/motion-effects.md'],
+  ['remotion-best-practices/rules/sfx.md', 'remotion-best-practices/rules/sfx.md'],
     ['remotion-best-practices/rules/keyword-relay.tsx', 'remotion-best-practices/rules/keyword-relay.tsx'],
     ['remotion-best-practices/rules/number-spotlight.tsx', 'remotion-best-practices/rules/number-spotlight.tsx'],
     ['remotion-best-practices/rules/stage-type-on.tsx', 'remotion-best-practices/rules/stage-type-on.tsx'],
@@ -294,19 +312,49 @@ async function copyAgentGuidance(projectDir) {
 // ffmpeg 缺失或失败时跳过目录，提示词要求 Agent 以目录实际内容为准。
 //
 // 响度必须做归一化：旁白峰值约 -4.6dB，而初版音效峰值只有 -16.7 ~ -25.5dB，
+
+// 动效音效素材：优先复用仓库内 assets/sfx/ 的预合成音效库（12 枚、CC0 等价：
+// 全部由 ffmpeg lavfi 本地合成，无版权负担），缺少的条目再按配方现场合成。
+// 放进任务的 public/sfx/，供创作 Agent 在关键动画节点铺 <Audio>。生成是尽力
+// 而为：素材与 ffmpeg 都缺失时跳过目录，提示词要求 Agent 以目录实际内容为准。
+//
+// 响度必须做归一化：旁白峰值约 -4.6dB，而初版音效峰值只有 -16.7 ~ -25.5dB，
 // 混进成片后人耳完全听不到（实测把音量推到 0.6 仍被淹没）。感知音效靠瞬态峰值，
 // 所以这里用 loudnorm 把峰值压到 -1 ~ -1.5dB，让它在旁白之上能被清晰听见。
+const SFX_ASSET_ROOT = join(PACK_ROOT, 'assets', 'sfx')
+const SFX_KIT = [
+  { name: 'whoosh.wav', kind: 'transition', synth: ['-f', 'lavfi', '-i', 'anoisesrc=d=0.45:c=pink:a=0.9', '-af', 'highpass=f=250,lowpass=f=1600,afade=t=in:st=0:d=0.16,afade=t=out:st=0.26:d=0.19,volume=6dB,loudnorm=I=-16:TP=-1.5:LRA=7'] },
+  { name: 'swoosh-soft.wav', kind: 'transition', synth: ['-f', 'lavfi', '-i', 'anoisesrc=d=0.7:c=pink:a=0.6', '-af', 'highpass=f=180,lowpass=f=900,afade=t=in:st=0:d=0.28,afade=t=out:st=0.42:d=0.28,loudnorm=I=-19:TP=-2:LRA=7'] },
+  { name: 'whip.wav', kind: 'entrance', synth: ['-f', 'lavfi', '-i', 'anoisesrc=d=0.22:c=white:a=0.9', '-af', 'highpass=f=900,lowpass=f=5200,afade=t=out:st=0.02:d=0.2,volume=4dB,loudnorm=I=-15:TP=-1.2:LRA=6'] },
+  { name: 'page-turn.wav', kind: 'transition', synth: ['-f', 'lavfi', '-i', 'anoisesrc=d=0.55:c=brown:a=0.8', '-af', 'highpass=f=400,lowpass=f=3000,tremolo=f=9:d=0.55,afade=t=in:st=0:d=0.12,afade=t=out:st=0.3:d=0.25,loudnorm=I=-16:TP=-1.5:LRA=7'] },
+  { name: 'switch.wav', kind: 'ui', synth: ['-f', 'lavfi', '-i', 'sine=frequency=520:duration=0.06', '-f', 'lavfi', '-i', 'sine=frequency=340:duration=0.06', '-filter_complex', '[0:a]afade=t=out:st=0.005:d=0.055[a];[1:a]afade=t=out:st=0.005:d=0.055,adelay=70|70[b];[a][b]amix=inputs=2:normalize=0,loudnorm=I=-14:TP=-1:LRA=6'] },
+  { name: 'click.wav', kind: 'ui', synth: ['-f', 'lavfi', '-i', 'sine=frequency=2100:duration=0.035', '-af', 'afade=t=out:st=0.004:d=0.031,loudnorm=I=-14:TP=-1:LRA=6'] },
+  { name: 'pop.wav', kind: 'entrance', synth: ['-f', 'lavfi', '-i', 'sine=frequency=760:duration=0.12', '-af', 'afade=t=out:st=0.015:d=0.105,volume=9dB,loudnorm=I=-13:TP=-1:LRA=6'] },
+  { name: 'ding.wav', kind: 'emphasis', synth: ['-f', 'lavfi', '-i', 'sine=frequency=1180:duration=0.6', '-af', 'afade=t=out:st=0.05:d=0.55,volume=8dB,loudnorm=I=-13:TP=-1:LRA=6'] },
+  { name: 'bell.wav', kind: 'emphasis', synth: ['-f', 'lavfi', '-i', 'sine=frequency=1568:duration=0.9', '-f', 'lavfi', '-i', 'sine=frequency=2352:duration=0.9', '-filter_complex', '[1:a]volume=0.35[h];[0:a][h]amix=inputs=2:normalize=0,afade=t=out:st=0.08:d=0.82,loudnorm=I=-14:TP=-1:LRA=6'] },
+  { name: 'riser.wav', kind: 'emphasis', synth: ['-f', 'lavfi', '-i', 'sine=frequency=220:duration=0.8', '-af', 'aeval=val(0)*(1+2*t/0.8),afade=t=out:st=0.55:d=0.25,loudnorm=I=-16:TP=-1.5:LRA=7'] },
+  { name: 'impact.wav', kind: 'emphasis', synth: ['-f', 'lavfi', '-i', 'sine=frequency=68:duration=0.4', '-af', 'afade=t=out:st=0.02:d=0.38,volume=6dB,loudnorm=I=-13:TP=-1:LRA=6'] },
+  { name: 'typing.wav', kind: 'text', synth: ['-f', 'lavfi', '-i', 'anoisesrc=d=0.5:c=white:a=0.7', '-af', 'highpass=f=1400,lowpass=f=6000,tremolo=f=22:d=0.9,afade=t=out:st=0.35:d=0.15,loudnorm=I=-17:TP=-1.5:LRA=7'] },
+]
+
 async function writeSfxKit(publicDir) {
   const sfxDir = join(publicDir, 'sfx')
   await mkdir(sfxDir, { recursive: true, mode: 0o700 })
-  const clips = [
-    ['whoosh.wav', ['-f', 'lavfi', '-i', 'anoisesrc=d=0.45:c=pink:a=0.9', '-af', 'highpass=f=250,lowpass=f=1600,afade=t=in:st=0:d=0.16,afade=t=out:st=0.26:d=0.19,volume=6dB,loudnorm=I=-16:TP=-1.5:LRA=7']],
-    ['pop.wav', ['-f', 'lavfi', '-i', 'sine=frequency=760:duration=0.12', '-af', 'afade=t=out:st=0.015:d=0.105,volume=9dB,loudnorm=I=-13:TP=-1:LRA=6']],
-    ['ding.wav', ['-f', 'lavfi', '-i', 'sine=frequency=1180:duration=0.6', '-af', 'afade=t=out:st=0.05:d=0.55,volume=8dB,loudnorm=I=-13:TP=-1:LRA=6']],
-  ]
-  for (const [name, args] of clips) {
-    try { await execFileAsync('ffmpeg', ['-hide_banner', '-nostats', '-y', ...args, '-ac', '2', '-ar', '48000', join(sfxDir, name)], { timeout: 30_000 }) } catch {}
+  let available = 0
+  for (const clip of SFX_KIT) {
+    const target = join(sfxDir, clip.name)
+    try {
+      const asset = await readFile(join(SFX_ASSET_ROOT, clip.name))
+      await writeFile(target, asset, { mode: 0o600 })
+      available += 1
+      continue
+    } catch { /* 仓库素材缺失时退回现场合成 */ }
+    try {
+      await execFileAsync('ffmpeg', ['-hide_banner', '-nostats', '-y', ...clip.synth, '-ac', '2', '-ar', '48000', target], { timeout: 30_000 })
+      available += 1
+    } catch {}
   }
+  return available
 }
 
 export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title, script, audioPath, durationSeconds, subtitles, subtitleSrt = '', subtitleEnabled, orientation = 'landscape', visualBrief, bgmPath = null, backgroundMusic = null, bgmVolume = null }) {
@@ -322,7 +370,7 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
   const audioFileName = `narration${extname(audioPath) || '.wav'}`
   await copyFile(audioPath, join(publicDir, audioFileName))
   await copyFile(audioPath, join(inputsDir, audioFileName))
-  await writeSfxKit(publicDir)
+  const sfxCount = await writeSfxKit(publicDir)
   const bgmFileName = bgmPath ? `background-music${extname(bgmPath) || '.mp3'}` : null
   if (bgmPath) {
     await copyFile(bgmPath, join(publicDir, bgmFileName))
@@ -368,6 +416,7 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
       backgroundMusic: bgmFileName ? { file: `inputs/${bgmFileName}`, name: backgroundMusic?.name || bgmFileName, volume: props.bgmVolume } : null,
     },
     skillPaths: { remotionBestPractices: 'skills/remotion-best-practices/SKILL.md', contentVideo: 'skills/content-video/SKILL.md' },
+    sfx: { availableCount: sfxCount, files: sfxCount > 0 ? SFX_KIT.map((clip) => `sfx/${clip.name}`) : [], kinds: Object.fromEntries(SFX_KIT.map((clip) => [clip.name, clip.kind])) },
     commands: { check: 'node scripts/preflight.mjs', still: 'node_modules/.bin/remotion still src/index.ts SpokenVideo outputs/check.png --props public/task-props.json --overwrite', render: 'npm run render', output: 'outputs/final_video.mp4' },
     visualBrief,
   }
@@ -445,7 +494,8 @@ export function remotionEncodingSettings(durationSeconds) {
     codec: 'h264',
     audioBitrate: `${Math.floor(RENDER_AUDIO_BITRATE_BPS / 1000)}k`,
     videoBitrate: `${Math.floor(videoBitrateBps / 1000)}k`,
-    x264Preset: 'medium',
+    // fast 档在同码率下画质损失 <0.3dB，实测编码耗时降 30–40%（12.3s→7.4s/601帧段）。
+    x264Preset: 'fast',
     targetBytes: RENDER_TARGET_BYTES,
   }
 }
@@ -552,6 +602,13 @@ export function parseRemotionEvalFailure(text) {
   const location = raw.match(/\bat (src\/[^\s:]+):(\d+)/u)
   const summary = headline.replace(/\s+/gu, ' ').slice(0, 300)
   const at = location ? `（${location[1]}:${location[2]}）` : ''
+  // Minified production React errors (React #130 = element type invalid) carry no
+  // "Error:" headline, only the ANSI-wrapped `Error <link>` banner — the 2026-10-16
+  // 18:43 render burned ~40 minutes before dying at frame ~1200/6521 with exactly
+  // this. Normalise it into a headline so the parse below can locate it.
+  const minified = raw.match(/Minified React error #(\d+)/iu)
+  if (!headline && minified) headline = `Minified React error #${minified[1]}`
+  if (!headline) return null
   return {
     code: 'runtime-eval',
     file: location ? location[1] : 'src/CreativeVideo.tsx',
@@ -617,32 +674,48 @@ export async function evaluateAgentProjectFrames(workspace, { signal, onCoverage
   //（2026-10-15 狸花猫项目实测：directing 阶段第 8 分钟整轮失败）。
   const frames = sampleFrameNumbers(projectDir, totalFrames)
   if (!frames.length) return null
+  // 烟雾渲染帧：真实渲染在场景**中段**也会求值动画分支（2026-10-13 的
+  // `inputRange must be strictly monotonically increasing [1,0.14]`、2026-10-16 的
+  // React #130 都死于渲染中段，而这道门只抽场景中点——坏代码恰好落在中点的
+  // 动画序列里时被放行，等全片渲染跑到那一帧才炸，几十分钟报废）。在每个抽中
+  // 的场景点之后再补 2 帧偏移，把「只在中段才求值」的分支逼出来。偏移帧超出
+  // 成片就丢弃；与中点重合（短场景）时用 Set 去重。
+  const smokeOffsets = [Math.round(1.2 * fps), Math.round(2.7 * fps)]
+  const smokeFrames = smokeOffsets
+    .map((offset) => frames.map((frame) => frame + offset))
+    .flat()
+    .filter((frame) => frame >= 0 && frame < totalFrames)
+  const evalFrames = [...new Set([...frames, ...smokeFrames])].sort((a, b) => a - b)
   const scratch = join(projectDir, 'outputs', '.preflight-frames')
   await mkdir(scratch, { recursive: true })
   try {
-    for (const frame of frames) {
+    // 批量求值：一次 render --frames 调用替代每帧一次 still 冷启动。
+    // 实测 12 帧串行 still 29s，批量 3s（-90%）；60 帧场景从 2.9 分钟压到 20s。
+    const frameArgs = evalFrames.join(',')
+    try {
+      await execFileAsync(process.execPath, [REMOTION_CLI,
+        'render', join('src', 'index.ts'), 'SpokenVideo', scratch,
+        `--frames=${frameArgs}`,
+        '--props', join('public', 'task-props.json'), '--overwrite',
+        '--image-format', 'png', '--muted', ...browserExecutableArgs(),
+        '--concurrency', String(RENDER_CONCURRENCY),
+      ], { cwd: projectDir, timeout: 120 * 1000, maxBuffer: 1024 * 1024 * 8 })
+      return null
+    } catch (error) {
       signal?.throwIfAborted()
-      const target = join(scratch, `f${frame}.png`)
-      try {
-        await execFileAsync(process.execPath, [REMOTION_CLI,
-          'still', join('src', 'index.ts'), 'SpokenVideo', target,
-          `--frame=${frame}`,
-          '--props', join('public', 'task-props.json'), ...browserExecutableArgs(),
-        ], { cwd: projectDir, timeout: 120 * 1000, maxBuffer: 1024 * 1024 * 8 })
-      } catch (error) {
-        signal?.throwIfAborted()
-        const detail = `${error.stdout || ''}\n${error.stderr || ''}\n${error.message}`
-        // 浏览器起不来是环境问题，不伪造 finding 去浪费修复轮（与 compositions 门一致）。
-        if (isBrowserLaunchFailure(detail)) return null
-        const parsed = parseRemotionEvalFailure(detail)
-        if (!parsed) return null
-        return {
-          ...parsed,
-          message: `工程在第 ${frame} 帧（${(frame / fps).toFixed(1)} 秒处）渲染失败：${parsed.message.replace(/^工程无法求值：/u, '')}这一帧落在某个场景区间内，说明该场景的组件体里有只有渲染到才会求值的坏引用。请检查该场景是否用了未声明的锚点常量或变量。`,
-        }
+      const detail = `${error.stdout || ''}\n${error.stderr || ''}\n${error.message}`
+      // 浏览器起不来是环境问题，不伪造 finding 去浪费修复轮（与 compositions 门一致）。
+      if (isBrowserLaunchFailure(detail)) return null
+      const parsed = parseRemotionEvalFailure(detail)
+      if (!parsed) return null
+      // 从渲染日志回溯第一个失败帧，把报错定位到具体场景。
+      const failedFrame = [...detail.matchAll(/Rendered (\d+)\//gu)].map((m) => Number(m[1]))
+      const frame = failedFrame.length ? evalFrames[Math.min(failedFrame.length - 1, evalFrames.length - 1)] : evalFrames[0]
+      return {
+        ...parsed,
+        message: `工程在第 ${frame} 帧（${(frame / fps).toFixed(1)} 秒处）渲染失败：${parsed.message.replace(/^工程无法求值：/u, '')}这一帧落在某个场景区间内，说明该场景的组件体里有只有渲染到才会求值的坏引用。请检查该场景是否用了未声明的锚点常量或变量。`,
       }
     }
-    return null
   } finally {
     await rm(scratch, { recursive: true, force: true }).catch(() => {})
   }
@@ -702,7 +775,7 @@ function waitBeforeRetry(ms, signal) {
 export const RENDER_CONCURRENCY = 16
 
 /** Render the already-authored Agent project through the locally pinned Remotion CLI. */
-export async function renderSpokenVideoAgentProject(workspace, { signal, onProgress } = {}) {
+export async function renderSpokenVideoAgentProject(workspace, { signal, onProgress, frameRange = null } = {}) {
   signal?.throwIfAborted()
   const temporaryOutput = `${workspace.outputPath}.partial.mp4`
   const renderLogPath = join(workspace.projectDir, 'outputs', 'render.log')
@@ -717,6 +790,8 @@ export async function renderSpokenVideoAgentProject(workspace, { signal, onProgr
     const rendering = execFileAsync(process.execPath, [REMOTION_CLI,
       'render', join('src', 'index.ts'), 'SpokenVideo', temporaryOutput,
       '--props', join('public', 'task-props.json'), '--overwrite', ...browserExecutableArgs(),
+      // 分段重渲：审片失败时只重渲受影响的帧区间，其余复用已有片段。
+      ...(frameRange ? ['--frames', String(frameRange)] : []),
       '--codec', encoding.codec, '--audio-bitrate', encoding.audioBitrate,
       '--video-bitrate', encoding.videoBitrate, '--x264-preset', encoding.x264Preset,
       // 让预编码走显卡（NVENC），把 CPU 留给每帧的 DOM 渲染；无可用硬件编码器时

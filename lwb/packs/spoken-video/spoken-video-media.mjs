@@ -3,14 +3,30 @@ import { measureNarrativeRhythm, measureSceneTimeline } from './spoken-video-rhy
 
 export const MEDIA_OPERATION_TYPES = Object.freeze(['voiceover', 'subtitles', 'video', 'qc'])
 export const MEDIA_OPERATION_STATES = Object.freeze(['queued', 'running', 'succeeded', 'failed'])
-export const MEDIA_PROVIDERS = Object.freeze(['bailian', 'scitiger', 'legacy'])
-export const MEDIA_CONNECTION_PROVIDERS = Object.freeze(['bailian', 'scitiger'])
+export const MEDIA_PROVIDERS = Object.freeze(['scitiger', 'bridge'])
+export const MEDIA_CONNECTION_PROVIDERS = Object.freeze(['scitiger', 'bridge'])
 export const VIDEO_ORIENTATIONS = Object.freeze(['portrait', 'landscape'])
 export const MEDIA_PROVIDER_CREDENTIAL_REFS = Object.freeze({
-  bailian: 'DASHSCOPE_API_KEY',
   scitiger: 'LWB_SPOKEN_VIDEO_SCITIGER_API_KEY',
+  bridge: 'LWB_SPOKEN_VIDEO_SCITIGER_API_KEY',
 })
 export const VOICE_SOURCES = Object.freeze(['system', 'upload', 'reference', 'preset'])
+/**
+ * 渠道收敛前的旧词表：bailian（百炼直连）/ legacy 已随「百炼不留」下线。这里
+ * 只保留折叠映射，用来把用户机器上已存的旧内容安排（production.voice.provider）
+ * 与旧连接设置里还带着的 bailian/legacy 名字，折到现在唯一的本地桥接渠道
+ * scitiger——这是「存量兼容映射」，不是重新支持百炼。
+ * 折到 scitiger（桥接端点）而不是 bridge：字幕的段时序快路径只认 scitiger，
+ * 折成 bridge 会静默退回 ASR，字幕重新开始漂移。
+ */
+const LEGACY_PROVIDERS = new Map([['bailian', 'scitiger'], ['legacy', 'scitiger']])
+
+/** Folds retired provider names; unknown non-empty values still fail in oneOf. */
+export function foldLegacyProvider(value) {
+  if (value === undefined || value === null || value === '') return null
+  const requested = typeof value === 'string' ? value.trim().toLowerCase() : value
+  return LEGACY_PROVIDERS.get(requested) ?? requested
+}
 export const DEFAULT_VOICE_PROFILE = Object.freeze({
   id: 'tiffy-confident',
   name: 'Tiffy - 自信',
@@ -87,22 +103,6 @@ function endpoint(value) {
   return parsed.toString().replace(/\/$/u, '')
 }
 
-function websocketEndpoint(value) {
-  if (typeof value !== 'string' || !value.trim()) return null
-  let parsed
-  try {
-    parsed = new URL(value.trim())
-  } catch {
-    throw fail('SPOKEN_VIDEO_MEDIA_CONFIG_INVALID', '百炼 ASR 地址必须是 WebSocket URL。')
-  }
-  if (!['ws:', 'wss:', 'http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw fail('SPOKEN_VIDEO_MEDIA_CONFIG_INVALID', '百炼 ASR 地址无效。')
-  }
-  if (parsed.protocol === 'http:') parsed.protocol = 'ws:'
-  if (parsed.protocol === 'https:') parsed.protocol = 'wss:'
-  return parsed.toString().replace(/\/$/u, '')
-}
-
 /** Loopback endpoints are this machine's own bridge: it serves any bearer token. */
 export function isLoopbackEndpoint(value) {
   if (typeof value !== 'string' || !value.trim()) return false
@@ -118,24 +118,28 @@ export function isLoopbackEndpoint(value) {
 
 /** Reads only operator-owned environment configuration. Browser input never supplies an endpoint or credential. */
 export function mediaServiceConfig(environment = process.env) {
-  const baseUrl = endpoint(environment.LWB_SPOKEN_VIDEO_TTS_BASE_URL || environment.TTS_SERVICE_BASE_URL)
-  const scitigerBaseUrl = endpoint(environment.LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL || environment.SCITIGER_BASE_URL || 'https://link.scitiger.cn')
-  const bailianBaseUrl = endpoint(environment.LWB_SPOKEN_VIDEO_BAILIAN_BASE_URL || 'https://dashscope.aliyuncs.com/api/v1')
+  const explicitBridge = environment.LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL || environment.SCITIGER_BASE_URL
+  const bridgeBaseUrl = endpoint(explicitBridge || 'http://127.0.0.1:8199')
+  // endpointConfigured：是否「显式」配置了桥接（SciTiger）地址。仅靠默认回退
+  // （http://127.0.0.1:8199 本机桥接占位）不算显式配置——界面可据此区分「默认占位」
+  // 与「已显式配置」，从而在未部署桥接时提示「桥接未运行，请先启动本机桥接」，
+  // 而不是一味显示「已配置」。
+  // configured / scitigerConfigured 仍表示「桥接地址可用」（默认占位也算），以兼容
+  // 现有宿主的可用性判断与鉴权流程；服务可达性由宿主运行时探测，不在此处臆断。
+  const endpointConfigured = Boolean(explicitBridge)
+  // 校验 TTS 兼容服务地址：本包实际只用桥接地址，但该环境变量一旦被误填成非
+  // HTTP(S) 值（如 file://），仍应尽早报配置错误，而不是静默忽略。
+  endpoint(environment.LWB_SPOKEN_VIDEO_TTS_BASE_URL || environment.TTS_SERVICE_BASE_URL)
   return {
-    baseUrl,
-    configured: Boolean(baseUrl),
+    baseUrl: bridgeBaseUrl,
+    endpointConfigured,
+    configured: Boolean(bridgeBaseUrl),
     userId: optionalText(environment.LWB_SPOKEN_VIDEO_TTS_USER_ID || environment.TTS_USER_ID, 'TTS 用户标识', 120),
-    provider: optionalText(environment.LWB_SPOKEN_VIDEO_TTS_PROVIDER || environment.TTS_PROVIDER, 'TTS 提供方', 80) || 'cosyvoice',
+    provider: optionalText(environment.LWB_SPOKEN_VIDEO_TTS_PROVIDER || environment.TTS_PROVIDER, 'TTS 提供方', 80) || 'bridge',
     outputFormat: outputFormat(environment.LWB_SPOKEN_VIDEO_TTS_OUTPUT_FORMAT || environment.TTS_OUTPUT_FORMAT, 'TTS 输出格式', 'wav'),
-    bailianBaseUrl,
-    bailianAsrWebSocketUrl: websocketEndpoint(environment.LWB_SPOKEN_VIDEO_BAILIAN_ASR_WS_URL || 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime'),
-    bailianAsrModel: optionalText(environment.LWB_SPOKEN_VIDEO_BAILIAN_ASR_MODEL, '百炼 ASR 模型', 120) || 'qwen3-asr-flash-realtime',
-    bailianModel: optionalText(environment.LWB_SPOKEN_VIDEO_BAILIAN_TTS_MODEL, '百炼 TTS 模型', 120) || 'qwen3-tts-flash',
-    bailianDefaultVoice: optionalText(environment.LWB_SPOKEN_VIDEO_BAILIAN_DEFAULT_VOICE, '百炼默认音色', 80) || 'Cherry',
-    bailianVoiceEnrollmentModel: optionalText(environment.LWB_SPOKEN_VIDEO_BAILIAN_VOICE_ENROLLMENT_MODEL, '百炼声音复刻模型', 120) || 'qwen-voice-enrollment',
-    bailianVoiceCloneModel: optionalText(environment.LWB_SPOKEN_VIDEO_BAILIAN_VOICE_CLONE_MODEL, '百炼复刻 TTS 模型', 120) || 'qwen3-tts-vc-2026-01-22',
-    scitigerBaseUrl,
-    scitigerConfigured: Boolean(scitigerBaseUrl),
+    bridgeBaseUrl,
+    scitigerBaseUrl: bridgeBaseUrl,
+    scitigerConfigured: Boolean(bridgeBaseUrl),
   }
 }
 
@@ -159,8 +163,11 @@ export function normalizeVoiceoverRequest(value) {
   // 桥接（SciTiger 端点）专属提示，仅当请求打到桥接时生效：channel 覆盖桥接的
   // 云端/本地开关，style 覆盖其预期风格；其他渠道原样忽略。
   const bridgeInput = input.bridge == null ? null : object(input.bridge, '桥接配音设置')
+  // 模型与音色描述按任务覆盖：预置音色用音色名，音色设计用描述，声音复刻靠参考音频。
+  const bridgeModel = bridgeInput ? optionalText(bridgeInput.model, '桥接合成模型', 80) : null
+  const bridgeVoiceDesign = bridgeInput ? optionalText(bridgeInput.voiceDesign, '音色设计描述', 500) : null
   return {
-    provider: oneOf(input.provider, '生成方式', MEDIA_PROVIDERS, 'bailian'),
+    provider: oneOf(foldLegacyProvider(input.provider) ?? 'bridge', '生成方式', MEDIA_PROVIDERS, 'bridge'),
     voiceSource,
     voiceId,
     voiceName: optionalText(input.voiceName, '音色名称', 120)
@@ -173,6 +180,8 @@ export function normalizeVoiceoverRequest(value) {
     bridge: bridgeInput ? {
       channel: oneOf(bridgeInput.channel, '桥接配音方式', ['cloud', 'local'], null),
       style: optionalText(bridgeInput.style, '桥接预期风格', 200),
+      ...(bridgeModel ? { model: bridgeModel } : {}),
+      ...(bridgeVoiceDesign ? { voiceDesign: bridgeVoiceDesign } : {}),
     } : null,
   }
 }
@@ -180,7 +189,7 @@ export function normalizeVoiceoverRequest(value) {
 export function normalizeSubtitleRequest(value) {
   const input = object(value ?? {}, '字幕请求')
   return {
-    provider: oneOf(input.provider, '生成方式', MEDIA_PROVIDERS, 'bailian'),
+    provider: oneOf(foldLegacyProvider(input.provider) ?? 'bridge', '生成方式', MEDIA_PROVIDERS, 'bridge'),
     language: optionalText(input.language, '字幕语言', 16) || 'zh',
     aiOptimize: input.aiOptimize === true,
   }
@@ -355,7 +364,7 @@ export const DEFAULT_RHYTHM_THRESHOLDS = Object.freeze({
  *
  * 分级理由：技术问题（分辨率、帧率）会直接毁掉片子，必须 fail；
  * 节奏问题多数是「值得再看一眼」而不是「片子不能用」，默认走 warnings。
- * 只��一条进 issues——前 3 秒完全静默，因为那是最贵的三秒。
+ * 只把一条进 issues——前 3 秒完全静默，因为那是最贵的三秒。
  */
 export function evaluateRhythm(rhythm, thresholds = DEFAULT_RHYTHM_THRESHOLDS) {
   const issues = []
@@ -445,3 +454,4 @@ export function buildTechnicalReport({
     rhythm,
   }
 }
+

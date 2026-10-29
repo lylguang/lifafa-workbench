@@ -32,14 +32,19 @@ const RULES = [
   },
   {
     category: 'credential.missing',
-    test: /(未配置\s*api\s*key|没有配置|缺少.{0,6}(api[\s-]?key|密钥)|api\s*key.{0,6}(未|空)配置)/iu,
+    // 「尚未保存 API Key」来自媒体主机的 SPOKEN_VIDEO_MEDIA_CREDENTIAL_REQUIRED
+    //（#apiKey / #prepareRunCredentials），此前落进 code.defect 被报成「内部缺陷，
+    // 请反馈开发者」，而真实修法是去连接配置保存 Key。
+    test: /(未配置\s*api\s*key|没有配置|尚未配置|尚未保存\s*api\s*key|缺少.{0,6}(api[\s-]?key|密钥)|api\s*key.{0,6}(未|空)配置)/iu,
     retryable: false,
     remedy: '云端服务尚未配置 API Key。请到「连接配置」填写，或把该环节切换到本机桥接。',
     remedyTarget: 'media-connection',
   },
   {
     category: 'credential.quota',
-    test: /(\b429\b|too\s*many\s*requests|rate[\s-]?limit|额度|配额|余额不足|quota)/iu,
+    // 「积分不足」是 SciTiger 的余额话术（SPOKEN_VIDEO_MEDIA_INSUFFICIENT_POINTS），
+    // 与「余额不足」同因，此前同样落进 code.defect。
+    test: /(\b429\b|too\s*many\s*requests|rate[\s-]?limit|额度|配额|余额不足|积分不足|insufficient[ _-]*points|quota)/iu,
     retryable: true,
     autoRepair: 'backoff',
     remedy: '云端服务限流或额度不足。系统会自动退避重试；若持续出现请检查配额与并发。',
@@ -47,7 +52,10 @@ const RULES = [
   },
   {
     category: 'engine.down',
-    test: /(fetch failed|econnrefused|connection refused|未连接|无法连接|可执行文件不存在|no such file|comfyui|8188|8187|引擎未启动|engine.*(down|not running))/iu,
+    // ETIMEDOUT / ECONNRESET / socket hang up / EPIPE 是 undici 在连接建立后
+    // 断开时的真实报错文案，不含 "fetch failed"（fetch failed 只在 cause 里），
+    // 此前落进 code.defect 被判「不重试、内部缺陷」，一次网络抖动就把整轮判死。
+    test: /(fetch failed|econnrefused|connection refused|etimedout|econnreset|socket hang up|epipe|未连接|无法连接|可执行文件不存在|no such file|comfyui|8188|8187|引擎未启动|engine.*(down|not running))/iu,
     retryable: true,
     autoRepair: 'ensureEngine',
     // 2026-10-10 18:13 的教训：桥接整个进程没起来时，原来这句让人「打开
@@ -63,6 +71,13 @@ const RULES = [
     retryable: true,
     autoRepair: 'resume',
     remedy: '主机在任务进行中重启。本轮会从中断处自动续跑，已完成的产物不会重做。',
+    remedyTarget: null,
+  },
+  {
+    category: 'content.protected_file',
+    test: /(受保护文件.{0,40}(被修改|丢失)|protected[- ]?file)/iu,
+    retryable: false,
+    remedy: '视频 Agent 修改了受保护外壳文件（预检器、场景表快照等）。这通常是创作 Agent 越界改了不该改的文件：系统会重置受保护文件并重跑修复轮；如果反复出现，检查创作提示词的边界声明是否被模型忽略。',
     remedyTarget: null,
   },
   {
@@ -90,10 +105,30 @@ const RULES = [
     remedyTarget: null,
   },
   {
+    // 2026-10 实测的两类确定性渲染崩溃：React #130（组件元素类型无效，通常是
+    // 场景里渲染了 undefined 组件——2026-10-16 18:43 渲到 1200/6521 帧才炸）与
+    // `inputRange must be strictly monotonically increasing`（插值区间乱序——
+    // 2026-10-13 23:43 同样死在渲染中段）。它们此前落进 code.defect（不重试、
+    // 无修法），实际上都源自 CreativeVideo.tsx 的可修复代码缺陷，必须像求值
+    // 失败一样交回创作 Agent 的修复环，而不是把整轮判死。
+    // 注意它必须排在 content.qc_failed 之前：两条规则都会命中「成片未通过质检」
+    // 类文案，先匹配到谁谁赢。
+    category: 'content.render_crash',
+    test: /(Minified React error|inputRange must be strictly monotonically)/iu,
+    retryable: true,
+    autoRepair: 'restartStage',
+    remedy: '渲染在成片中段崩溃（React #130 元素类型无效 / inputRange 乱序）。这是画面代码里的确定性缺陷：某个场景在中段帧求值时渲染了未定义的组件，或插值区间写反。预检抽帧门已加密，新轮次会在渲染前抓住它；本轮请直接重跑，或让创作 Agent 检查报错时间点对应场景的组件引用与 interpolate/Spring 的 inputRange 顺序。',
+    remedyTarget: null,
+  },
+  {
     category: 'content.qc_failed',
-    test: /(未通过技术质检|未通过质检|主画面变化不足|审片未通过|qc\s*failed|退化为静态)/iu,
+    // 注意顺序：这条必须排在 render_crash 之后，且「2 次定向修复后仍未通过」的
+    // 审片失败也归这里——2026-10 审计里 9 条这样的失败全被归成 code.defect
+    // （「内部缺陷、请反馈开发者」），既没有修法也不进内容类聚类，操作者每次
+    // 都要重读几百字的审片报告。它真实身份是内容质量未达标：可重跑、修法明确。
+    test: /(未通过技术质检|未通过质检|主画面变化不足|审片未通过|qc\s*failed|退化为静态|定向修复后仍未通过独立审片)/iu,
     retryable: false,
-    remedy: '成片未通过质量检查。这是内容本身的问题，可让系统定向修复一次，或调整画面要求后重跑本条。',
+    remedy: '成片未通过质检（技术指标全部合格，画面内容有具体缺陷，含审片两轮定向修复后仍未通过的情形）。审片报告已给出逐条时间点与问题描述，可直接重跑让创作 Agent 定向修复；连续失败时先核对审片指出的时间点画面，再调整该场景的视觉要求。',
     remedyTarget: null,
   },
   {
@@ -133,6 +168,24 @@ export function failureSignature(message) {
 }
 
 /**
+ * 显式错误码 → 类别。媒体主机的 SpokenVideoMediaError 自带稳定 code，但
+ * classifyFailure 原先只对 message 做正则：SPOKEN_VIDEO_MEDIA_SERVICE_TIMEOUT
+ * 的中文文案（「任务在 X 分钟内未完成」）不含 SCHEDULE_TIMEOUT 字样，落进
+ * code.defect 被判「内部缺陷、不重试」——一次云服务慢就把整个阶段判死。
+ * code 比消息文本稳定，优先匹配；命中不到的仍走消息规则。
+ */
+const CODE_CATEGORIES = Object.freeze({
+  SPOKEN_VIDEO_MEDIA_CREDENTIAL_REQUIRED: 'credential.missing',
+  SPOKEN_VIDEO_MEDIA_NOT_CONFIGURED: 'credential.missing',
+  SPOKEN_VIDEO_MEDIA_CREDENTIAL_REJECTED: 'credential.invalid',
+  SPOKEN_VIDEO_MEDIA_INSUFFICIENT_POINTS: 'credential.quota',
+  SPOKEN_VIDEO_MEDIA_SERVICE_TIMEOUT: 'timeout.ceiling',
+  SPOKEN_VIDEO_MEDIA_SERVICE_UNREACHABLE: 'engine.down',
+})
+
+const RULE_BY_CATEGORY = new Map(RULES.map((rule) => [rule.category, rule]))
+
+/**
  * @param {object} input
  * @param {unknown} input.error       the thrown value
  * @param {string} [input.step]       the automation stage it happened in
@@ -144,6 +197,20 @@ export function failureSignature(message) {
 export function classifyFailure({ error, step = null, code = null } = {}) {
   const message = String(error?.message || error || '').trim()
   const explicitCode = code || (typeof error?.code === 'string' ? error.code : null)
+  const coded = explicitCode ? RULE_BY_CATEGORY.get(CODE_CATEGORIES[explicitCode]) : null
+  if (coded) {
+    return {
+      category: coded.category,
+      retryable: coded.retryable === true,
+      autoRepair: coded.autoRepair || null,
+      remedy: coded.remedy,
+      remedyTarget: coded.remedyTarget || null,
+      signature: failureSignature(message),
+      message,
+      code: explicitCode,
+      step,
+    }
+  }
   for (const rule of RULES) {
     if (!rule.test.test(message)) continue
     return {
@@ -185,7 +252,9 @@ export const CATEGORY_LABEL = Object.freeze({
   'record.missing': '记录丢失',
   'timeout.no_progress': '阶段停滞',
   'timeout.ceiling': '超过时间上限',
+  'content.protected_file': '受保护文件被改',
   'content.qc_failed': '成片质检未过',
+  'content.render_crash': '渲染中段崩溃',
   'content.invalid': '内容格式无效',
   'publish.blocked': '发布目标不可用',
   'preflight.blocked': '开工前体检未过',

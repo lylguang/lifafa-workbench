@@ -60,7 +60,7 @@ export class WhiteboardHost {
     for (const candidate of candidates) {
       try {
         const result = await new Promise((resolve, reject) => {
-          const child = spawn(candidate.python, ['-c', probe], { windowsHide: true })
+          const child = spawn(candidate.python, ['-c', probe], { windowsHide: true, env: this.#pythonEnv() })
           let out = ''
           child.stdout.on('data', (chunk) => { out += chunk.toString('utf8') })
           child.on('error', reject)
@@ -104,12 +104,23 @@ export class WhiteboardHost {
   }
 
   /**
+   * Python 子进程统一以 UTF-8 跑，不依赖用户机器的 locale。
+   * 本机中文 Windows 的 Python 3.13 默认 stdout.encoding = gbk，而引擎脚本
+   * json.dumps(..., ensure_ascii=False) 直接把中文打上 stdout、宿主按 utf8 解码，
+   * GBK 字节被当 UTF-8 解成乱码——JSON 结构仍合法，所以不报错、静默出错。
+   * PYTHONIOENCODING 管 stdio 编码，PYTHONUTF8=1 再把文件系统/argv 侧一起切到 UTF-8。
+   */
+  #pythonEnv(extra = null) {
+    return { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', ...extra }
+  }
+
+  /**
    * 运行一个 Python 脚本并收集输出。
    * 引擎约定：末行输出 `OUTPUT=<路径>` 表示产物位置，`ENV_PY=<路径>` 表示解释器位置。
    */
   async #runPython(python, script, args, { signal, onLog, cwd } = {}) {
     return new Promise((resolve, reject) => {
-      const child = spawn(python, [script, ...args], { cwd: cwd || this.#engineRoot, windowsHide: true })
+      const child = spawn(python, [script, ...args], { cwd: cwd || this.#engineRoot, windowsHide: true, env: this.#pythonEnv() })
       let stdout = ''
       let stderr = ''
       const lines = []

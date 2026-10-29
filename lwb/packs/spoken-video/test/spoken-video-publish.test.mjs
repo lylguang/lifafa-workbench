@@ -151,12 +151,11 @@ async function waitForTask(host, currentAgent, taskId) {
 /* ------------------------------ pure helpers ------------------------------ */
 
 test('publish image config validates endpoints and keeps provider credential refs distinct', () => {
-  assert.equal(publishImageCredentialRef('BAILIAN'), 'DASHSCOPE_API_KEY')
   assert.equal(publishImageCredentialRef('scitiger'), 'LWB_SPOKEN_VIDEO_CLOUD_IMAGE_API_KEY')
+  assert.equal(publishImageCredentialRef('custom'), 'LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_API_KEY')
   assert.throws(() => publishImageCredentialRef('openai'), SpokenVideoPublishError)
 
   const defaults = publishImageConfig({})
-  assert.equal(defaults.bailianBaseUrl, 'https://dashscope.aliyuncs.com')
   assert.equal(defaults.scitigerBaseUrl, 'https://link.scitiger.cn')
   assert.equal(defaults.model, 'wan2.7-image')
 
@@ -166,9 +165,9 @@ test('publish image config validates endpoints and keeps provider credential ref
 
   // `new URL()` only throws on a malformed value; a parsable non-HTTP scheme
   // is rejected by the protocol whitelist instead.
-  assert.throws(() => publishImageConfig({ LWB_SPOKEN_VIDEO_BAILIAN_IMAGE_BASE_URL: '不是地址' }), /HTTP\(S\) URL/u)
-  assert.throws(() => publishImageConfig({ LWB_SPOKEN_VIDEO_BAILIAN_IMAGE_BASE_URL: 'ftp://example.com' }), /百炼生图地址无效/u)
-  assert.throws(() => publishImageConfig({ LWB_SPOKEN_VIDEO_BAILIAN_IMAGE_BASE_URL: 'https://user:pass@example.com' }), /百炼生图地址无效/u)
+  assert.throws(() => publishImageConfig({ LWB_SPOKEN_VIDEO_CLOUD_IMAGE_BASE_URL: '不是地址' }), /HTTP\(S\) URL/u)
+  assert.throws(() => publishImageConfig({ LWB_SPOKEN_VIDEO_CLOUD_IMAGE_BASE_URL: 'ftp://example.com' }), /云端生图地址无效/u)
+  assert.throws(() => publishImageConfig({ LWB_SPOKEN_VIDEO_CLOUD_IMAGE_BASE_URL: 'https://user:pass@example.com' }), /云端生图地址无效/u)
 })
 
 test('publish prompt binds the frozen account, script, video spec and QC verdict', () => {
@@ -357,34 +356,33 @@ test('configured credentials generate covers even when the legacy enabled switch
     const parsed = new URL(String(url))
     requested.push(`${init.method || 'GET'} ${parsed.pathname}`)
     if (init.method === 'POST') {
-      assert.equal(parsed.origin, 'https://dashscope.aliyuncs.com')
-      assert.equal(parsed.pathname, '/api/v1/services/aigc/image-generation/generation')
-      assert.equal(init.headers['X-DashScope-Async'], 'enable')
+      assert.equal(parsed.origin, 'https://link.scitiger.cn')
+      assert.equal(parsed.pathname, '/api/v1/services/aigc/multimodal-generation/generation')
+      assert.equal(init.headers['X-DashScope-Async'], undefined)
+      assert.equal(init.headers.Authorization, 'Bearer sk-cloud-test')
       const body = JSON.parse(init.body)
       // The portrait request is rejected upstream; landscape succeeds.
       if (body.parameters.size === '1080*1440') return jsonResponse({ message: 'quota exhausted' }, 429)
-      return jsonResponse({ output: { task_id: 'cover-1', task_status: 'PENDING' } })
-    }
-    if (parsed.pathname.startsWith('/api/v1/tasks/')) {
-      return jsonResponse({ output: { task_status: 'SUCCEEDED', results: [{ url: 'https://cdn.test/cover.png' }] } })
+      return jsonResponse({ output: { choices: [{ message: { content: [{ image: 'https://cdn.test/cover.png' }] } }] } })
     }
     return imageResponse(png(1280, 720))
   }
   const host = publishHost({
     store,
     executor: async () => packagingResult(),
-    credentials: credentialStore({ DASHSCOPE_API_KEY: 'sk-test' }),
-    settings: connectionSettings({ enabled: false, provider: 'bailian', model: 'wan2.7-image' }),
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_CLOUD_IMAGE_API_KEY: 'sk-cloud-test' }),
+    settings: connectionSettings({ enabled: false, provider: 'scitiger', model: 'wan2.7-image' }),
     fetch: fetchMock,
   })
 
   const started = await host.startPackaging(currentAgent, { projectId: project.id, expectedRevision: project.revision })
-  assert.deepEqual(started.imageProvider, { provider: 'bailian', model: 'wan2.7-image' })
+  assert.deepEqual(started.imageProvider, { provider: 'scitiger', model: 'wan2.7-image' })
   const finished = await waitForTask(host, currentAgent, started.id)
   assert.equal(finished.status, 'succeeded')
   assert.equal(finished.coverErrors.landscape, null)
   assert.match(finished.coverErrors.portrait, /quota exhausted/u)
-  assert.equal(requested.some((entry) => entry.startsWith('GET /api/v1/tasks/')), true)
+  // SciTiger 走同步多模态生成，不存在异步轮询任务。
+  assert.equal(requested.some((entry) => entry.startsWith('GET /api/v1/tasks/')), false)
 
   const detail = await store.get(currentAgent, { projectId: project.id })
   const landscape = detail.artifacts.packaging.data.covers.landscape
@@ -393,7 +391,7 @@ test('configured credentials generate covers even when the legacy enabled switch
   assert.deepEqual([landscape.width, landscape.height], [1280, 720])
   assert.equal(landscape.source, 'generated')
   assert.equal(detail.artifacts.packaging.data.covers.portrait, null)
-  assert.equal(detail.artifacts.packaging.data.imageProvider.provider, 'bailian')
+  assert.equal(detail.artifacts.packaging.data.imageProvider.provider, 'scitiger')
 
   // The frozen cover is readable back through the guarded asset endpoint.
   const asset = await host.readAsset(currentAgent, { projectId: project.id, kind: 'landscape' })
@@ -422,7 +420,7 @@ test('SciTiger covers use synchronous multimodal generation without the DashScop
         sizes.push(size)
         return jsonResponse({ output: { choices: [{ message: { content: [{ image: `https://cdn.test/${size}.png` }] } }] } })
       }
-      assert.match(String(url), /^https:\/\/cdn\.test\/(1280\*720|1080\*1440)\.png$/u)
+      assert.match(String(url), /^https:\/\/cdn\.test\/(1280\*960|1080\*1440)\.png$/u)
       const [width, height] = new URL(String(url)).pathname.slice(1, -4).split('*').map(Number)
       return imageResponse(png(width, height))
     },
@@ -431,7 +429,7 @@ test('SciTiger covers use synchronous multimodal generation without the DashScop
   const finished = await waitForTask(host, currentAgent, started.id)
   assert.equal(finished.status, 'succeeded')
   assert.deepEqual(finished.coverErrors, { landscape: null, portrait: null })
-  assert.deepEqual(sizes.sort(), ['1080*1440', '1280*720'])
+  assert.deepEqual(sizes.sort(), ['1080*1440', '1280*960'])
   const detail = await store.get(currentAgent, { projectId: project.id })
   assert.equal(detail.artifacts.packaging.data.covers.landscape.width, 1280)
   assert.equal(detail.artifacts.packaging.data.covers.portrait.height, 1440)
@@ -468,8 +466,8 @@ test('cover generation stops at a terminal task state and reports an unreachable
   const host = publishHost({
     store,
     executor: async () => packagingResult(),
-    credentials: credentialStore({ DASHSCOPE_API_KEY: 'sk-test' }),
-    settings: connectionSettings({ enabled: true, provider: 'bailian' }),
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_CLOUD_IMAGE_API_KEY: 'sk-cloud-test' }),
+    settings: connectionSettings({ enabled: true, provider: 'scitiger' }),
     fetch: async () => jsonResponse({ output: { task_id: 'cover-x', task_status: 'FAILED' } }),
   })
   const started = await host.startPackaging(currentAgent, { projectId: project.id, expectedRevision: project.revision })
@@ -480,8 +478,8 @@ test('cover generation stops at a terminal task state and reports an unreachable
   const unreachable = publishHost({
     store,
     executor: async () => packagingResult(),
-    credentials: credentialStore({ DASHSCOPE_API_KEY: 'sk-test' }),
-    settings: connectionSettings({ enabled: true, provider: 'bailian' }),
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_CLOUD_IMAGE_API_KEY: 'sk-cloud-test' }),
+    settings: connectionSettings({ enabled: true, provider: 'scitiger' }),
   })
   const detail = await store.get(currentAgent, { projectId: project.id })
   const retried = await unreachable.startPackaging(currentAgent, { projectId: project.id, expectedRevision: detail.revision })
@@ -562,14 +560,14 @@ test('regenerateCover reuses a hand-edited prompt for one direction and keeps th
   const fetchMock = async (url, init = {}) => {
     const parsed = new URL(String(url))
     if (init.method === 'POST') {
-      assert.equal(parsed.pathname, '/api/v1/services/aigc/image-generation/generation')
-      assert.equal(init.headers['X-DashScope-Async'], 'enable')
+      assert.equal(parsed.pathname, '/api/v1/services/aigc/multimodal-generation/generation')
+      assert.equal(init.headers['X-DashScope-Async'], undefined)
       sizes.push(JSON.parse(init.body).parameters.size)
       return jsonResponse({ output: { task_id: 'cover-regenerate', task_status: 'PENDING' } })
     }
     if (parsed.pathname === '/api/v1/tasks/cover-regenerate') {
       assert.equal(init.method, 'GET')
-      assert.equal(init.headers.Authorization, 'Bearer sk-test')
+      assert.equal(init.headers.Authorization, 'Bearer sk-cloud-test')
       return jsonResponse({ output: { results: [{ url: 'https://cdn.test/cover.png' }] } })
     }
     return imageResponse(png(1280, 720))
@@ -577,8 +575,8 @@ test('regenerateCover reuses a hand-edited prompt for one direction and keeps th
   const host = publishHost({
     store,
     executor: async () => packagingResult(),
-    credentials: credentialStore({ DASHSCOPE_API_KEY: 'sk-test' }),
-    settings: connectionSettings({ enabled: true, provider: 'bailian', model: 'wan2.7-image' }),
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_CLOUD_IMAGE_API_KEY: 'sk-cloud-test' }),
+    settings: connectionSettings({ enabled: true, provider: 'scitiger', model: 'wan2.7-image' }),
     fetch: fetchMock,
   })
 
@@ -618,7 +616,7 @@ test('regenerateCover reuses a hand-edited prompt for one direction and keeps th
   assert.equal(coverTask.coverKind, 'landscape')
   const finished = await waitForTask(host, currentAgent, coverTask.id)
   assert.equal(finished.status, 'succeeded')
-  assert.deepEqual(sizes, ['1280*720'], 'only the requested direction is generated')
+  assert.deepEqual(sizes, ['1280*960'], 'only the requested direction is generated')
 
   const fresh = await store.get(currentAgent, { projectId: project.id })
   const packaging = fresh.artifacts.packaging.data
@@ -650,8 +648,8 @@ test('regenerateCover failure lands in coverErrors and leaves the artifact untou
   const host = publishHost({
     store,
     executor: async () => packagingResult(),
-    credentials: credentialStore({ DASHSCOPE_API_KEY: 'sk-test' }),
-    settings: connectionSettings({ enabled: true, provider: 'bailian' }),
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_CLOUD_IMAGE_API_KEY: 'sk-cloud-test' }),
+    settings: connectionSettings({ enabled: true, provider: 'scitiger' }),
     fetch: async () => jsonResponse({ output: { task_id: 'cover-x', task_status: 'FAILED' } }),
   })
   const started = await host.startPackaging(currentAgent, { projectId: project.id, expectedRevision: project.revision })
@@ -783,8 +781,8 @@ test('the selected provider credential is the only cover-generation availability
   const initial = await host.status()
   assert.equal(initial.enabled, false)
   assert.equal(initial.configured, false)
-  assert.equal(initial.provider, 'bailian')
-  assert.equal(initial.providers.bailian.credential.configured, false)
+  assert.equal(initial.provider, 'scitiger')
+  assert.equal(initial.providers.scitiger.credential.configured, false)
   assert.equal(initial.imageMaxBytes, 20 * 1024 * 1024)
 
   const configured = await host.configureConnection({ provider: 'scitiger', model: 'wan2.7-image', apiKey: 'sk-secret-cloud' })
@@ -805,8 +803,8 @@ test('the selected provider credential is the only cover-generation availability
   const bare = new SpokenVideoPublishHost({ projectsStore: store })
   const bareStatus = await bare.status()
   assert.equal(bareStatus.enabled, false)
-  assert.equal(bareStatus.providers.bailian.credential.configured, false)
-  await assert.rejects(bare.configureConnection({ provider: 'bailian' }), /不支持保存生图设置/u)
+  assert.equal(bareStatus.providers.scitiger.credential.configured, false)
+  await assert.rejects(bare.configureConnection({ provider: 'scitiger' }), /不支持保存生图设置/u)
 })
 
 test('publish thumbnails are small real frames and failed extraction can recover', async (t) => {
@@ -845,7 +843,7 @@ test('autoStartPackaging fills in the publish copy and leaves the cover renderer
   const host = publishHost({
     store,
     executor: async () => { executed.push('agent'); return packagingResult({ title: '自动生成的标题' }) },
-    settings: { get: () => ({ enabled: true, provider: 'bailian', model: 'wanx' }) },
+    settings: { get: () => ({ enabled: true, provider: 'scitiger', model: 'wanx' }) },
     // 封面渲染器一旦被调用就让测试失败——这正是要守住的行为。
     fetch: async () => { executed.push('cover'); throw new Error('封面渲染器不应被调用') },
   })
@@ -930,15 +928,17 @@ test('regenerateCover reuses the saved title when the task itself carries none',
     "the cover overlay must read the title from the project saved packaging")
   assert.ok(source.includes('if (!title) title = task.result?.content?.title'),
     "and keep the in-task title as a later fallback")})
-test('the portrait cover is generated at 3:4 so nothing important falls outside the feed crop', async () => {
-  // 抖音、小红书的信息流封面都按 3:4 展示。9:16 生成的图上下会被裁掉约 25%，
-  // 主体很容易被切到——按展示形态生成，主体天然落在必留区里。
+test('cover sizes follow the douyin slots so the crop cannot eat the headline', async () => {
+  // 抖音封面槽位：横 4:3、竖 3:4（上传侧 coverRatioWarning 的 8% 相对容差就按这个算）。
+  // 横版按 16:9 生成，塞进 4:3 槽位左右各被切约 16%，字和主体都在被切的那一圈里，
+  // 平台还会判「封面不任」；竖版按 9:16 生成则上下被切约 25%。按槽位比例生成，
+  // 主体天然落在必留区里，上传侧也不会再弹比例告警。
   const source = await readFile(new URL('../spoken-video-publish-host.mjs', import.meta.url), 'utf8')
   // 尺寸改由一个 size 变量决定（自定义渠道要复用它），但取值必须没变。
-  assert.match(source, /const size = kind === 'landscape' \? '1280\*720' : '1080\*1440'/u)
+  assert.match(source, /const size = kind === 'landscape' \? '1280\*960' : '1080\*1440'/u)
   const prompt = buildPublishPrompt({ project: { title: '测试', artifacts: {} } })
-  // 2026-10-10 起提示词简化成固定句式，不再指导构图——3:4 这件事由 size 参数
-  // 落实（1080*1440），不需要在提示词里再说一遍。这里守住句式本身。
+  // 2026-10-10 起提示词简化成固定句式，不再指导构图——比例这件事由 size 参数
+  // 落实（横 1280*960、竖 1080*1440），不需要在提示词里再说一遍。这里守住句式本身。
   assert.match(prompt, /根据提供的主题做一张视频封面，主题：<短标题>/u)
   assert.doesNotMatch(prompt, /竖屏 3:4 比横版更高更窄/u, '构图规则已从提示词移除')
 })
@@ -1064,7 +1064,7 @@ test('custom image defaults can be pre-seeded from the environment', () => {
 
 test('the OpenAI-compatible body uses the size spelling that API actually accepts', () => {
   const body = customOpenAiImageRequest({ model: 'gpt-image-1', prompt: '一张封面', size: '1080*1440', negativePrompt: '不要字' })
-  // 百炼用 1280*720，OpenAI 只收 1280x720 —— 这个差异不换会让每次调用都报参数错。
+  // 百炼用 1280*960，OpenAI 只收 1280x960 —— 这个差异不换会让每次调用都报参数错。
   assert.equal(body.size, '1080x1440')
   assert.equal(body.model, 'gpt-image-1')
   assert.equal(body.prompt, '一张封面')
@@ -1131,8 +1131,8 @@ test('a custom image service that returns inline base64 still produces a cover',
   assert.equal(done.imageProvider.custom.protocol, 'openai')
   assert.ok(requested.length >= 1, '至少请求了一张封面')
   assert.ok(requested.every((row) => row.auth === 'Bearer sk-custom'), '每次请求都带 Bearer 密钥')
-  // OpenAI 只认 WIDTHxHEIGHT；把百炼的 1280*720 原样发过去会每次都报参数错。
-  assert.ok(requested.some((row) => row.size === '1280x720'), '横版尺寸按 OpenAI 写法')
+  // OpenAI 只认 WIDTHxHEIGHT；把百炼的 1280*960 原样发过去会每次都报参数错。
+  assert.ok(requested.some((row) => row.size === '1280x960'), '横版尺寸按 OpenAI 写法')
   assert.ok(requested.some((row) => row.size === '1080x1440'), '竖版尺寸按 OpenAI 写法')
   // 关键断言：内联 base64 不能再被当成无效地址拒掉。封面最终是否被标题区质检
   // 留下是另一回事（那张测试图是纯色方图，本就该被判掉），与协议无关。

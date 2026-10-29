@@ -6,6 +6,7 @@ import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, unlink, wr
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { spokenVideoDataPath } from './spoken-video-paths.mjs'
+import { foldLegacyProvider } from './spoken-video-media.mjs'
 import {
   buildPublishPrompt,
   extractPublishImageUrl,
@@ -29,7 +30,6 @@ import {
 
 /** 渠道的人话名，错误提示与界面共用一份，避免两处各写一遍。 */
 const PROVIDER_LABEL = Object.freeze({
-  bailian: '百炼 BYOK',
   scitiger: 'SciTiger 云端',
   custom: '自定义云端生图',
 })
@@ -205,9 +205,10 @@ export class SpokenVideoPublishHost {
 
   async status() {
     const settings = this.connectionSettings?.get?.() || {}
-    const provider = PUBLISH_IMAGE_PROVIDERS.includes(settings.provider) ? settings.provider : 'bailian'
+    // 旧连接设置里可能还存着 provider: 'bailian'（百炼直连已随「百炼不留」下线），
+    // 不在现行渠道表里就折到 scitiger，老用户的封面生图不卡死。
+    const provider = PUBLISH_IMAGE_PROVIDERS.includes(settings.provider) ? settings.provider : 'scitiger'
     const providers = {
-      bailian: { label: PROVIDER_LABEL.bailian, credential: await this.#credentialStatus('bailian') },
       scitiger: { label: PROVIDER_LABEL.scitiger, credential: await this.#credentialStatus('scitiger') },
       // 自定义渠道的「可用」不看密钥：自建服务可能完全不校验，密钥留空也能用。
       custom: { label: PROVIDER_LABEL.custom, credential: await this.#credentialStatus('custom'), custom: true },
@@ -245,7 +246,7 @@ export class SpokenVideoPublishHost {
 
   async configureConnection(request) {
     const input = object(request, '生图配置')
-    const provider = text(input.provider || 'bailian', '生图渠道', 40).toLowerCase()
+    const provider = text(input.provider || 'scitiger', '生图渠道', 40).toLowerCase()
     if (!PUBLISH_IMAGE_PROVIDERS.includes(provider)) fail('SPOKEN_VIDEO_PUBLISH_INVALID_INPUT', '生图渠道无效。')
     const ref = publishImageCredentialRef(provider)
     const apiKey = typeof input.apiKey === 'string' && input.apiKey.trim() ? text(input.apiKey, 'API Key', 512) : null
@@ -504,13 +505,18 @@ export class SpokenVideoPublishHost {
    * buildCustomCoverRequest 这一个函数里。
    */
   async #generateCover(agent, task, kind, prompt, negativePrompt) {
-    const provider = task.imageProvider.provider
+    // 存量封面任务里 imageProvider.provider 可能还是 'bailian'：先折到现行渠道
+    // scitiger，让「重新生成」能真正打到活着的服务，而不是撞已下线的百炼地址。
+    const provider = foldLegacyProvider(task.imageProvider.provider)
     const resolved = await this.#credentials().resolve(publishImageCredentialRef(provider))
     const label = PROVIDER_LABEL[provider] || '封面生成服务'
     if (!resolved?.value && provider !== 'custom') fail('SPOKEN_VIDEO_PUBLISH_CREDENTIAL_REQUIRED', `${label}尚未保存 API Key。`)
-    // 竖版用 3:4 而不是 9:16：抖音、小红书的信息流封面都按 3:4 展示，9:16 生成的
-    // 上下会被裁掉约 25%，主体很容易被切到。按展示形态生成，主体天然落在必留区里。
-    const size = kind === 'landscape' ? '1280*720' : '1080*1440'
+    // 封面尺寸按抖音槽位定：横 4:3（1280×960）、竖 3:4（1080×1440）。
+    // 横版不用 16:9：抖音横封面槽位是 4:3，16:9 的图塞进去左右各被切约 16%，
+    // 文字和主体都在被切的那一圈里，平台还会判「封面不任」；竖版不用 9:16 同理
+    // （上下被切约 25%）。按展示形态生成，主体天然落在必留区里。
+    // 两个尺寸都落在 wan2.7-image 允许的 [768*768, 2048*2048] 总像素区间内。
+    const size = kind === 'landscape' ? '1280*960' : '1080*1440'
     let result
     let pollUrl = null
     if (provider === 'custom') {
@@ -573,11 +579,10 @@ export class SpokenVideoPublishHost {
       if (url) result = { ...result, output: { ...(result?.output || {}), choices: [{ message: { content: [{ url }] } }] } }
     } else {
       const config = publishImageConfig(this.environment)
-      const baseUrl = provider === 'bailian' ? config.bailianBaseUrl : config.scitigerBaseUrl
-      // DashScope's async image API uses a different route from synchronous multimodal generation.
-      const generationPath = provider === 'bailian' ? 'image-generation/generation' : 'multimodal-generation/generation'
+      const baseUrl = config.scitigerBaseUrl
+      const generationPath = 'multimodal-generation/generation'
       const body = publishImageRequest({ model: task.imageProvider.model, prompt, negativePrompt, size })
-      result = await this.#json(`${baseUrl}/api/v1/services/aigc/${generationPath}`, { method: 'POST', headers: { Authorization: `Bearer ${resolved.value}`, 'Content-Type': 'application/json', ...(provider === 'bailian' ? { 'X-DashScope-Async': 'enable' } : {}) }, body: JSON.stringify(body) }, label)
+      result = await this.#json(`${baseUrl}/api/v1/services/aigc/${generationPath}`, { method: 'POST', headers: { Authorization: `Bearer ${resolved.value}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, label)
       const taskId = imageTaskId(result)
       if (taskId) pollUrl = `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}`
     }
@@ -593,7 +598,7 @@ export class SpokenVideoPublishHost {
         result = await this.#json(pollUrl, { method: 'GET', headers: authHeaders }, '封面生成任务')
         const state = imageTaskState(result)
         if (['FAILED', 'CANCELED', 'CANCELLED', 'UNKNOWN'].includes(state)) fail('SPOKEN_VIDEO_PUBLISH_SERVICE_FAILED', '封面生成任务失败。')
-        // 自定义的通用异步协议未必用百炼那套 choices 结构，取图地址要再解一次。
+        // 自定义的通用异步协议未必用同款 choices 结构，取图地址要再解一次。
         const customUrl = provider === 'custom' ? customOpenAiImageUrl(result) : null
         if (customUrl) {
           result = { ...result, output: { ...(result?.output || {}), choices: [{ message: { content: [{ url: customUrl }] } }] } }
@@ -649,7 +654,7 @@ export class SpokenVideoPublishHost {
    *
    * 2026-10-08 实测推翻了旧方案：本机 Qwen-Image 直接写中文标题零乱码，横竖两版
    * 都一次成功，所以**不再用程序叠字**（叠上去会盖住 AI 写的艺术字标题）。这里只做
-   * 检查：标题区必须有明显的内容（对比度足够高）且不是纯色空��——那说明模型没把标题
+   * 检查：标题区必须有明显的内容（对比度足够高）且不是纯色空白——那说明模型没把标题
    * 画进去，或者画得太小看不清。检出不合格就记一条事件，让调用方换 seed 重生。
    */
   async #overlayCoverTitle(agent, task, kind, bytes, inspected) {

@@ -2,7 +2,7 @@
   "$comment": "本地媒体桥接配置模板。复制为 config.json 后填入自己的值；config.json 含密钥，已被 .gitignore 排除，不要提交。",
 
   "ttsProvider": "cloud",
-  "$ttsProvider": "cloud = 小米 MiMo / 百炼云端合成；local = 本机 LongCat 合成（本地推理才需要，吃内存）",
+  "$ttsProvider": "cloud = 小米 MiMo 云端合成；local = 本机 LongCat 合成（本地推理才需要，吃内存）",
 
   "tts": {
     "$comment": "仅 ttsProvider=local 时生效。本地合成实测需要约 23 GB 空闲内存，16G 显卡上不能与封面生图同时驻留。",
@@ -18,8 +18,14 @@
   "mimo": {
     "$comment": "小米 MiMo 云端 TTS。apiKey 在平台申请后填入；传了参考音频会自动走声音复刻并忽略 voice。",
     "apiKey": "",
-    "voice": "茉莉",
-    "style": "清晰沉稳，适合知识讲解。"
+    "$model": "官方三个模型：mimo-v2.5-tts 预置音色 / mimo-v2.5-tts-voicedesign 音色设计 / mimo-v2.5-tts-voiceclone 声音复刻。",
+    "model": "mimo-v2.5-tts",
+    "$voice": "预置音色名，仅 mimo-v2.5-tts 用：mimo_default / 冰糖 / 茉莉 / 苏打 / 白桦 等。",
+    "voice": "mimo_default",
+    "$style": "语气/节奏指令，仅 mimo-v2.5-tts 用（音色设计下 user 消息位被描述占用）。",
+    "style": "清晰沉稳，适合知识讲解。",
+    "$voiceDesign": "音色设计描述，仅 mimo-v2.5-tts-voicedesign 用：1~4 句，写清性别年龄、音色质感、情绪语气、语速节奏。",
+    "voiceDesign": ""
   },
 
   "asr": {

@@ -24,6 +24,12 @@ import re
 import sys
 from pathlib import Path
 
+# 宿主侧已通过 PYTHONIOENCODING/PYTHONUTF8 强制 UTF-8；这里再兜底一次，
+# 保证宿主没传环境变量（第三方调用）时中文也不落进本机 locale（如 GBK）。
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+
 _TIME = re.compile(r"(\d+):(\d{2}):(\d{2})[,.](\d{1,3})")
 
 

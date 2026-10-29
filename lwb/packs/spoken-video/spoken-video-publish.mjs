@@ -1,6 +1,5 @@
-export const PUBLISH_IMAGE_PROVIDERS = Object.freeze(['bailian', 'scitiger', 'custom'])
+export const PUBLISH_IMAGE_PROVIDERS = Object.freeze(['scitiger', 'custom'])
 export const PUBLISH_IMAGE_CREDENTIALS = Object.freeze({
-  bailian: 'DASHSCOPE_API_KEY',
   scitiger: 'LWB_SPOKEN_VIDEO_CLOUD_IMAGE_API_KEY',
   // 自定义云端生图的密钥。与内置渠道一样只存 DSH 私有凭据库，不写进发布资料。
   custom: 'LWB_SPOKEN_VIDEO_CUSTOM_IMAGE_API_KEY',
@@ -10,8 +9,8 @@ export const PUBLISH_IMAGE_CREDENTIALS = Object.freeze({
  *
  * `openai`：OpenAI 兼容的 /images/generations。自建中转、各家聚合服务都基本照抄了
  *   这套，所以它是默认值——填一个地址就能用的场景远多于需要异步轮询的场景。
- * `async-generic`：提交返回任务 id、再轮询取图的异步协议（百炼与 SciTiger 用的就是
- *   它）。字段名按 SciTiger 那套的常见形态去取，兼容面较广。
+ * `async-generic`：提交返回任务 id、再轮询取图的异步协议（云端生图服务如 SciTiger 用的
+ *   就是它）。字段名按 SciTiger 那套的常见形态去取，兼容面较广。
  *
  * 只做这两种是因为它们覆盖了绝大多数自建与中转服务；真要接一个别的协议，
  * 更好的做法是在桥接里加一个适配端点，而不是在这里无限加分支。
@@ -124,8 +123,8 @@ export function customOpenAiImageRequest({ model, prompt, size, negativePrompt }
     model: clipped(model, 120) || PUBLISH_IMAGE_MODEL,
     prompt,
     n: 1,
-    // OpenAI 只接受 `WIDTHxHEIGHT` 这种写法，不是百炼的 `1280*720`。
-    size: String(size || '1280*720').replace('*', 'x'),
+    // OpenAI 只接受 `WIDTHxHEIGHT` 这种写法，不是 `1280*720` 这种星号写法。
+    size: String(size || '1280*960').replace('*', 'x'),
     ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
     response_format: 'url',
   }
@@ -144,7 +143,6 @@ export function customOpenAiImageUrl(value) {
 
 export function publishImageConfig(environment = process.env) {
   return {
-    bailianBaseUrl: endpoint(environment.LWB_SPOKEN_VIDEO_BAILIAN_IMAGE_BASE_URL || 'https://dashscope.aliyuncs.com', '百炼生图地址'),
     scitigerBaseUrl: endpoint(environment.LWB_SPOKEN_VIDEO_CLOUD_IMAGE_BASE_URL || environment.LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL || 'https://link.scitiger.cn', '云端生图地址'),
     model: clipped(environment.LWB_SPOKEN_VIDEO_IMAGE_MODEL || PUBLISH_IMAGE_MODEL, 120) || PUBLISH_IMAGE_MODEL,
   }

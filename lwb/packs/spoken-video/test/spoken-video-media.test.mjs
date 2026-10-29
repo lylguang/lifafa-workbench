@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { WebSocketServer } from 'ws'
-import { buildTechnicalReport, DEFAULT_VIDEO_VISUAL_BRIEF, DEFAULT_VOICE_PROFILE, mediaServiceConfig, normalizeProbe, normalizeRenderRequest, normalizeVoiceoverRequest, subtitleResult } from '../spoken-video-media.mjs'
+import { buildTechnicalReport, DEFAULT_VIDEO_VISUAL_BRIEF, DEFAULT_VOICE_PROFILE, mediaServiceConfig, normalizeProbe, normalizeRenderRequest, normalizeSubtitleRequest, normalizeVoiceoverRequest, subtitleResult } from '../spoken-video-media.mjs'
 import { SpokenVideoProjectStore, SpokenVideoStoreError } from '../spoken-video-store.mjs'
 import { SpokenVideoMediaHost, parseRemotionRenderProgress, parseSceneSpans, reviewTimestamps, REVIEW_FRAME_LIMIT, REVIEW_FRAME_HARD_LIMIT, REVIEW_MAX_GAP_SECONDS } from '../spoken-video-media-host.mjs'
 import { remotionEncodingSettings, remotionRendererAvailable } from '../spoken-video-remotion.mjs'
@@ -29,7 +29,7 @@ function credentialStore(initial = {}) {
   }
 }
 
-function connectionSettings(provider = 'bailian') {
+function connectionSettings(provider = 'scitiger') {
   let value = { provider }
   return {
     get: () => value,
@@ -45,7 +45,7 @@ function mediaBinariesAvailable() {
   } catch { return false }
 }
 
-function withUnboundedBailianWavLengths(audio) {
+function withUnboundedWavLengths(audio) {
   const result = Buffer.from(audio)
   result.writeUInt32LE(0x7fffffc7, 4)
   let offset = 12
@@ -208,14 +208,12 @@ async function passingVideoReviewer({ prompt, onDshStarted, onDshEvent }) {
 }
 
 test('normalizes service configuration and rejects malformed generated subtitles', () => {
-  const config = mediaServiceConfig({ LWB_SPOKEN_VIDEO_TTS_BASE_URL: 'http://127.0.0.1:8020/', LWB_SPOKEN_VIDEO_TTS_USER_ID: 'local-user' })
-  assert.equal(config.baseUrl, 'http://127.0.0.1:8020')
+  const config = mediaServiceConfig({ LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'http://127.0.0.1:8199/', LWB_SPOKEN_VIDEO_TTS_USER_ID: 'local-user' })
+  assert.equal(config.baseUrl, 'http://127.0.0.1:8199')
   assert.equal(config.configured, true)
   assert.equal(mediaServiceConfig({ LWB_SPOKEN_VIDEO_TTS_OUTPUT_FORMAT: 'MP3' }).outputFormat, 'mp3')
-  assert.equal(mediaServiceConfig({ LWB_SPOKEN_VIDEO_BAILIAN_ASR_WS_URL: 'wss://asr.example.com/realtime' }).bailianAsrWebSocketUrl, 'wss://asr.example.com/realtime')
-  assert.throws(() => mediaServiceConfig({ LWB_SPOKEN_VIDEO_TTS_BASE_URL: 'file:///tmp/service' }), /CONFIG_INVALID/u)
-  assert.throws(() => mediaServiceConfig({ LWB_SPOKEN_VIDEO_BAILIAN_ASR_WS_URL: 'file:///tmp/asr' }), /CONFIG_INVALID/u)
-  assert.throws(() => mediaServiceConfig({ LWB_SPOKEN_VIDEO_TTS_OUTPUT_FORMAT: 'flac' }), /只支持 wav/u)
+    assert.throws(() => mediaServiceConfig({ LWB_SPOKEN_VIDEO_TTS_BASE_URL: 'file:///tmp/service' }), /CONFIG_INVALID/u)
+    assert.throws(() => mediaServiceConfig({ LWB_SPOKEN_VIDEO_TTS_OUTPUT_FORMAT: 'flac' }), /只支持 wav/u)
   assert.equal(subtitleResult({ subtitle_srt: '1\n00:00:00,000 --> 00:00:01,000\n你好' }).cueCount, 1)
   const structured = subtitleResult({
     subtitle_srt: '1\n00:00:00,000 --> 00:00:01,000\n旧字幕',
@@ -243,6 +241,17 @@ test('defaults voiceover requests to the packaged Tiffy reference voice', () => 
   assert.equal(uploaded.voiceName, '我的音色.wav')
   assert.equal(uploaded.referenceAudio.file, 'voice-references/reference.wav')
   assert.throws(() => normalizeVoiceoverRequest({ voiceSource: 'preset' }), /必须填写音色标识/u)
+})
+
+test('folds retired provider names onto the bridge channel instead of rejecting them', () => {
+  // 存量内容安排的 voice.provider 是渠道收敛前的 bailian/legacy：直接拒绝会让
+  // 整个 schedules.json 判死（内容安排页报「音色设置无效：生成方式不受支持」）。
+  // 折到 scitiger 而非 bridge：字幕段时序快路径只认 scitiger。
+  assert.equal(normalizeVoiceoverRequest({ provider: 'bailian' }).provider, 'scitiger')
+  assert.equal(normalizeVoiceoverRequest({ provider: 'legacy' }).provider, 'scitiger')
+  assert.equal(normalizeVoiceoverRequest({}).provider, 'bridge')
+  assert.equal(normalizeSubtitleRequest({ provider: 'bailian' }).provider, 'scitiger')
+  assert.throws(() => normalizeVoiceoverRequest({ provider: 'watson' }), /生成方式不受支持/u)
 })
 
 test('normalizes the bridge voiceover overrides and rejects unknown channels', () => {
@@ -282,7 +291,7 @@ test('budgets Remotion encoding below the media limit and caps short-video bitra
   const estimatedBytes = (videoBitrateBps + audioBitrateBps + 64_000) * durationSeconds / 8
 
   assert.equal(encoding.codec, 'h264')
-  assert.equal(encoding.x264Preset, 'medium')
+  assert.equal(encoding.x264Preset, 'fast')
   assert.equal(encoding.audioBitrate, '128k')
   assert.equal(videoBitrateBps >= 1_900_000 && videoBitrateBps <= 2_100_000, true)
   assert.equal(estimatedBytes <= encoding.targetBytes, true)
@@ -297,27 +306,34 @@ test('resolves provider credentials privately and keeps them out of media task r
   const store = new SpokenVideoProjectStore()
   const currentAgent = agent(cwd)
   const project = await projectWithApprovedScript(currentAgent, store)
+  let sentAuthorization = null
   const host = new SpokenVideoMediaHost({
     projectsStore: store,
-    credentials: credentialStore({ DASHSCOPE_API_KEY: 'sk-private-key' }),
-    fetch: async () => { throw new Error('test upstream is unavailable') },
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: 'sk-private-key' }),
+    fetch: async (url, init) => {
+      sentAuthorization = init?.headers?.Authorization
+      throw new Error('test upstream is unavailable')
+    },
   })
   const started = await host.startVoiceover(currentAgent, {
     projectId: project.id,
     expectedRevision: project.revision,
-    provider: 'bailian',
+    provider: 'scitiger',
     rate: 1,
     volume: 1,
   })
   const runsPath = join(cwd, 'data', 'projects', project.id, 'media', 'runs.json')
   assert.equal((await readFile(runsPath, 'utf8')).includes('sk-private-key'), false)
   const finished = await waitForOperation(host, currentAgent, project.id, started.id)
+  // 真正向媒体服务发起过一次带鉴权的请求：密钥随 Authorization 头发出，而不是留在本地文件。
+  assert.equal(typeof sentAuthorization, 'string', '应真正向媒体服务发起一次鉴权请求')
+  assert.match(sentAuthorization, /^Bearer sk-private-key$/u)
   assert.equal(finished.status, 'failed')
   assert.equal(String(finished.error).includes('sk-private-key'), false)
   const [task] = await host.listTasks(currentAgent)
   assert.equal(task.projectId, project.id)
   assert.equal(task.projectTitle, project.title)
-  assert.equal(task.input.provider, 'bailian')
+  assert.equal(task.input.provider, 'scitiger')
   assert.equal(JSON.stringify(task).includes('sk-private-key'), false)
 })
 
@@ -335,7 +351,7 @@ test('audio task account filters apply before pagination and scope status counts
   } } })
   const task = (id, projectId, status, second) => ({
     id, status, createdAt: `2026-09-17T00:00:${String(second).padStart(2, '0')}Z`,
-    source: { projectId, title: id, text: '测试口播稿' }, input: { provider: 'bailian' },
+    source: { projectId, title: id, text: '测试口播稿' }, input: { provider: 'scitiger' },
   })
   const tasks = [
     task('a-old', 'project-a', 'failed', 1),
@@ -385,24 +401,30 @@ test('keeps standalone and saved-script audio task sources immutable, with task-
   const currentAgent = agent(cwd)
   const project = await projectWithApprovedScript(currentAgent, store)
   const secret = 'sk-audio-task-private'
+  let sentAuthorization = null
   const host = new SpokenVideoMediaHost({
     projectsStore: store,
-    credentials: credentialStore({ DASHSCOPE_API_KEY: secret }),
-    fetch: async () => { throw new Error('test upstream is unavailable') },
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: secret }),
+    fetch: async (url, init) => {
+      sentAuthorization = init?.headers?.Authorization
+      throw new Error('test upstream is unavailable')
+    },
   })
-  const manual = await host.startAudioTask(currentAgent, { subtitleEnabled: false, text: '这是用户直接输入的口播稿。', title: '手动稿', provider: 'bailian' })
+  const manual = await host.startAudioTask(currentAgent, { subtitleEnabled: false, text: '这是用户直接输入的口播稿。', title: '手动稿', provider: 'scitiger' })
   assert.equal(manual.source.kind, 'manual-text')
   assert.equal(manual.source.projectId, null)
   assert.equal(manual.source.text, '这是用户直接输入的口播稿。')
   assert.equal((await waitForAudioTask(host, currentAgent, manual.id)).status, 'failed')
 
   const approvedBody = (await store.get(currentAgent, { projectId: project.id })).artifacts.script.data.body
-  const sourced = await host.startAudioTask(currentAgent, { subtitleEnabled: false, text: approvedBody, sourceProjectId: project.id, provider: 'bailian' })
+  const sourced = await host.startAudioTask(currentAgent, { subtitleEnabled: false, text: approvedBody, sourceProjectId: project.id, provider: 'scitiger' })
   assert.equal(sourced.source.kind, 'saved-script')
   assert.equal(sourced.source.projectId, project.id)
   assert.equal(sourced.source.text, approvedBody)
   await waitForAudioTask(host, currentAgent, sourced.id)
   assert.equal(JSON.stringify(await host.listAudioTasks(currentAgent, {})).includes(secret), false)
+  assert.equal(typeof sentAuthorization, 'string', '应真正向媒体服务发起一次鉴权请求')
+  assert.match(sentAuthorization, /^Bearer sk-audio-task-private$/u)
 
   const root = join(cwd, 'data')
   await mkdir(join(root, 'audio-media', 'voiceovers'), { recursive: true })
@@ -411,7 +433,7 @@ test('keeps standalone and saved-script audio task sources immutable, with task-
     schemaVersion: 1,
     tasks: [{
       id: 'finished-task', type: 'voiceover', status: 'succeeded', createdAt: new Date().toISOString(),
-      source: { kind: 'manual-text', title: '独立音频', text: '独立音频对应的文稿。' }, input: { provider: 'bailian' },
+      source: { kind: 'manual-text', title: '独立音频', text: '独立音频对应的文稿。' }, input: { provider: 'scitiger' },
       result: { audio: { file: 'audio-media/voiceovers/finished.wav', mediaType: 'audio/wav', bytes: 5 } }, subtitle: { status: 'idle' },
     }],
   }))
@@ -574,7 +596,7 @@ test('maps SciTiger insufficient points to an actionable user-facing error', asy
   })
   const finished = await waitForAudioTask(host, currentAgent, started.id)
   assert.equal(finished.status, 'failed')
-  assert.equal(finished.error, 'SciTiger 账户积分不足，请充值后重试，或切换到百炼 BYOK。')
+  assert.equal(finished.error, 'SciTiger 账户积分不足，请充值后重试；或在桥接配置中心把配音切到本地合成（不消耗云端积分，配置地址见本机桥接页）。')
   assert.equal(finished.subtitle.status, 'idle')
   assert.ok(!finished.error.includes('SPOKEN_VIDEO_MEDIA'))
 })
@@ -649,7 +671,7 @@ test('reports which endpoint the SciTiger channel resolves to', async () => {
   })
   const localStatus = await loopback.status()
   assert.equal(localStatus.providers.scitiger.loopback, true)
-  assert.equal(localStatus.providers.scitiger.label, '本机桥接')
+  assert.equal(localStatus.providers.scitiger.label, '本机桥接（小米 MiMo）')
   assert.equal(localStatus.providers.scitiger.endpoint, 'http://127.0.0.1:8199')
 
   const remote = new SpokenVideoMediaHost({
@@ -660,9 +682,10 @@ test('reports which endpoint the SciTiger channel resolves to', async () => {
   const remoteStatus = await remote.status()
   assert.equal(remoteStatus.providers.scitiger.loopback, false)
   assert.equal(remoteStatus.providers.scitiger.label, 'SciTiger 云端')
-  // 默认值（未设置环境变量）走远端，正是需要提示用户的那一种。
+  // 默认值（未设置环境变量）走本机桥接：这是本机部署的默认通道。
   const fallback = new SpokenVideoMediaHost({ projectsStore: new SpokenVideoProjectStore(), credentials: credentialStore(), environment: {} })
-  assert.equal((await fallback.status()).providers.scitiger.loopback, false)
+  assert.equal((await fallback.status()).providers.scitiger.loopback, true)
+  assert.equal((await fallback.status()).providers.scitiger.endpoint, 'http://127.0.0.1:8199')
 })
 
 test('carries the bridge channel and style through an audio task and its retry', async (t) => {
@@ -708,6 +731,53 @@ test('carries the bridge channel and style through an audio task and its retry',
   // 冻结在任务里，失败重试才能原样重放。
   const stored = await host.audioTask(currentAgent, { taskId: started.id })
   assert.deepEqual(stored.input.bridge, { channel: 'local', style: '温柔舒缓，适合情感共鸣。' })
+})
+
+test('carries the MiMo model and voice design through a voiceover request', async (t) => {
+  // 三个模型的参数形态不同：预置音色用音色名，音色设计用描述，声音复刻靠参考音频。
+  // 任务级覆盖必须原样送到桥接，否则用户在界面上选了模型却合成成别的声音。
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await projectWithApprovedScript(currentAgent, store)
+  const outputFile = join(cwd, 'mimo-model.wav')
+  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.4', '-ac', '1', '-ar', '16000', outputFile], { stdio: 'ignore' })
+  const outputAudio = await readFile(outputFile)
+  const observed = { submit: null }
+  const host = new SpokenVideoMediaHost({
+    projectsStore: store,
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: 'sk-mimo-model' }),
+    environment: { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'http://127.0.0.1:8199' },
+    fetch: async (url, init = {}) => {
+      const parsed = new URL(String(url))
+      if (parsed.pathname === '/api/v1/tts/jobs' && init.method === 'POST') {
+        observed.submit = JSON.parse(init.body)
+        return new Response(JSON.stringify({ success: true, data: { job_id: 'tts_mimo_model' } }))
+      }
+      if (parsed.pathname === '/api/v1/tts/jobs/tts_mimo_model') {
+        return new Response(JSON.stringify({ success: true, data: { status: 'completed', result: { audio_url: 'http://127.0.0.1:8199/audio-files/mimo-model.wav' } } }))
+      }
+      if (parsed.pathname === '/audio-files/mimo-model.wav') return new Response(outputAudio)
+      throw new Error(`unexpected request: ${url}`)
+    },
+  })
+  const started = await host.startAudioTask(currentAgent, {
+    text: '这是一段验证 MiMo 模型覆盖的测试文稿。',
+    sourceProjectId: project.id,
+    provider: 'scitiger',
+    voiceSource: 'preset',
+    voiceId: '茉莉',
+    voiceName: '茉莉',
+    bridge: { channel: 'cloud', model: 'mimo-v2.5-tts-voicedesign', voiceDesign: '一位沉稳的中年男声，语速适中。' },
+    subtitleEnabled: false,
+  })
+  const finished = await waitForAudioTask(host, currentAgent, started.id)
+  assert.equal(finished.status, 'succeeded', finished.error)
+  assert.equal(observed.submit.mimo_model, 'mimo-v2.5-tts-voicedesign')
+  assert.equal(observed.submit.voice_design, '一位沉稳的中年男声，语速适中。')
+  const stored = await host.audioTask(currentAgent, { taskId: started.id })
+  assert.equal(stored.input.bridge.model, 'mimo-v2.5-tts-voicedesign')
+  assert.equal(stored.input.bridge.voiceDesign, '一位沉稳的中年男声，语速适中。')
 })
 
 test('surfaces bridge segment stage/progress as execution events during long synthesis', async (t) => {
@@ -997,317 +1067,6 @@ test('converts completed SciTiger subtitle segments into SRT without downloading
   assert.equal(detail.artifacts.subtitles.data.srt, '1\n00:00:00,000 --> 00:00:00,700\n第一句字幕。\n\n2\n00:00:01,300 --> 00:00:02,300\n第二句字幕。\n')
 })
 
-test('enrols the packaged reference voice through the active Bailian endpoint and reuses it after restart', async (t) => {
-  if (!mediaBinariesAvailable()) { t.skip('ffmpeg or ffprobe is unavailable in this environment'); return }
-  const cwd = await workspace(t)
-  const store = new SpokenVideoProjectStore()
-  const currentAgent = agent(cwd)
-  const outputFile = join(cwd, 'upstream.wav')
-  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.5', '-ac', '1', '-ar', '16000', outputFile], { stdio: 'ignore' })
-  const outputAudio = await readFile(outputFile)
-  const observed = { enrollments: 0, tts: [] }
-  const credentials = credentialStore({ DASHSCOPE_API_KEY: 'sk-bailian-reference' })
-  const settings = connectionSettings()
-  const hostOptions = {
-    projectsStore: store,
-    credentials,
-    connectionSettings: settings,
-    environment: { LWB_SPOKEN_VIDEO_BAILIAN_BASE_URL: 'https://workspace.test/api/v1' },
-    fetch: async (url, init = {}) => {
-      const parsed = new URL(String(url))
-      if (parsed.hostname === 'workspace.test' && parsed.pathname === '/api/v1/services/audio/tts/customization') {
-        observed.enrollments += 1
-        const payload = JSON.parse(init.body)
-        assert.equal(init.headers.Authorization, 'Bearer sk-bailian-reference')
-        assert.equal(payload.model, 'qwen-voice-enrollment')
-        assert.equal(payload.input.target_model, 'qwen3-tts-vc-2026-01-22')
-        assert.match(payload.input.preferred_name, /^lwb_tiffy_[a-f0-9]{6}$/u)
-        assert.equal(payload.input.audio.data.startsWith('data:audio/mpeg;base64,'), true)
-        assert.equal(payload.input.language, 'zh')
-        return new Response(JSON.stringify({ output: { voice: 'tiffy-enrolled-voice' } }))
-      }
-      if (parsed.pathname === '/api/v1/services/aigc/multimodal-generation/generation') {
-        const payload = JSON.parse(init.body)
-        observed.tts.push(payload)
-        assert.equal(init.headers.Authorization, 'Bearer sk-bailian-reference')
-        return new Response(JSON.stringify({ request_id: `tts_${observed.tts.length}`, output: { audio: { url: 'https://media.test/tiffy.wav' } } }))
-      }
-      if (parsed.hostname === 'media.test') return new Response(outputAudio)
-      throw new Error(`unexpected request: ${url}`)
-    },
-  }
-  let host = new SpokenVideoMediaHost(hostOptions)
-  assert.equal((await host.status()).providers.bailian.referenceVoiceConfigured, true)
-  for (let index = 0; index < 3; index += 1) {
-    if (index === 2) host = new SpokenVideoMediaHost(hostOptions)
-    const project = await projectWithApprovedScript(currentAgent, store)
-    const started = await host.startVoiceover(currentAgent, {
-      projectId: project.id,
-      expectedRevision: project.revision,
-      provider: 'bailian',
-    })
-    const finished = await waitForOperation(host, currentAgent, project.id, started.id)
-    assert.equal(finished.status, 'succeeded', finished.error)
-    const detail = await store.get(currentAgent, { projectId: project.id })
-    assert.equal(detail.artifacts.voiceover.data.voiceId, 'tiffy-enrolled-voice')
-  }
-  assert.equal(observed.enrollments, 1)
-  assert.equal(observed.tts.length, 3)
-  assert.equal(observed.tts.every((payload) => payload.model === 'qwen3-tts-vc-2026-01-22' && payload.input.voice === 'tiffy-enrolled-voice'), true)
-  assert.equal(JSON.stringify(settings.get()).includes('sk-bailian-reference'), false)
-  assert.equal(Object.keys(settings.get().bailianReferenceVoices).length, 1)
-})
-
-test('enrols an uploaded reference audio before Bailian synthesis', async (t) => {
-  if (!mediaBinariesAvailable()) { t.skip('ffmpeg or ffprobe is unavailable in this environment'); return }
-  const cwd = await workspace(t)
-  const currentAgent = agent(cwd)
-  const referenceFile = join(cwd, 'bailian-reference.wav')
-  const outputFile = join(cwd, 'bailian-output.wav')
-  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=510:duration=0.4', '-ac', '1', '-ar', '16000', referenceFile], { stdio: 'ignore' })
-  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=610:duration=0.4', '-ac', '1', '-ar', '16000', outputFile], { stdio: 'ignore' })
-  const referenceAudio = await readFile(referenceFile)
-  const outputAudio = await readFile(outputFile)
-  const observed = { enrollment: null, synthesis: null }
-  const host = new SpokenVideoMediaHost({
-    projectsStore: new SpokenVideoProjectStore(),
-    credentials: credentialStore({ DASHSCOPE_API_KEY: 'sk-bailian-uploaded-reference' }),
-    environment: { LWB_SPOKEN_VIDEO_BAILIAN_BASE_URL: 'https://workspace.test/api/v1' },
-    fetch: async (url, init = {}) => {
-      const parsed = new URL(String(url))
-      if (parsed.pathname === '/api/v1/services/audio/tts/customization') {
-        observed.enrollment = JSON.parse(init.body)
-        return new Response(JSON.stringify({ output: { voice: 'uploaded-enrolled-voice' } }))
-      }
-      if (parsed.pathname === '/api/v1/services/aigc/multimodal-generation/generation') {
-        observed.synthesis = JSON.parse(init.body)
-        return new Response(JSON.stringify({ request_id: 'tts_uploaded_bailian', output: { audio: { url: 'https://media.test/uploaded-bailian.wav' } } }))
-      }
-      if (parsed.hostname === 'media.test') return new Response(outputAudio)
-      throw new Error(`unexpected request: ${url}`)
-    },
-  })
-  const uploaded = await host.uploadVoiceReference(currentAgent, {
-    name: '百炼参考.wav', mediaType: 'audio/wav', data: referenceAudio.toString('base64'),
-  })
-  const started = await host.startAudioTask(currentAgent, { subtitleEnabled: false,
-    title: '百炼上传音色测试', text: '这是百炼上传音色测试。', provider: 'bailian', voiceSource: 'upload', referenceAudio: uploaded,
-  })
-  const finished = await waitForAudioTask(host, currentAgent, started.id)
-  assert.equal(finished.status, 'succeeded', finished.error)
-  assert.match(observed.enrollment.input.preferred_name, /^lwb_voice_[a-f0-9]{6}$/u)
-  const encoded = observed.enrollment.input.audio.data.replace(/^data:audio\/wav;base64,/u, '')
-  assert.deepEqual(Buffer.from(encoded, 'base64'), referenceAudio)
-  assert.equal(observed.synthesis.model, 'qwen3-tts-vc-2026-01-22')
-  assert.equal(observed.synthesis.input.voice, 'uploaded-enrolled-voice')
-  assert.equal(finished.result.voiceId, 'uploaded-enrolled-voice')
-})
-
-test('accepts Bailian WAVs with an unbounded RIFF size, retries incomplete segments, normalizes, and merges through ffmpeg', async (t) => {
-  if (!mediaBinariesAvailable()) { t.skip('ffmpeg or ffprobe is unavailable in this environment'); return }
-  const cwd = await workspace(t)
-  const store = new SpokenVideoProjectStore()
-  const currentAgent = agent(cwd)
-  const firstFile = join(cwd, 'first.wav')
-  const secondFile = join(cwd, 'second.wav')
-  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.25', '-ac', '1', '-ar', '16000', firstFile], { stdio: 'ignore' })
-  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=660:duration=0.25', '-ac', '2', '-ar', '22050', secondFile], { stdio: 'ignore' })
-  const firstAudio = await readFile(firstFile)
-  const secondAudio = await readFile(secondFile)
-  const firstBailianAudio = withUnboundedBailianWavLengths(firstAudio)
-  const requests = { tts: 0, firstDownloads: 0, secondDownloads: 0 }
-  const host = new SpokenVideoMediaHost({
-    projectsStore: store,
-    credentials: credentialStore({ DASHSCOPE_API_KEY: 'sk-bailian-segmented' }),
-    environment: { LWB_SPOKEN_VIDEO_BAILIAN_BASE_URL: 'https://workspace.test/api/v1' },
-    fetch: async (url, init = {}) => {
-      const parsed = new URL(String(url))
-      if (parsed.hostname === 'workspace.test' && parsed.pathname === '/api/v1/services/aigc/multimodal-generation/generation') {
-        requests.tts += 1
-        const payload = JSON.parse(init.body)
-        assert.equal(payload.model, 'qwen3-tts-flash')
-        assert.equal(payload.input.voice, 'test-voice')
-        assert.equal(payload.input.text.length <= 400, true)
-        return new Response(JSON.stringify({
-          request_id: `tts_segment_${requests.tts}`,
-          output: { audio: { url: `https://media.test/segment-${requests.tts}.wav` } },
-        }))
-      }
-      if (parsed.hostname === 'media.test' && parsed.pathname === '/segment-1.wav') {
-        requests.firstDownloads += 1
-        const audio = requests.firstDownloads === 1 ? firstBailianAudio.subarray(0, 78) : firstBailianAudio
-        return new Response(audio, { headers: { 'content-length': String(audio.length), 'content-type': 'audio/wav' } })
-      }
-      if (parsed.hostname === 'media.test' && parsed.pathname === '/segment-2.wav') {
-        requests.secondDownloads += 1
-        return new Response(secondAudio, { headers: { 'content-length': String(secondAudio.length), 'content-type': 'audio/wav' } })
-      }
-      throw new Error(`unexpected request: ${url}`)
-    },
-  })
-  let project = await projectWithSavedScript(currentAgent, store)
-  project = (await store.commit(currentAgent, { projectId: project.id, expectedRevision: project.revision, stage: 'script', payload: { body: '甲'.repeat(401) }, idempotencyKey: 'segmented-script-001' })).project
-  const task = await host.startAudioTask(currentAgent, { subtitleEnabled: false,
-    sourceProjectId: project.id,
-    text: '甲'.repeat(401),
-    provider: 'bailian',
-    voiceSource: 'preset',
-    voiceId: 'test-voice',
-  })
-  const finished = await waitForAudioTask(host, currentAgent, task.id)
-  assert.equal(finished.status, 'succeeded', finished.error)
-  assert.equal(finished.projectSyncError, null)
-  assert.ok(finished.projectSync, 'completion must include automatic project sync')
-  assert.ok((await store.get(currentAgent, { projectId: project.id })).completedStages.includes('voiceover'))
-  const { executionDetail } = await import('../spoken-video-execution.mjs')
-  const execution = await executionDetail({ workspacePath: cwd }, { kind: 'audio', id: task.id })
-  assert.ok(execution.record.executionEvents.some((event) => event.label.includes('配音服务已返回')), 'provider completion remains inspectable')
-  assert.equal(execution.assets[0].file, finished.result.audio.file)
-  assert.equal(requests.tts, 2)
-  assert.equal(requests.firstDownloads, 2)
-  assert.equal(requests.secondDownloads, 1)
-  const audioPath = join(cwd, 'data', finished.result.audio.file)
-  const probe = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration:stream=codec_type,codec_name,sample_rate,channels', '-of', 'json', audioPath], { encoding: 'utf8' }))
-  const audioStream = probe.streams.find((stream) => stream.codec_type === 'audio')
-  assert.equal(audioStream.codec_name, 'pcm_s16le')
-  assert.equal(audioStream.sample_rate, '24000')
-  assert.equal(audioStream.channels, 1)
-  assert.equal(Number(probe.format.duration) > 0.45, true)
-})
-
-test('uses the documented Bailian realtime ASR event flow to produce timestamped subtitles', async (t) => {
-  if (!mediaBinariesAvailable()) { t.skip('ffmpeg or ffprobe is unavailable in this environment'); return }
-  const server = new WebSocketServer({ port: 0 })
-  await new Promise((resolvePromise) => server.once('listening', resolvePromise))
-  t.after(() => new Promise((resolvePromise) => server.close(resolvePromise)))
-  const port = server.address().port
-  const observed = { authorization: null, model: null, session: null, appends: 0, audioBytes: 0, appendBytes: [], appendAt: [] }
-  server.on('connection', (socket, request) => {
-    const requestUrl = new URL(request.url, `ws://127.0.0.1:${port}`)
-    observed.authorization = request.headers.authorization || null
-    observed.model = requestUrl.searchParams.get('model')
-    let speechStarted = false
-    socket.on('message', (raw) => {
-      const event = JSON.parse(String(raw))
-      if (event.type === 'session.update') {
-        observed.session = event.session
-        socket.send(JSON.stringify({ type: 'session.updated' }))
-      } else if (event.type === 'input_audio_buffer.append') {
-        const bytes = Buffer.from(event.audio, 'base64')
-        observed.appends += 1
-        observed.audioBytes += bytes.length
-        observed.appendBytes.push(bytes.length)
-        observed.appendAt.push(Date.now())
-        if (!speechStarted) {
-          speechStarted = true
-          socket.send(JSON.stringify({ type: 'input_audio_buffer.speech_started', item_id: 'item-1', audio_start_ms: 0 }))
-        }
-      } else if (event.type === 'session.finish') {
-        socket.send(JSON.stringify({ type: 'input_audio_buffer.speech_stopped', item_id: 'item-1', audio_end_ms: 500 }))
-        socket.send(JSON.stringify({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'item-1', transcript: '实时字幕测试。' }))
-        socket.send(JSON.stringify({ type: 'session.finished' }))
-      }
-    })
-  })
-
-  const cwd = await workspace(t)
-  const store = new SpokenVideoProjectStore()
-  const currentAgent = agent(cwd)
-  let project = await projectWithApprovedScript(currentAgent, store)
-  const audioRelativePath = 'media/voiceovers/realtime.wav'
-  const audioPath = join(cwd, 'data', 'projects', project.id, audioRelativePath)
-  await mkdir(join(cwd, 'data', 'projects', project.id, 'media', 'voiceovers'), { recursive: true })
-  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.5', '-ac', '1', '-ar', '16000', audioPath], { stdio: 'ignore' })
-  project = (await store.commitProduced(currentAgent, {
-    projectId: project.id, expectedRevision: project.revision, stage: 'voiceover', idempotencyKey: 'media-realtime-asr-voice-0001', source: 'spoken-video/tts',
-    payload: { mode: 'tts', provider: 'bailian', settings: { rate: 1, volume: 1, pitch: 0 }, audio: { file: audioRelativePath, mediaType: 'audio/wav', bytes: 16_000, durationSeconds: 0.5 } },
-  })).project
-  const host = new SpokenVideoMediaHost({
-    projectsStore: store,
-    credentials: credentialStore({ DASHSCOPE_API_KEY: 'sk-realtime-test' }),
-    environment: { LWB_SPOKEN_VIDEO_BAILIAN_ASR_WS_URL: `ws://127.0.0.1:${port}/api-ws/v1/realtime` },
-  })
-  const started = await host.startSubtitles(currentAgent, {
-    projectId: project.id, expectedRevision: project.revision, provider: 'bailian', language: 'zh',
-  })
-  const finished = await waitForOperation(host, currentAgent, project.id, started.id)
-  assert.equal(finished.status, 'succeeded')
-  assert.equal(observed.authorization, 'Bearer sk-realtime-test')
-  assert.equal(observed.model, 'qwen3-asr-flash-realtime')
-  assert.deepEqual(observed.session, {
-    input_audio_format: 'pcm', sample_rate: 16000, input_audio_transcription: { language: 'zh' }, turn_detection: { type: 'server_vad', threshold: 0, silence_duration_ms: 400 },
-  })
-  assert.equal(observed.appends > 0, true)
-  assert.equal(observed.audioBytes > 0, true)
-  assert.equal(observed.appends >= 4, true, '500 ms of PCM is streamed in real-time-sized chunks')
-  assert.equal(Math.max(...observed.appendBytes) <= 3_200, true)
-  assert.equal(observed.appendAt.at(-1) - observed.appendAt[0] >= 250, true, 'audio chunks are paced instead of burst-sent')
-  const detail = await store.get(currentAgent, { projectId: project.id })
-  assert.match(detail.artifacts.subtitles.data.srt, /00:00:00,000 --> 00:00:00,250/u)
-  assert.match(detail.artifacts.subtitles.data.srt, /00:00:00,238 --> 00:00:00,500/u)
-  assert.match(detail.artifacts.subtitles.data.srt, /这是已确认的口播稿，/u)
-  assert.match(detail.artifacts.subtitles.data.srt, /用于验证自动媒体产物。/u)
-  assert.doesNotMatch(detail.artifacts.subtitles.data.srt, /实时字幕测试/u)
-})
-
-test('preserves a Bailian ASR service error when the WebSocket closes during audio streaming', async (t) => {
-  if (!mediaBinariesAvailable()) { t.skip('ffmpeg or ffprobe is unavailable in this environment'); return }
-  const server = new WebSocketServer({ port: 0 })
-  await new Promise((resolvePromise) => server.once('listening', resolvePromise))
-  t.after(() => new Promise((resolvePromise) => server.close(resolvePromise)))
-  const port = server.address().port
-  server.on('connection', (socket) => {
-    socket.on('message', (raw) => {
-      const event = JSON.parse(String(raw))
-      if (event.type === 'session.update') socket.send(JSON.stringify({ type: 'session.updated' }))
-      else if (event.type === 'input_audio_buffer.append') {
-        socket.send(JSON.stringify({ type: 'error', error: { message: '音频流被服务端拒绝' } }))
-        socket.close(1008, 'stream rejected')
-      }
-    })
-  })
-
-  const cwd = await workspace(t)
-  const store = new SpokenVideoProjectStore()
-  const currentAgent = agent(cwd)
-  let project = await projectWithApprovedScript(currentAgent, store)
-  const audioRelativePath = 'media/voiceovers/realtime-close.wav'
-  const audioPath = join(cwd, 'data', 'projects', project.id, audioRelativePath)
-  await mkdir(join(cwd, 'data', 'projects', project.id, 'media', 'voiceovers'), { recursive: true })
-  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=5', '-ac', '1', '-ar', '16000', audioPath], { stdio: 'ignore' })
-  project = (await store.commitProduced(currentAgent, {
-    projectId: project.id, expectedRevision: project.revision, stage: 'voiceover', idempotencyKey: 'media-realtime-close-voice-0001', source: 'spoken-video/tts',
-    payload: { mode: 'tts', provider: 'bailian', settings: { rate: 1, volume: 1, pitch: 0 }, audio: { file: audioRelativePath, mediaType: 'audio/wav', bytes: 160_000, durationSeconds: 5 } },
-  })).project
-  const host = new SpokenVideoMediaHost({
-    projectsStore: store,
-    credentials: credentialStore({ DASHSCOPE_API_KEY: 'sk-realtime-close' }),
-    environment: { LWB_SPOKEN_VIDEO_BAILIAN_ASR_WS_URL: `ws://127.0.0.1:${port}/api-ws/v1/realtime` },
-  })
-  const started = await host.startSubtitles(currentAgent, { projectId: project.id, expectedRevision: project.revision, provider: 'bailian', language: 'zh' })
-  const finished = await waitForOperation(host, currentAgent, project.id, started.id)
-  assert.equal(finished.status, 'failed')
-  assert.match(finished.error, /音频流被服务端拒绝/u)
-  assert.doesNotMatch(finished.error, /readyState|WebSocket is not open/u)
-})
-
-test('builds the deterministic technical release gate from ffprobe data', () => {
-  const video = normalizeProbe({ format: { duration: '12.2' }, streams: [{ codec_type: 'video', codec_name: 'h264', width: 1080, height: 1920, avg_frame_rate: '30/1' }, { codec_type: 'audio', codec_name: 'aac', sample_rate: '22050' }] })
-  const audio = normalizeProbe({ format: { duration: '12.0' }, streams: [{ codec_type: 'audio', codec_name: 'aac', sample_rate: '44100' }] })
-  assert.equal(video.sampleRate, 22050)
-  assert.equal(audio.sampleRate, 44100)
-  const passed = buildTechnicalReport({ video, audio, subtitles: { cueCount: 4 } })
-  assert.equal(passed.passed, true)
-  const landscape = buildTechnicalReport({ video: { ...video, width: 1920, height: 1080 }, audio, subtitles: { cueCount: 4 }, orientation: 'landscape' })
-  assert.equal(landscape.passed, true)
-  const failed = buildTechnicalReport({ video: { ...video, width: 1920, height: 1080, hasAudio: false }, audio, subtitles: { cueCount: 0 } })
-  assert.equal(failed.passed, false)
-  assert.equal(failed.issues.length >= 3, true)
-  assert.deepEqual(failed.warnings, [])
-  const noCaptions = buildTechnicalReport({ video, audio, subtitles: null, subtitleEnabled: false })
-  assert.equal(noCaptions.passed, true)
-  assert.equal(noCaptions.subtitles.enabled, false)
-})
 
 test('treats an attached album cover as audio metadata, not a real video stream', () => {
   const audio = normalizeProbe({
@@ -1532,6 +1291,108 @@ test('defaults a local render to landscape and passes ffprobe technical qc', asy
   assert.equal(qcRun.status, 'succeeded', qcRun.error)
   const checkedProject = await store.get(currentAgent, { projectId: project.id })
   assert.equal(checkedProject.artifacts.qc.data.passed, true)
+})
+
+test('builds the deterministic technical release gate from ffprobe data', () => {
+  const video = normalizeProbe({ format: { duration: '12.2' }, streams: [{ codec_type: 'video', codec_name: 'h264', width: 1080, height: 1920, avg_frame_rate: '30/1' }, { codec_type: 'audio', codec_name: 'aac', sample_rate: '22050' }] })
+  const audio = normalizeProbe({ format: { duration: '12.0' }, streams: [{ codec_type: 'audio', codec_name: 'aac', sample_rate: '44100' }] })
+  assert.equal(video.sampleRate, 22050)
+  assert.equal(audio.sampleRate, 44100)
+  const passed = buildTechnicalReport({ video, audio, subtitles: { cueCount: 4 } })
+  assert.equal(passed.passed, true)
+  const landscape = buildTechnicalReport({ video: { ...video, width: 1920, height: 1080 }, audio, subtitles: { cueCount: 4 }, orientation: 'landscape' })
+  assert.equal(landscape.passed, true)
+  const failed = buildTechnicalReport({ video: { ...video, width: 1920, height: 1080, hasAudio: false }, audio, subtitles: { cueCount: 0 } })
+  assert.equal(failed.passed, false)
+  assert.equal(failed.issues.length >= 3, true)
+  assert.deepEqual(failed.warnings, [])
+  const noCaptions = buildTechnicalReport({ video, audio, subtitles: null, subtitleEnabled: false })
+  assert.equal(noCaptions.passed, true)
+  assert.equal(noCaptions.subtitles.enabled, false)
+})
+
+test('connection() folds retired channel names onto the bridge channel so older connections stay usable', async (t) => {
+  for (const legacy of ['bailian', 'legacy']) {
+    const host = new SpokenVideoMediaHost({
+      projectsStore: new SpokenVideoProjectStore(),
+      credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: 'sk-legacy-fold' }),
+      connectionSettings: connectionSettings(legacy),
+    })
+    const connection = await host.connection()
+    assert.equal(connection.provider, 'scitiger', `存量 ${legacy} 连接必须折叠到 scitiger`)
+    const status = await host.status()
+    assert.ok(status.providers.scitiger, `status() 必须发布 scitiger 渠道（${legacy}）`)
+    assert.equal(status.providers.scitiger.configured, true)
+  }
+})
+
+test('persists project voiceover progress and execution events instead of silently dropping write failures', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await projectWithApprovedScript(currentAgent, store)
+  const outputFile = join(cwd, 'project-vo.wav')
+  execFileSync('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.4', '-ac', '1', '-ar', '16000', outputFile], { stdio: 'ignore' })
+  const outputAudio = await readFile(outputFile)
+  let polls = 0
+  const host = new SpokenVideoMediaHost({
+    projectsStore: store,
+    credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: 'sk-project-vo' }),
+    environment: { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'https://scitiger.test' },
+    fetch: async (url) => {
+      const parsed = new URL(String(url))
+      if (parsed.pathname === '/api/v1/media/audio-uploads') return new Response(JSON.stringify({ success: true, data: { asset_id: 'asset-ref' } }))
+      if (parsed.pathname === '/api/v1/tts/jobs') return new Response(JSON.stringify({ success: true, data: { job_id: 'tts_project' } }))
+      if (parsed.pathname === '/api/v1/tts/jobs/tts_project') {
+        polls += 1
+        if (polls === 1) return new Response(JSON.stringify({ success: true, data: { status: 'queued', queue_ahead: 1 } }))
+        if (polls === 2) return new Response(JSON.stringify({ success: true, data: { status: 'processing', stage: '分段合成 2/5', progress: 36 } }))
+        if (polls === 3) return new Response(JSON.stringify({ success: true, data: { status: 'processing', stage: '分段合成 4/5', progress: 72 } }))
+        return new Response(JSON.stringify({ success: true, data: { status: 'completed', result: { audio_url: 'https://media.test/project-vo.wav' } } }))
+      }
+      if (parsed.hostname === 'media.test') return new Response(outputAudio)
+      throw new Error(`unexpected request: ${url}`)
+    },
+  })
+  const started = await host.startVoiceover(currentAgent, { projectId: project.id, expectedRevision: project.revision, provider: 'scitiger', rate: 1, volume: 1 })
+  const finished = await waitForOperation(host, currentAgent, project.id, started.id)
+  assert.equal(finished.status, 'succeeded', finished.error)
+  const runs = JSON.parse(await readFile(join(cwd, 'data', 'projects', project.id, 'media', 'runs.json'), 'utf8'))
+  const run = runs.runs.find((item) => item.id === started.id)
+  assert.ok(run, '项目配音 run 必须写入 runs.json')
+  assert.equal(run.progressInfo?.stage, '分段合成 4/5')
+  assert.equal(run.progressInfo?.progress, 72)
+  const labels = (run.executionEvents || []).map((event) => event.label)
+  assert.ok(labels.some((label) => label.includes('排队中（前面还有 1 个任务）')), labels.join(' | '))
+  assert.ok(labels.some((label) => label.includes('分段合成 2/5') && label.includes('36%')), labels.join(' | '))
+  assert.ok(labels.some((label) => label.includes('分段合成 4/5') && label.includes('72%')), labels.join(' | '))
+})
+
+test('audio task channel filter finds history tasks created under retired channel names', async (t) => {
+  const cwd = await workspace(t)
+  const currentAgent = agent(cwd)
+  const accountA = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const host = new SpokenVideoMediaHost({ projectsStore: { async list() { return [{ id: 'project-a', account: { id: accountA } }] } } })
+  const task = (id, provider) => ({ id, status: 'succeeded', createdAt: new Date().toISOString(), source: { projectId: 'project-a', title: id, text: 'x' }, input: { provider } })
+  const tasks = [
+    task('legacy-bailian', 'bailian'),
+    task('legacy-legacy', 'legacy'),
+    task('current-scitiger', 'scitiger'),
+    task('other-bridge', 'bridge'),
+  ]
+  await mkdir(join(cwd, 'data'), { recursive: true })
+  await writeFile(join(cwd, 'data', 'audio-tasks.json'), JSON.stringify({ schemaVersion: 1, tasks }))
+
+  const scitigerOnly = await host.listAudioTasks(currentAgent, { accountId: accountA, provider: 'scitiger' })
+  assert.equal(scitigerOnly.total, 3, 'bailian/legacy 必须按 scitiger 折叠后进入结果')
+  assert.deepEqual(scitigerOnly.items.map((item) => item.id).sort(), ['current-scitiger', 'legacy-bailian', 'legacy-legacy'])
+
+  const bridgeOnly = await host.listAudioTasks(currentAgent, { accountId: accountA, provider: 'bridge' })
+  assert.equal(bridgeOnly.total, 1)
+  assert.equal(bridgeOnly.items[0].id, 'other-bridge')
+
+  const all = await host.listAudioTasks(currentAgent, { accountId: accountA, provider: 'all' })
+  assert.equal(all.total, 4)
 })
 
 test('composeLineArtPrompt bakes the visual spec and rejects empty scenes', () => {
@@ -1915,8 +1776,8 @@ async function savedAudioFixture(t, { subtitle = true } = {}) {
   const task = {
     id: 'saved-audio', type: 'voiceover', status: 'succeeded', createdAt: new Date().toISOString(),
     source: { kind: 'saved-script', projectId: project.id, title: project.title, text: detail.artifacts.script.data.body, scriptRevision: detail.artifacts.script.revision },
-    input: { provider: 'bailian', rate: 1, volume: 1, pitch: 0 }, projectRevision: project.revision,
-    result: { provider: 'bailian', audio: { file: 'audio-media/voiceovers/saved-audio.wav', mediaType: 'audio/wav', bytes: 5, durationSeconds: 1 } },
+    input: { provider: 'scitiger', rate: 1, volume: 1, pitch: 0 }, projectRevision: project.revision,
+    result: { provider: 'scitiger', audio: { file: 'audio-media/voiceovers/saved-audio.wav', mediaType: 'audio/wav', bytes: 5, durationSeconds: 1 } },
     subtitle: subtitle ? { status: 'succeeded', current: { id: 'subtitle-one', mode: 'asr', srt: '1\n00:00:00,000 --> 00:00:01,000\n已有字幕。', cueCount: 1 } } : { status: 'idle' },
   }
   await writeFile(join(root, 'audio-tasks.json'), JSON.stringify({ schemaVersion: 1, tasks: [task] }))
@@ -1998,23 +1859,25 @@ test('audio tasks default to automatic subtitles, isolate ASR failures, and allo
     const host = new SpokenVideoMediaHost({
       projectsStore: store, pollIntervalMs: 1,
       background: (promise) => { work.push(promise); return promise },
-      environment: { LWB_SPOKEN_VIDEO_TTS_BASE_URL: 'https://fixture.test' },
-      fetch: async (url) => {
+      credentials: credentialStore({ LWB_SPOKEN_VIDEO_SCITIGER_API_KEY: 'sk-fixture' }),
+      environment: { LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL: 'https://fixture.test' },
+      fetch: async (url, init = {}) => {
         const path = new URL(String(url)).pathname
-        if (path === '/api/v1/tts/synthesize') return new Response(JSON.stringify({ code: 200, data: { task_id: 'voice' } }))
-        if (path === '/api/v1/tts/tasks/voice') return new Response(JSON.stringify({ code: 200, data: { status: 'completed', duration: 1 } }))
-        if (path === '/api/v1/tts/tasks/voice/audio') return new Response(audio)
-        if (path === '/api/v1/subtitles/generate') {
+        if (path === '/api/v1/media/audio-uploads') return new Response(JSON.stringify({ success: true, data: { asset_id: 'asset-fixture' } }))
+        if (path === '/api/v1/tts/jobs' && init.method === 'POST') return new Response(JSON.stringify({ success: true, data: { job_id: 'voice' } }))
+        if (path === '/api/v1/tts/jobs/voice') return new Response(JSON.stringify({ success: true, data: { status: 'completed', result: { audio_url: 'https://fixture.test/audio/voice.wav' } } }))
+        if (path === '/audio/voice.wav') return new Response(audio)
+        if (path === '/api/v1/subtitle/jobs' && init.method === 'POST') {
           asrCalls += 1
           if (scenario === 'asr-failure') throw new Error('fixture ASR unavailable')
-          return new Response(JSON.stringify({ code: 200, data: { task_id: 'subtitle' } }))
+          return new Response(JSON.stringify({ success: true, data: { job_id: 'subtitle' } }))
         }
-        if (path === '/api/v1/subtitles/tasks/subtitle') return new Response(JSON.stringify({ code: 200, data: { status: 'completed', subtitle_srt: '1\n00:00:00,000 --> 00:00:01,000\n自动生成字幕。' } }))
+        if (path === '/api/v1/subtitle/jobs/subtitle') return new Response(JSON.stringify({ success: true, data: { status: 'completed', subtitle_srt: '1\n00:00:00,000 --> 00:00:01,000\n自动生成字幕。' } }))
         throw new Error(`unexpected fixture request ${path}`)
       },
     })
     if (scenario === 'submission-failure') host.startAudioTaskSubtitles = async () => { throw new Error('fixture subtitle submission failed') }
-    const started = await host.startAudioTask(currentAgent, { text: (await store.get(currentAgent, { projectId: project.id })).artifacts.script.data.body, sourceProjectId: project.id, provider: 'legacy', ...(scenario === 'opt-out' ? { subtitleEnabled: false } : {}) })
+    const started = await host.startAudioTask(currentAgent, { text: (await store.get(currentAgent, { projectId: project.id })).artifacts.script.data.body, sourceProjectId: project.id, provider: 'scitiger', ...(scenario === 'opt-out' ? { subtitleEnabled: false } : {}) })
     // Drain voiceover plus any work it schedules; no background writes survive cleanup.
     for (let index = 0; index < work.length; index += 1) await work[index]
     const finished = await host.audioTask(currentAgent, { taskId: started.id })
@@ -2969,4 +2832,32 @@ test('质检提交接受与抽帧硬上限等量的抽帧文件，不会因为�
     }),
     (error) => error instanceof SpokenVideoStoreError && new RegExp(`质检抽帧最多包含 ${REVIEW_FRAME_HARD_LIMIT} 项`, 'u').test(error.message),
   )
+})
+
+test('opens the folder that holds a finished voiceover file', async (t) => {
+  const { root, currentAgent, task, host } = await savedAudioFixture(t)
+  const revealed = []
+  const revealHost = new SpokenVideoMediaHost({ projectsStore: new SpokenVideoProjectStore(), fileRevealer: async (file) => { revealed.push(file) } })
+  // 真正执行命令分支：没有 fileRevealer 时 openAudioTaskFolder 会走 revealInFileManager
+  // （实打实 spawn explorer/open/xdg-open），而不是只比对源码文本。源码文本断言最多留一条作补充。
+  const source = await readFile(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  assert.match(source, /'explorer'|'open'|'xdg-open'/u)
+
+  const opened = await revealHost.openAudioTaskFolder(currentAgent, { taskId: task.id })
+  assert.equal(revealed.length, 1)
+  assert.equal(opened.file, 'audio-media/voiceovers/saved-audio.wav')
+  // host 返回的是 realpath 后的根，临时目录在 Windows 上可能是短路径名，按 realpath 对齐。
+  const { realpath } = await import('node:fs/promises')
+  const expected = join(await realpath(root), 'audio-media', 'voiceovers', 'saved-audio.wav')
+  assert.equal(revealed[0], expected)
+  assert.ok(existsSync(revealed[0]))
+
+  // 无音频的任务不能开窗；越界引用必须被路径校验拦下。
+  await assert.rejects(revealHost.openAudioTaskFolder(currentAgent, { taskId: 'no-such-task' }), /没有可用音频/u)
+  await writeFile(join(root, 'audio-tasks.json'), JSON.stringify({
+    schemaVersion: 1,
+    tasks: [{ ...task, id: 'escaped-task', result: { provider: 'scitiger', audio: { file: '../escape.wav', mediaType: 'audio/wav', bytes: 5 } } }],
+  }))
+  await assert.rejects(revealHost.openAudioTaskFolder(currentAgent, { taskId: 'escaped-task' }), /无效/u)
+  await assert.rejects(host.openAudioTaskFolder(currentAgent, { taskId: 'no-such-task' }), /没有可用音频/u)
 })

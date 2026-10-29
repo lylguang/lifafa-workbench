@@ -11,8 +11,8 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
 async function setup(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'lwb-services-')))
   t.after(() => rm(root, { recursive: true, force: true }))
-  const keys = new Map([['BAILIAN_API_KEY', 'ordinary-secret']])
-  const settings = { providers: { ordinary: { apiKeyEnv: 'BAILIAN_API_KEY' } } }
+  const keys = new Map([['SAMPLE_API_KEY', 'ordinary-secret']])
+  const settings = { providers: { ordinary: { apiKeyEnv: 'SAMPLE_API_KEY' } } }
   const calls = []
   let selection = { provider: 'ordinary', model: 'dsh-default', reasoningEffort: 'high' }
   const ctx = {
@@ -51,11 +51,11 @@ test('data access needs no Agent; directories, credentials and settings are isol
   assert.notEqual((await first.context()).workspacePath, (await second.context()).workspacePath)
   await first.request(async (context) => writeFile(join(context.workspacePath, 'data'), 'first'))
   assert.equal(calls.length, 0)
-  assert.equal((await first.credentials.describe('BAILIAN_API_KEY')).configured, false)
-  await first.credentials.set('BAILIAN_API_KEY', 'first-secret')
-  assert.equal((await second.credentials.describe('BAILIAN_API_KEY')).configured, false)
-  assert.equal((await first.credentials.resolve('BAILIAN_API_KEY')).value, 'first-secret')
-  assert.equal(keys.get('BAILIAN_API_KEY'), 'ordinary-secret')
+  assert.equal((await first.credentials.describe('SAMPLE_API_KEY')).configured, false)
+  await first.credentials.set('SAMPLE_API_KEY', 'first-secret')
+  assert.equal((await second.credentials.describe('SAMPLE_API_KEY')).configured, false)
+  assert.equal((await first.credentials.resolve('SAMPLE_API_KEY')).value, 'first-secret')
+  assert.equal(keys.get('SAMPLE_API_KEY'), 'ordinary-secret')
   assert.notEqual(first.settingsNamespace('media'), second.settingsNamespace('media'))
   await assert.rejects(first.assertAgent({ session: { header: { cwd: (await second.context()).workspacePath } } }), /此工具/)
 })

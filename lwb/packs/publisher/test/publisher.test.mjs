@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,6 +17,7 @@ import {
   coverUploadPlan,
   pickCoverSlots,
   readCoverVerdict,
+  ensurePortraitTabIfSwitcherPresent as ensurePortraitTabIfSwitcherForTest,
   waitForUploadComplete,
 } from '../publisher-adapter-douyin.mjs'
 
@@ -549,16 +551,75 @@ test('douyin warns when a cover is wildly off the slot ratio, before uploading i
   // 实测：比例明显不符的平台会直接判「封面不任」，而那种失败在发布记录里看不出
   // 是素材问题。这里在上传前就量一次，把话说清楚。
   //
-  // 关键：容差必须放宽。2026-10-11 真机实测，项目里的横封面 1280x720（16:9）
-  // 与竖封面 1088x1440 平台都照收——「横封面4:3 / 竖封面3:4」是抖音展示时的框，
-  // 不是素材硬要求。严抠 4:3 会对正常素材误报，那比不报更糟。
-  assert.equal(coverRatioWarning(1280, 720, 'landscape'), null, '16:9 横封面实测可用')
-  assert.equal(coverRatioWarning(1088, 1440, 'portrait'), null, '1088x1440 竖封面实测可用')
+  // 判据是**相对偏差 8%**，不是绝对差值：比例相对才对，偏离多少取决于目标值本身。
+  // 横版目标是 16:9（1.7778，抖音横封面标准，含 1280×720 / 1920×1080），±8% 容许
+  // 1.6356–1.9200；竖版目标是 3:4（0.75），±8% 容许 0.690–0.810。
+  assert.equal(coverRatioWarning(1280, 720, 'landscape'), null, '标准 16:9 横封面（1280×720）不应误报')
+  assert.equal(coverRatioWarning(1920, 1080, 'landscape'), null, '标准 16:9 横封面（1920×1080）')
+  assert.equal(coverRatioWarning(1280, 668, 'landscape'), null, '横版上限 1.9162 恰好可用')
+  assert.equal(coverRatioWarning(1280, 780, 'landscape'), null, '横版下限 1.6410 恰好可用')
+  assert.equal(coverRatioWarning(1080, 1440, 'portrait'), null, '竖封面 3:4 素材')
+  assert.equal(coverRatioWarning(1080, 1565, 'portrait'), null, '竖版下限 0.6901 恰好可用')
+  assert.equal(coverRatioWarning(1080, 1334, 'portrait'), null, '竖版上限 0.8096 恰好可用')
+  // 越界即报警：两端各取一个刚跨过去的像素值，把区间钉死。
+  assert.ok(coverRatioWarning(1280, 800, 'landscape'), '比横版下限再窄一点就报警')
+  assert.ok(coverRatioWarning(1280, 665, 'landscape'), '比横版上限再宽一点就报警')
+  assert.ok(coverRatioWarning(1080, 1333, 'portrait'), '比竖版上限再宽一点就报警')
+  assert.ok(coverRatioWarning(1080, 1566, 'portrait'), '比竖版下限再窄一点就报警')
+  assert.ok(coverRatioWarning(1280, 960, 'landscape'), '4:3 横素材对 16:9 横槽是过高，必须报警')
+  assert.ok(coverRatioWarning(1000, 1000, 'landscape'), '正方形对 16:9 偏离过远，必须报警')
   assert.ok(coverRatioWarning(1088, 1440, 'landscape'), '把竖版塞进横槽必须报警')
   assert.match(coverRatioWarning(1088, 1440, 'landscape'), /封面不任/u)
   assert.ok(coverRatioWarning(1920, 200, 'landscape'), '极端长条必须报警')
   assert.equal(coverRatioWarning(0, 0, 'landscape'), null, '量不到尺寸不该误报')
   assert.equal(coverRatioWarning(undefined, undefined, 'portrait'), null)
+})
+
+test('douyin switches to the portrait tab only when the dialog really offers a switcher', async () => {
+  // 弹窗里同时挂着「设置横封面 / 设置竖封面」两个标签时，不切就会把竖图传进横
+  // 封面通道。但只在**两个标签都在、且激活的是横封面**时才切——认不出激活态、
+  // 只有单标签弹窗时一律按原样上传：切换失败绝不允许变成放弃上传的理由。
+  const page = {
+    clicks: [],
+    state: { switchable: true, landscapeActive: true, portraitActive: false },
+    async evaluate() { return { ...this.state, x: 100, y: 200 } },
+    mouse: { click: async (x, y) => { page.clicks.push([x, y]) } },
+    async waitForTimeout() {},
+  }
+
+  assert.equal(await ensurePortraitTabIfSwitcherForTest(page), true, '两个标签都在且停在横封面时必须切')
+  assert.deepEqual(page.clicks, [[100, 200]])
+
+  // 单标签弹窗（实测那一版只有「设置横封面」）：不切，照旧上传。
+  page.clicks = []
+  page.state.switchable = false
+  assert.equal(await ensurePortraitTabIfSwitcherForTest(page), false, '没有切换器时不得乱点')
+  assert.equal(page.clicks.length, 0)
+
+  // 已经在竖封面上：不切。
+  page.state.switchable = true
+  page.state.landscapeActive = false
+  page.state.portraitActive = true
+  assert.equal(await ensurePortraitTabIfSwitcherForTest(page), false, '已在竖封面时不得再切')
+  assert.equal(page.clicks.length, 0)
+
+  // 认不出激活态：不切。宁可照旧上传，也不把切换失败当成上传失败。
+  page.state.landscapeActive = false
+  page.state.portraitActive = false
+  assert.equal(await ensurePortraitTabIfSwitcherForTest(page), false, '认不出激活态时不得乱切')
+  assert.equal(page.clicks.length, 0)
+})
+
+test('douyin re-uploads the portrait cover last so the platform cannot recompute it', () => {
+  // 平台会在横封面上传后基于横封面自动重算竖封面，把竖图压成裁坏的横图。补传
+  // 让竖封面成为最后一次写入；补传失败只报一步，不回滚已成功的封面。
+  const source = readFileSync(new URL('../publisher-adapter-douyin.mjs', import.meta.url), 'utf8')
+  const body = source.slice(source.indexOf('const plan = coverUploadPlan(coverBoxes)'))
+  assert.match(body, /cover-reupload/u, '补传步骤必须留痕')
+  assert.match(body, /coverPaths\.portrait/u, '补传用的是竖封面素材')
+  assert.match(body, /openCoverDialog\(page, portraitPoint\)/u, '补传要重新打开竖封面弹窗')
+  // 补传必须在自制声明之前完成，否则声明模态会挡住封面弹窗。
+  assert.ok(body.indexOf('cover-reupload-applied') < body.indexOf("onStep('declaration'"), '补传要在声明之前')
 })
 
 test('douyin finds both cover slots even though the portrait box is far narrower', () => {
@@ -598,4 +659,19 @@ test('douyin reports a missing cover slot instead of silently reusing the other 
   const slots = pickCoverSlots([{ x: 438, y: 509, w: 160, h: 120 }])
   assert.ok(slots.landscape)
   assert.equal(slots.portrait, null, '缺竖封面时必须返回 null，不许拿横封面的坐标顶替')
+})
+
+test('保活巡检把「平台不可达」与「未登录」分开：网络抖动不误标过期（C1 / 评审 #4）', async () => {
+  await withStore(async (store, dir) => {
+    const account = await store.createAccount({ platform: 'douyin', label: '测试号' })
+    await store.patchAccountState(account.id, { status: 'active' })
+    const host = new PublisherHost({ store, browser: stubBrowser(), workspacePath: dir })
+    // stubBrowser 的 page() 没有 goto，isLoggedIn 必然抛错——这正模拟「平台不可达 /
+    // 页面没加载完 / 网络抖动」，而不是「已退出登录」。
+    const result = await host.checkAccount(account.id)
+    assert.equal(result.unreachable, true, 'isLoggedIn 抛错应判为不可达而非未登录')
+    const after = await store.getAccount(account.id)
+    assert.equal(after.status, 'active', '不可达时保留原状态，不写成 expired')
+    assert.ok(!/登录态已失效/.test(after.lastError || ''), '不可达的 lastError 不应是「登录态已失效」')
+  })
 })

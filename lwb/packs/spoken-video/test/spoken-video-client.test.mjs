@@ -84,8 +84,9 @@ test('audio workbench selects saved scripts by account, preserves standalone tas
   assert.match(page, /source\?\.projectId \? \{ sourceProjectId: source\.projectId \}/u)
   assert.doesNotMatch(page, /provider: providerId, apiKey,/u)
   assert.match(page, /API Key 保存到 DSH 私有凭据库/u)
-  assert.match(source, /function mediaErrorText\(error\)[\s\S]*?SciTiger 账户积分不足，请充值后重试，或切换到百炼 BYOK/u)
-  assert.match(source, /function subtitleTaskProgress\(task, now = Date\.now\(\)\)[\s\S]*?实时识别/u)
+  assert.match(source, /function mediaErrorText\(error\)[\s\S]*?SciTiger 账户积分不足，请充值后重试；或在桥接配置中心把配音切到本地合成（不消耗云端积分）/u)
+  assert.doesNotMatch(source, /function subtitleTaskProgress\(task, now = Date\.now\(\)\)[\s\S]*?实时识别/u, '百炼下线后死守卫已移除，文案不再用「实时识别」')
+  assert.match(source, /function subtitleTaskProgress\(task, now = Date\.now\(\)\)[\s\S]*?字幕处理中 [\s\S]*?（预计）/u, '运行中且能算时长时应显示按音频时长推算的预计进度')
   assert.match(page, /subtitleProgress = subtitleTaskProgress\(task\)/u)
   assert.match(page, /className: 'sv-audio-subtitle-progress'/u)
   assert.match(page, /'aria-label': '字幕识别进度'/u)
@@ -123,7 +124,11 @@ test('audio workbench exposes the bridge channel, voice and style on the task fo
   const page = source.slice(start, end)
 
   // 云端/本地开关按任务覆盖桥接配置，与定时任务表单同名同义。
-  assert.match(page, /const \[bridgeChannel, setBridgeChannel\] = React\.useState\(''\)/u)
+  // 默认走云端：默认声音方案「自然讲解」用的是小米 MiMo 预置音色。
+  assert.match(page, /const \[bridgeChannel, setBridgeChannel\] = React\.useState\('cloud'\)/u)
+  assert.match(page, /const \[bridgeModel, setBridgeModel\] = React\.useState\('mimo-v2\.5-tts'\)/u)
+  assert.match(page, /const \[bridgeVoice, setBridgeVoice\] = React\.useState\('茉莉'\)/u)
+  assert.match(page, /const \[voiceSource, setVoiceSource\] = React\.useState\('builtin'\)/u)
   assert.match(page, /h\('option', \{ value: '' \}, '跟随桥接配置'\)/u)
   assert.match(page, /h\('option', \{ value: 'cloud' \}, '云端（小米 MiMo）'\)/u)
   assert.match(page, /h\('option', \{ value: 'local' \}, '本地（LongCat）'\)/u)
@@ -518,7 +523,9 @@ test('schedule form exposes a per-task voice preset that rides create, edit and 
   // library), reference audio and rate/volume, and edit mode rehydrates it
   // from the stored task. Defaults and rehydrate helpers live beside
   // emptyScheduleForm, outside the page component.
-  assert.match(source, /voiceSource: 'system', voiceReference: null, voiceRate: '1', voiceVolume: '1', bridgeVoice: '冰糖', libraryVoice: '', bridgeChannel: '', bridgeStyle: ''/u)
+  // 新建任务默认落在「自然讲解」方案上（茉莉 + 清晰沉稳 + 云端 MiMo），
+  // 不再是空白表单。
+  assert.match(source, /voiceSource: 'builtin', voiceReference: null, voiceRate: '1', voiceVolume: '1', bridgeVoice: '茉莉', libraryVoice: '', bridgeChannel: 'cloud', bridgeStyle: '清晰沉稳，适合知识讲解。', bridgeModel: 'mimo-v2\.5-tts', bridgeVoiceDesign: ''/u)
   assert.match(source, /voiceSource: voice\?\.voiceSource === 'upload' \? 'upload' : voice\?\.voiceSource === 'preset' \? \(presetIsBuiltin \? 'builtin' : 'library'\) : 'system'/u)
   assert.match(source, /bridgeChannel: voice\?\.bridge\?\.channel \|\| ''/u)
   assert.match(page, /voice: voicePayloadOf\(\)/u)
@@ -772,8 +779,9 @@ test('audio workbench selects saved scripts by account, preserves standalone tas
   assert.match(page, /source\?\.projectId \? \{ sourceProjectId: source\.projectId \}/u)
   assert.doesNotMatch(page, /provider: providerId, apiKey,/u)
   assert.match(page, /API Key 保存到 DSH 私有凭据库/u)
-  assert.match(source, /function mediaErrorText\(error\)[\s\S]*?SciTiger 账户积分不足，请充值后重试，或切换到百炼 BYOK/u)
-  assert.match(source, /function subtitleTaskProgress\(task, now = Date\.now\(\)\)[\s\S]*?实时识别/u)
+  assert.match(source, /function mediaErrorText\(error\)[\s\S]*?SciTiger 账户积分不足，请充值后重试；或在桥接配置中心把配音切到本地合成（不消耗云端积分）/u)
+  assert.doesNotMatch(source, /function subtitleTaskProgress\(task, now = Date\.now\(\)\)[\s\S]*?实时识别/u, '百炼下线后死守卫已移除，文案不再用「实时识别」')
+  assert.match(source, /function subtitleTaskProgress\(task, now = Date\.now\(\)\)[\s\S]*?字幕处理中 [\s\S]*?（预计）/u, '运行中且能算时长时应显示按音频时长推算的预计进度')
   assert.match(page, /subtitleProgress = subtitleTaskProgress\(task\)/u)
   assert.match(page, /className: 'sv-audio-subtitle-progress'/u)
   assert.match(page, /'aria-label': '字幕识别进度'/u)
@@ -811,7 +819,11 @@ test('audio workbench exposes the bridge channel, voice and style on the task fo
   const page = source.slice(start, end)
 
   // 云端/本地开关按任务覆盖桥接配置，与定时任务表单同名同义。
-  assert.match(page, /const \[bridgeChannel, setBridgeChannel\] = React\.useState\(''\)/u)
+  // 默认走云端：默认声音方案「自然讲解」用的是小米 MiMo 预置音色。
+  assert.match(page, /const \[bridgeChannel, setBridgeChannel\] = React\.useState\('cloud'\)/u)
+  assert.match(page, /const \[bridgeModel, setBridgeModel\] = React\.useState\('mimo-v2\.5-tts'\)/u)
+  assert.match(page, /const \[bridgeVoice, setBridgeVoice\] = React\.useState\('茉莉'\)/u)
+  assert.match(page, /const \[voiceSource, setVoiceSource\] = React\.useState\('builtin'\)/u)
   assert.match(page, /h\('option', \{ value: '' \}, '跟随桥接配置'\)/u)
   assert.match(page, /h\('option', \{ value: 'cloud' \}, '云端（小米 MiMo）'\)/u)
   assert.match(page, /h\('option', \{ value: 'local' \}, '本地（LongCat）'\)/u)
@@ -1195,7 +1207,8 @@ test('schedule form exposes a per-task voice preset that rides create, edit and 
   // library), reference audio and rate/volume, and edit mode rehydrates it
   // from the stored task. Defaults and rehydrate helpers live beside
   // emptyScheduleForm, outside the page component.
-  assert.match(source, /voiceSource: 'system', voiceReference: null, voiceRate: '1', voiceVolume: '1', bridgeVoice: '冰糖', libraryVoice: '', bridgeChannel: '', bridgeStyle: ''/u)
+  // 新建任务默认落在「自然讲解」方案上（茉莉 + 清晰沉稳 + 云端 MiMo）。
+  assert.match(source, /voiceSource: 'builtin', voiceReference: null, voiceRate: '1', voiceVolume: '1', bridgeVoice: '茉莉', libraryVoice: '', bridgeChannel: 'cloud', bridgeStyle: '清晰沉稳，适合知识讲解。', bridgeModel: 'mimo-v2\.5-tts', bridgeVoiceDesign: ''/u)
   assert.match(source, /voiceSource: voice\?\.voiceSource === 'upload' \? 'upload' : voice\?\.voiceSource === 'preset' \? \(presetIsBuiltin \? 'builtin' : 'library'\) : 'system'/u)
   assert.match(source, /bridgeChannel: voice\?\.bridge\?\.channel \|\| ''/u)
   assert.match(page, /voice: voicePayloadOf\(\)/u)
@@ -1465,4 +1478,192 @@ test('the pipeline board times out a dead connection instead of hanging forever'
   // 连接断了「重试读取」也没用，额外给刷新页面这个出口。
   assert.match(page, /onClick: \(\) => location\.reload\(\)/u)
   assert.ok(page.includes("}, '刷新页面')"), 'the reload escape hatch is labelled')
+})
+
+test('voice recipes collapse the three MiMo models into one pickable card list', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('const SV_MIMO_BUILTIN_VOICES =')
+  const end = source.indexOf('const IMAGE_PROVIDER_SHORT =', start)
+  assert.ok(start >= 0 && end > start, 'the voice recipe helpers must live together')
+  const scope = source.slice(start, end)
+  // The last expression of the script is its completion value, so the
+  // exported object comes back directly.
+  const api = vm.runInNewContext(`${scope}
+;({ SV_VOICE_RECIPES, voiceRecipePatch, voiceModelForSource, voiceRecipeIdOf, svDesignText, SV_MIMO_DESIGN_PRESETS, SV_MIMO_BUILTIN_VOICES })`, {})
+
+  const { SV_VOICE_RECIPES, voiceRecipePatch, voiceModelForSource, voiceRecipeIdOf, SV_MIMO_DESIGN_PRESETS, SV_MIMO_BUILTIN_VOICES } = api
+
+  // Every preset voice must exist in the MiMo builtin table, otherwise the
+  // bridge silently falls back to mimo_default and the card lies.
+  for (const recipe of SV_VOICE_RECIPES.filter((item) => item.kind === 'builtin')) {
+    assert.ok(SV_MIMO_BUILTIN_VOICES.includes(recipe.voice), `${recipe.id} names a voice the bridge does not have`)
+    assert.equal(recipe.model, 'mimo-v2.5-tts')
+  }
+  for (const recipe of SV_VOICE_RECIPES.filter((item) => item.kind === 'design')) {
+    assert.equal(recipe.model, 'mimo-v2.5-tts-voicedesign')
+    assert.ok(recipe.designPreset, `${recipe.id} must point at a design preset`)
+  }
+
+  // A builtin recipe writes the whole recipe in one shot: source, model,
+  // voice, style, rate, volume — plus a cloud channel, because MiMo's
+  // preset voices do not exist in the local LongCat branch.
+  const natural = SV_VOICE_RECIPES.find((item) => item.id === 'natural')
+  const patch = voiceRecipePatch(natural, SV_MIMO_DESIGN_PRESETS)
+  assert.equal(patch.voiceSource, 'builtin')
+  assert.equal(patch.bridgeModel, 'mimo-v2.5-tts')
+  assert.equal(patch.bridgeVoice, '茉莉')
+  assert.equal(patch.bridgeStyle, natural.style)
+  assert.equal(patch.bridgeChannel, 'cloud')
+  assert.equal(patch.rate, String(natural.rate))
+  assert.equal(patch.volume, String(natural.volume))
+
+  // A design recipe rides the system source with an explicit design model and
+  // the preset description; the voice name is irrelevant there.
+  const narrator = SV_VOICE_RECIPES.find((item) => item.id === 'narrator')
+  const designPatch = voiceRecipePatch(narrator, SV_MIMO_DESIGN_PRESETS)
+  assert.equal(designPatch.voiceSource, 'system')
+  assert.equal(designPatch.bridgeModel, 'mimo-v2.5-tts-voicedesign')
+  assert.equal(designPatch.bridgeVoiceDesign, SV_MIMO_DESIGN_PRESETS.find((item) => item.id === 'narrator-male').text)
+  assert.equal(designPatch.bridgeStyle, '')
+  assert.equal(designPatch.bridgeChannel, 'cloud')
+
+  // Custom means "reference audio": the clone model comes along by itself.
+  const customPatch = voiceRecipePatch(SV_VOICE_RECIPES.find((item) => item.id === 'custom'), SV_MIMO_DESIGN_PRESETS)
+  assert.equal(customPatch.voiceSource, 'upload')
+  assert.equal(customPatch.bridgeModel, 'mimo-v2.5-tts-voiceclone')
+
+  // The source alone decides the model — the user never picks a model by hand.
+  assert.equal(voiceModelForSource('builtin'), 'mimo-v2.5-tts')
+  assert.equal(voiceModelForSource('upload'), 'mimo-v2.5-tts-voiceclone')
+  assert.equal(voiceModelForSource('library'), 'mimo-v2.5-tts-voiceclone')
+
+  // The card the form shows as selected is the one the recipe describes.
+  assert.equal(voiceRecipeIdOf({ voiceSource: 'builtin', bridgeModel: 'mimo-v2.5-tts', bridgeVoice: '茉莉', bridgeStyle: natural.style, rate: String(natural.rate), volume: '1' }, SV_MIMO_DESIGN_PRESETS), 'natural')
+  assert.equal(voiceRecipeIdOf({ voiceSource: 'system', bridgeModel: 'mimo-v2.5-tts-voicedesign', bridgeVoice: '', bridgeVoiceDesign: SV_MIMO_DESIGN_PRESETS.find((item) => item.id === 'documentary').text, bridgeStyle: '', rate: '0.95', volume: '1' }, SV_MIMO_DESIGN_PRESETS), 'documentary')
+  // Anything hand-tuned reads back as custom instead of pretending to be a preset.
+  assert.equal(voiceRecipeIdOf({ voiceSource: 'builtin', bridgeModel: 'mimo-v2.5-tts', bridgeVoice: '茉莉', bridgeStyle: '改成别的语气', rate: '1', volume: '1' }, SV_MIMO_DESIGN_PRESETS), 'custom')
+})
+
+test('both voice pickers preview a recipe through the bridge voice test', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  // One shared picker component, used by both the audio workbench and the
+  // automation form, so a recipe means the same thing in both places.
+  assert.match(source, /function VoiceRecipePicker\(/u)
+  const pickerStart = source.indexOf('function VoiceRecipePicker(')
+  const pickerEnd = source.indexOf('\n    function VoiceLibraryPanel(', pickerStart)
+  const picker = source.slice(pickerStart, pickerEnd)
+  assert.match(picker, /onPreview\(key, previewOf\(recipe\)\)/u)
+  assert.match(picker, /className: 'sv-recipe-preview'/u)
+  // The player rides the card that was previewed, not every card at once.
+  assert.match(picker, /previewKey === key \? previewAudio\?\.audioUrl : null/u)
+  // A custom recipe has no preview payload: cloning needs a reference audio.
+  assert.match(picker, /复刻的声音来自参考音频，试听接口拿不到参考音频，所以自定义方案没有试听/u)
+  assert.match(picker, /if \(recipe\.kind === 'builtin'\) return \{ model: recipe\.model, voice: recipe\.voice, style: recipe\.style \};/u)
+  assert.match(picker, /if \(recipe\.kind === 'design'\) return \{ model: recipe\.model, voiceDesign: svDesignText\(recipe, state\.designPresets\) \};/u)
+
+  const audioStart = source.indexOf('function AudioCaptionsPageV2(')
+  const audioEnd = source.indexOf('\n    function VideoPreviewPageV2(', audioStart)
+  const audio = source.slice(audioStart, audioEnd)
+  assert.match(audio, /h\(VoiceRecipePicker, \{/u)
+  assert.match(audio, /await remoteStatic\('bridgeVoiceTest', payload\)/u)
+
+  const scheduleStart = source.indexOf('function ContentSchedulePage(')
+  const scheduleEnd = source.indexOf('\n    function ScheduleRunDetails(', scheduleStart)
+  const schedule = source.slice(scheduleStart, scheduleEnd)
+  assert.match(schedule, /h\(VoiceRecipePicker, \{/u)
+  assert.match(schedule, /await remoteStatic\('bridgeVoiceTest', payload\)/u)
+})
+
+// 文案口径统一：浏览器端 mediaErrorText 与服务端 providerFailure 是「两个消费面」，
+// 措辞不同是合理的；但「用户第一步做什么」的前半句必须逐字一致，否则一边改了
+// 另一边没跟上，测试立刻红。后半句允许各自补充（客户端止于「不消耗云端积分」，
+// 服务端可再补「配置地址见本机桥接页」）。反向断言：积分不足文案不得再提「百炼」。
+test('SciTiger 积分不足文案：两消费面前半句逐字一致且都不出现「百炼」', async () => {
+  const clientSource = await readFile(clientPath, 'utf8')
+  const hostSource = await readFile(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
+  const prefix = 'SciTiger 账户积分不足，请充值后重试；或在桥接配置中心把配音切到本地合成'
+  assert.ok(clientSource.includes(prefix), 'client.js mediaErrorText 前半句缺失或不一致')
+  assert.ok(hostSource.includes(prefix), 'spoken-video-media-host providerFailure 前半句缺失或不一致')
+  const clientMsg = clientSource.match(/SciTiger 账户积分不足[^\n]*?（不消耗云端积分[^\n]*?）/u)
+  const hostMsg = hostSource.match(/SciTiger 账户积分不足[^\n]*?（不消耗云端积分[^\n]*?）/u)
+  assert.ok(clientMsg && !clientMsg[0].includes('百炼'), 'client.js 积分不足文案不得出现「百炼」')
+  assert.ok(hostMsg && !hostMsg[0].includes('百炼'), 'spoken-video-media-host 积分不足文案不得出现「百炼」')
+})
+
+// 字幕进度：百炼实时 ASR 通路已下线，字幕现在统一走 scitiger/bridge 轮询。
+// 把 client.js 里的纯函数抽出来真正执行，验证死守卫已移除、文案不再误导为增量出字。
+async function loadSubtitleProgressHelper() {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function formatMediaClock(')
+  const end = source.indexOf('\n    function formatMediaBytes(', start)
+  assert.ok(start >= 0 && end > start, 'subtitle progress helpers must stay extractable')
+  const sandbox = {}
+  vm.runInNewContext(`${source.slice(start, end)}\n;globalThis.__h = { subtitleTaskProgress, formatMediaClock }`, sandbox)
+  const helpers = sandbox.__h
+  // 沙箱 realm 与原 realm 的 Array/Object 原型不同，deepEqual 会做引用比较；
+  // 统一用 JSON 结构比较，保持断言表达原意。
+  helpers.plain = (value) => JSON.parse(JSON.stringify(value))
+  return helpers
+}
+
+test('字幕运行中且能算出时长时给出预计进度，但不显示假精度百分比', async () => {
+  const helpers = await loadSubtitleProgressHelper()
+  const now = Date.parse('2026-10-29T09:00:12.000Z')
+  const startedAt = '2026-10-29T09:00:00.000Z'
+  const task = {
+    status: 'running',
+    result: { audio: { durationSeconds: 45 } },
+    subtitle: { status: 'running', input: { provider: 'scitiger' }, startedAt },
+  }
+  const out = helpers.plain(helpers.subtitleTaskProgress(task, now))
+  assert.equal(out.percent, null, '不显示按已耗时/音频时长推算的假精度百分比')
+  assert.ok(out.label.includes('字幕处理中'), '保留进度感文案')
+  assert.ok(out.label.includes('0:12 / 0:45'), '显示 已用 / 总时长')
+  assert.ok(out.label.includes('（预计）'), '标明是按音频时长推算的预计值，不是真实识别进度')
+})
+
+test('百炼下线后估算分支对 scitiger/bridge 都生效，且文案绝不暗示增量出字', async () => {
+  const helpers = await loadSubtitleProgressHelper()
+  const now = Date.parse('2026-10-29T09:00:30.000Z')
+  const startedAt = '2026-10-29T09:00:00.000Z'
+  for (const provider of ['scitiger', 'bridge']) {
+    const task = {
+      status: 'running',
+      result: { audio: { durationSeconds: 45 } },
+      subtitle: { status: 'running', input: { provider }, startedAt },
+    }
+    const out = helpers.plain(helpers.subtitleTaskProgress(task, now))
+    assert.equal(out.percent, null)
+    assert.ok(out.label.includes('字幕处理中'), `${provider} 也应显示预计进度`)
+    assert.ok(!out.label.includes('实时识别'), `${provider} 文案不得暗示增量出字`)
+  }
+})
+
+test('拿不到音频时长或开始时间时不编造进度，回退到中性文案', async () => {
+  const helpers = await loadSubtitleProgressHelper()
+  const now = Date.parse('2026-10-29T09:00:12.000Z')
+  const noDuration = {
+    status: 'running',
+    result: {},
+    subtitle: { status: 'running', input: { provider: 'scitiger' }, startedAt: '2026-10-29T09:00:00.000Z' },
+  }
+  const out = helpers.plain(helpers.subtitleTaskProgress(noDuration, now))
+  assert.equal(out.percent, null)
+  assert.ok(out.label.includes('字幕服务正在处理音频'), '无时长时回退到中性文案')
+  assert.ok(!out.label.includes('实时识别'))
+})
+
+test('subtitleTaskProgress 不得残留「百炼恒真」死守卫，也不得出现「实时识别」', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function subtitleTaskProgress(')
+  const end = source.indexOf('\n    function formatMediaBytes(', start)
+  assert.ok(start >= 0 && end > start, 'subtitleTaskProgress must remain present')
+  const fn = source.slice(start, end)
+  // 百炼实时 ASR 已删，provider 只会是 scitiger/bridge；
+  // 原来的 `provider !== 'bailian'` 恒为真，是死守卫，必须移除。
+  assert.doesNotMatch(fn, /provider\s*!==\s*'bailian'/u, '百炼下线后这条件恒真，必须删掉')
+  // 改法 (b)：保留进度感但去掉「实时识别」这种暗示增量出字的措辞。
+  assert.doesNotMatch(fn, /实时识别/u, '文案不得暗示增量出字（已无流式 ASR 通路）')
+  assert.match(fn, /字幕处理中 /u, '运行中且能算时长时应显示进度感文案')
+  assert.match(fn, /（预计）/u, '进度文案必须标明是预计值')
 })

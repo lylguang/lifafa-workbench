@@ -412,11 +412,67 @@ export function coverUploadPlan(coverBoxes) {
   ]
 }
 
-async function uploadCoverInDialog(page, coverPath) {
+/**
+ * 弹窗顶部若带「设置横封面 / 设置竖封面」切换标签，且当前停在横封面上，
+ * 就显式切到竖封面。
+ *
+ * 只在**同时看到两个标签**、且激活态确实是横封面时才切。认不出激活态、
+ * 只有单标签弹窗、点击异常——一律返回 false 按原逻辑直接上传：切换失败
+ * 绝不允许变成放弃上传的理由。
+ *
+ * 这与「靠标题区分通道」是两回事：通道由点哪个方块决定（实测点开竖封面方块，
+ * 弹窗标题仍是「设置横封面」），标题不能当判据；但弹窗里真出现了可切的标签
+ * 却不切，竖图就会落进横封面通道。
+ */
+export async function ensurePortraitTabIfSwitcherPresent(page) {
+  const state = await page.evaluate(() => {
+    const wanted = ['设置横封面', '设置竖封面']
+    const found = new Map()
+    for (const el of document.querySelectorAll('div,span,button,a,li')) {
+      const text = (el.innerText || el.textContent || '').trim().replace(/\s+/gu, '')
+      if (!wanted.includes(text)) continue
+      if (!el.offsetParent) continue
+      if (!found.has(text)) found.set(text, el)
+    }
+    const isActive = (el) => {
+      let node = el
+      for (let depth = 0; node && depth < 6; depth += 1) {
+        const cls = typeof node.className === 'string' ? node.className : ''
+        if (/active|selected|current/iu.test(cls)) return true
+        if (typeof node.getAttribute === 'function' && node.getAttribute('aria-selected') === 'true') return true
+        node = node.parentElement
+      }
+      return false
+    }
+    const portrait = found.get('设置竖封面')
+    const landscape = found.get('设置横封面')
+    // 只看到一个标签 = 没有切换器，按原样上传。
+    if (!portrait || !landscape) return { switchable: false }
+    const rect = portrait.getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0) return { switchable: false }
+    return {
+      switchable: true,
+      landscapeActive: isActive(landscape),
+      portraitActive: isActive(portrait),
+      x: rect.x + rect.width / 2,
+      y: rect.y + rect.height / 2,
+    }
+  }).catch(() => ({ switchable: false }))
+  // 认不出激活态就不切：宁可照旧上传，也不把切换失败当成上传失败。
+  if (!state.switchable || state.portraitActive || !state.landscapeActive) return false
+  await page.mouse.click(state.x, state.y).catch(() => {})
+  await page.waitForTimeout(1200)
+  return true
+}
+
+async function uploadCoverInDialog(page, coverPath, kind = null) {
   // 这里**不再切标签**：竖封面靠主页面上的第二个方块打开另一个弹窗，而那个弹窗
   // 一打开就已经是竖封面通道了。在弹窗内找「设置竖封面」标签是上一版的错误——
   // 实测那一版的弹窗只有「设置横封面」一个标签，找不到就等于白找，结果把横版图
   // 传了两遍、竖槽里装的其实是横图。
+  // 但只认「只有一个标签」这一种情形：弹窗里若同时挂着「设置横封面 / 设置竖封面」
+  // 两个标签且停在横封面上，竖图就会直接落进横封面通道。所以先按需切一次。
+  if (kind === 'portrait') await ensurePortraitTabIfSwitcherPresent(page)
   // 监听必须在点击之前：系统选择器一闪而过，顺序反了必然接不到。
   const chooserPromise = page.waitForEvent('filechooser', { timeout: 8000 }).catch(() => null)
   const point = await clickCoverUploadButton(page)
@@ -506,15 +562,16 @@ export function readCoverVerdict(pageText) {
 export function coverRatioWarning(width, height, kind) {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null
   const ratio = width / height
-  const want = kind === 'portrait' ? 3 / 4 : 4 / 3
-  // 容差取到 ±0.45 而不是严抠 4:3 —— 2026-10-11 真机实测：项目里的横封面是
-  // 1280x720（16:9 = 1.78），竖封面 1088x1440（0.76），平台都照收并在 4:3 的
-  // 缩略图框里裁切显示。所以「横封面4:3 / 竖封面3:4」是抖音**展示时的框**，
-  // 不是素材的硬要求；严抠反而会对正常素材误报。
-  const tolerance = 0.45
-  if (Math.abs(ratio - want) <= tolerance) return null
+  // 竖版 3:4；横版是 **16:9**（1920×1080 / 1280×720），不是 4:3。之前把横版 want 写成
+  // 4:3，导致所有标准 16:9 横封面（含 1280×720）都被误报「比例偏离」——其实它们
+  // 正是抖音要的横版封面。
+  const want = kind === 'portrait' ? 3 / 4 : 16 / 9
+  // 容差取**相对偏差 8%**，不用绝对差值：比例是「相对」才对，偏离多少取决于目标值本身。
+  // 换算成绝对区间：横版容许 1.635–1.920（16:9 ±8%），竖版容许 0.690–0.810（3:4 ±8%）。
+  const tolerance = 0.08
+  if (Math.abs(ratio - want) <= want * tolerance) return null
   const dir = ratio > want ? '过宽' : '过高'
-  return `${kind === 'portrait' ? '竖封面 3:4' : '横封面 4:3'}素材比例偏离：${width}×${height}（${ratio.toFixed(2)}）${dir}，抖音可能判「封面不任」`
+  return `${kind === 'portrait' ? '竖封面 3:4' : '横封面 16:9'}素材比例偏离：${width}×${height}（${ratio.toFixed(2)}）${dir}，抖音可能判「封面不任」`
 }
 
 /**
@@ -738,7 +795,7 @@ export const douyinAdapter = {
           await onStep('cover-missing', `${ratioLabel}弹窗未能打开（抖音页面结构可能已调整）`)
         } else {
           await onStep('cover-dialog', `${ratioLabel}弹窗已打开`)
-          covered = await uploadCoverInDialog(page, coverPath)
+          covered = await uploadCoverInDialog(page, coverPath, kind)
         }
         if (covered) {
           // 弹窗底部「完成」常是 div 假按钮，用精确文本匹配。
@@ -772,6 +829,33 @@ export const douyinAdapter = {
     }
     if (coverRejected.length) {
       await onStep('cover-reject-summary', `平台拒绝了以下封面：${coverRejected.join('；')}。建议重新生成封面，或在窗口中人工调整。`)
+    }
+    // 补传一次竖封面，让它成为**最后一次写入**。平台在横封面上传后会基于横封面
+    // 自动重算竖封面，把它压成裁坏的横图——这正是用户看到的「3:4 不匹配、字被
+    // 切掉」。补传失败不回滚已成功的封面，只是让竖封面保持上一次的合格状态。
+    const portraitPlan = plan.find(([kind]) => kind === 'portrait')
+    if (portraitPlan && coverPaths.portrait) {
+      const [, portraitLabel, portraitPoint] = portraitPlan
+      await onStep('cover-reupload', `补传${portraitLabel}，压过平台的自动重算`)
+      try {
+        const opened = await openCoverDialog(page, portraitPoint)
+        if (!opened) {
+          await onStep('cover-reupload-skipped', `${portraitLabel}弹窗未能打开，保留上一次的封面`)
+        } else if (await uploadCoverInDialog(page, coverPaths.portrait, 'portrait')) {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            const confirm = await firstMatch(page, ['text="完成"'])
+            if (!confirm) break
+            await confirm.click().catch(() => {})
+            await page.waitForTimeout(2500)
+          }
+          await onStep('cover-reupload-applied', `${portraitLabel}已补传`)
+        } else {
+          await onStep('cover-reupload-skipped', `${portraitLabel}补传未捕获到文件选择器，保留上一次的封面`)
+          await page.keyboard.press('Escape').catch(() => {})
+        }
+      } catch (error) {
+        await onStep('cover-reupload-error', `${portraitLabel}补传异常（不影响已设置的封面）：${error instanceof Error ? error.message : String(error)}`)
+      }
     }
 
     /**

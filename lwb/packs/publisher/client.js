@@ -153,14 +153,14 @@ window.__ModuleLoader__.load({
       .pb-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
       .pb-pill { display:inline-flex; min-height:21px; flex:none; align-items:center; padding:0 7px; border-radius:5px; color:var(--lwb-blue); background:var(--lwb-blue-soft); font-size:var(--lwb-text-xs,12px); font-weight:700; white-space:nowrap; }
       .pb-pill[data-tone="green"] { color:var(--lwb-green); background:var(--lwb-green-soft); }
-      .pb-pill[data-tone="orange"] { color:#7a5b17; background:#fff4dd; }
-      .pb-pill[data-tone="red"] { color:#a94343; background:#ffecec; }
+      .pb-pill[data-tone="orange"] { color:var(--lwb-warm); background:var(--lwb-warm-soft); }
+      .pb-pill[data-tone="red"] { color:var(--lwb-danger); background:var(--lwb-danger-soft); }
       .pb-pill[data-tone="muted"] { color:var(--lwb-muted); background:var(--lwb-line); }
 
       /* --- run banner: 2026-10-13 用户反馈原来那条「顶部通栏」太占版面，
          改成右下角悬浮小卡片，步骤条默认折叠成「进度 5/7」。 --- */
       .pb-run { position:fixed; right:18px; bottom:18px; z-index:30; display:grid; gap:8px; width:min(340px,calc(100vw - 36px)); margin:0; padding:11px 13px; border:1px solid var(--lwb-line); border-left:3px solid var(--lwb-blue); border-radius:10px; background:var(--lwb-surface); box-shadow:0 10px 30px rgba(16,24,40,.18); }
-      .pb-run[data-state="failed"] { border-left-color:#d05a5a; }
+      .pb-run[data-state="failed"] { border-left-color:var(--lwb-danger); }
       .pb-run[data-state="succeeded"] { border-left-color:var(--lwb-green); }
       .pb-run[data-state="cancelled"] { border-left-color:var(--lwb-muted); }
       .pb-run-head { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:9px; }
@@ -173,11 +173,13 @@ window.__ModuleLoader__.load({
          （2026-10-13 实测）。grid + min-width:0 才能真正触发省略号。 */
       .pb-run-title > span:first-child { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; line-height:1.35; }
       .pb-run-sub { display:flex; flex-wrap:wrap; gap:6px; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); font-weight:400; }
-      .pb-run-close { border:0; padding:0 6px; color:var(--lwb-muted); background:transparent; font:inherit; font-size:17px; line-height:1; cursor:pointer; }
-      .pb-run-close:hover { color:var(--lwb-ink); }
+      .pb-run-close { border:0; padding:0 6px; color:var(--lwb-muted); background:transparent; font:inherit; font-size:17px; line-height:1; cursor:pointer; border-radius:5px; transition:color .15s ease,background .15s ease; }
+      .pb-run-close:hover { color:var(--lwb-ink); background:var(--lwb-line); }
+      .pb-run-close:focus-visible { outline:0; box-shadow:var(--lwb-focus-ring); }
       /* 步骤条：折叠时只留一个「进度 n/m」按钮，展开才铺开所有步骤。 */
       .pb-steps-toggle { display:inline-flex; align-items:center; gap:6px; width:fit-content; padding:3px 9px; border:1px solid var(--lwb-line); border-radius:20px; color:var(--lwb-muted); background:var(--lwb-surface); font:inherit; font-size:var(--lwb-text-xs,12px); cursor:pointer; }
       .pb-steps-toggle:hover { color:var(--lwb-ink); border-color:var(--lwb-blue); }
+      .pb-steps-toggle:focus-visible { outline:0; border-color:var(--lwb-blue); box-shadow:var(--lwb-focus-ring); }
       .pb-steps { display:flex; flex-wrap:wrap; gap:6px; margin:0; padding:0; list-style:none; max-height:148px; overflow:auto; }
       .pb-steps li { display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border:1px solid var(--lwb-line); border-radius:20px; color:var(--lwb-muted); background:var(--lwb-surface); font-size:var(--lwb-text-xs,12px); }
       .pb-steps li::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--lwb-line); }
@@ -185,18 +187,18 @@ window.__ModuleLoader__.load({
       .pb-steps li[data-state="done"]::before { background:var(--lwb-green); }
       .pb-steps li[data-state="current"] { color:var(--lwb-blue); border-color:var(--lwb-blue); background:var(--lwb-blue-soft); font-weight:700; }
       .pb-steps li[data-state="current"]::before { background:var(--lwb-blue); animation:pb-pulse 1.3s ease-in-out infinite; }
-      .pb-steps li[data-state="failed"] { color:#a94343; border-color:#e6b5b5; background:#ffecec; font-weight:700; }
-      .pb-steps li[data-state="failed"]::before { background:#a94343; }
+      .pb-steps li[data-state="failed"] { color:var(--lwb-danger); border-color:var(--lwb-danger-line); background:var(--lwb-danger-soft); font-weight:700; }
+      .pb-steps li[data-state="failed"]::before { background:var(--lwb-danger); }
       .pb-run-msg { margin:0; padding:9px 11px; border-radius:7px; font-size:var(--lwb-text-sm,13px); line-height:1.55; white-space:pre-wrap; }
       .pb-run-msg[data-tone="green"] { color:var(--lwb-green); background:var(--lwb-green-soft); }
-      .pb-run-msg[data-tone="red"] { color:#994646; background:#fff7f7; }
+      .pb-run-msg[data-tone="red"] { color:var(--lwb-danger); background:var(--lwb-danger-soft); }
       .pb-run-msg[data-tone="muted"] { color:var(--lwb-muted); background:var(--lwb-line); }
       @keyframes pb-pulse { 0%,100% { opacity:1 } 50% { opacity:.25 } }
       @media (prefers-reduced-motion: reduce) { .pb-steps li[data-state="current"]::before { animation:none; } }
-      .pb-error, .pb-note { margin:0; padding:10px 11px; border:1px solid #e6b5b5; border-radius:7px; color:#994646; background:#fff7f7; font-size:var(--lwb-text-sm,13px); line-height:1.55; white-space:pre-wrap; }
-      .pb-note { border-color:#bad5ed; color:#486277; background:#f7fbff; }
-      .pb-warn { margin:0; padding:10px 11px; border:1px solid #e2c58a; border-radius:7px; color:#7a5b17; background:#fffaf0; font-size:var(--lwb-text-sm,13px); line-height:1.55; }
-      .pb-empty { padding:34px 12px; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); text-align:center; border:1px dashed var(--lwb-line); border-radius:9px; }
+      .pb-error, .pb-note { margin:0; padding:10px 11px; border:1px solid var(--lwb-danger-line); border-radius:var(--lwb-radius-md,9px); color:var(--lwb-danger); background:var(--lwb-danger-soft); font-size:var(--lwb-text-sm,13px); line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }
+      .pb-note { border-color:#bad5ed; color:#3d5a72; background:#f7fbff; }
+      .pb-warn { margin:0; padding:10px 11px; border:1px solid var(--lwb-warm-soft); border-radius:var(--lwb-radius-md,9px); color:var(--lwb-warm); background:var(--lwb-warm-soft); font-size:var(--lwb-text-sm,13px); line-height:1.6; overflow-wrap:anywhere; }
+      .pb-empty { display:grid; gap:var(--lwb-space-2,8px); justify-items:center; padding:var(--lwb-space-6,24px) var(--lwb-space-3,12px); color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); line-height:1.7; text-align:center; border:1px dashed var(--lwb-line); border-radius:var(--lwb-radius-md,9px); }
       .pb-list { display:grid; gap:8px; }
       .pb-card-head { display:flex; min-width:0; align-items:flex-start; justify-content:space-between; gap:9px; }
       .pb-card-title { overflow:hidden; font-size:var(--lwb-text-md,15px); font-weight:700; text-overflow:ellipsis; white-space:nowrap; }
@@ -213,7 +215,7 @@ window.__ModuleLoader__.load({
       .pb-backdrop { position:fixed; z-index:40; inset:0; display:grid; place-items:center; border:0; background:rgba(24,39,52,.35); }
       .pb-modal { display:grid; gap:10px; width:min(520px,calc(100vw - 48px)); max-height:calc(100vh - 80px); overflow:auto; padding:18px; border:1px solid var(--lwb-line); border-radius:11px; background:var(--lwb-surface); box-shadow:0 18px 48px rgba(23,47,70,.22); }
       .pb-modal h3 { margin:0; font-size:var(--lwb-text-md,15px); } .pb-modal p { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); line-height:1.6; }
-      .pb-danger { border:1px solid #d98c8c; border-radius:6px; padding:0 14px; height:34px; color:#a94343; background:#fff1f1; cursor:pointer; font:inherit; font-size:var(--lwb-text-base,14px); font-weight:700; }
+      .pb-danger { min-height:var(--lwb-control-h,36px); border:1px solid var(--lwb-danger-line); border-radius:var(--lwb-radius-sm,6px); padding:0 var(--lwb-space-4,16px); color:var(--lwb-danger); background:var(--lwb-danger-soft); cursor:pointer; font:inherit; font-size:var(--lwb-text-base,14px); font-weight:700; transition:border-color .15s ease,background .15s ease,box-shadow .15s ease; } .pb-danger:hover:not(:disabled) { border-color:#c98d8d; color:#8f3330; background:#fdeceb; } .pb-danger:disabled { opacity:.55; cursor:default; } .pb-danger:focus-visible { outline:0; border-color:var(--lwb-danger); box-shadow:var(--lwb-focus-ring); }
       .pb-shot { width:100%; border:1px solid var(--lwb-line); border-radius:7px; background:#fff; }
       .pb-mono { font-family:ui-monospace,Consolas,monospace; font-size:12px; }
       body[data-ds-dark-theme] .pb-error { border-color:#7a4444; color:#e8b9b9; background:#3a2323; }
@@ -225,7 +227,8 @@ window.__ModuleLoader__.load({
       body[data-ds-dark-theme] .pb-run-msg[data-tone="red"] { color:#e8b9b9; background:#3a2323; }
       body[data-ds-dark-theme] .pb-pill[data-tone="orange"] { color:#e8d9a9; background:#332b1b; }
       body[data-ds-dark-theme] .pb-pill[data-tone="red"] { color:#e8b9b9; background:#3a2323; }
-      body[data-ds-dark-theme] .pb-danger { border-color:#7a4444; color:#e8b9b9; background:#3a2323; }
+      body[data-ds-dark-theme] .pb-danger { border-color:#7a4444; color:#e8b9b9; background:#3a2323; } body[data-ds-dark-theme] .pb-danger:hover:not(:disabled) { border-color:#a35b5b; color:#ffd0d0; background:#542f31; } body[data-ds-dark-theme] .pb-steps li[data-state="failed"]::before { background:var(--lwb-danger); }
+      @media (max-width:390px) { .pb-form-grid { grid-template-columns:1fr; } .pb-card, .pb-form { padding:var(--lwb-space-3); } .pb-account { grid-template-columns:1fr; } .pb-run { right:10px; left:10px; width:auto; } .pb-modal { width:min(520px,calc(100vw - 24px)); padding:var(--lwb-space-4); } .pb-shelf { grid-template-columns:1fr; } }
       body[data-ds-dark-theme] .pb-shot { background:#111; }
     `;
 
@@ -248,8 +251,32 @@ window.__ModuleLoader__.load({
       return response.value;
     }
 
+    /**
+     * 实时计时：跑着就每秒走，结束定格成最终用时。拿不到起始时间就什么都不显示——
+     * 宁可没有计时，也不编一个看着准的数。
+     */
+    function LiveTimer({ startedAt, finishedAt, prefix = '' }) {
+      const start = React.useMemo(() => (typeof startedAt === 'string' ? Date.parse(startedAt) : Number(startedAt)) || null, [startedAt]);
+      const end = React.useMemo(() => (finishedAt ? (typeof finishedAt === 'string' ? Date.parse(finishedAt) : Number(finishedAt)) || null : null), [finishedAt]);
+      const [now, setNow] = React.useState(() => Date.now());
+      React.useEffect(() => {
+        if (!start || end) return undefined;
+        const timer = window.setInterval(() => setNow(Date.now()), 1000);
+        return () => window.clearInterval(timer);
+      }, [start, end]);
+      if (!start) return null;
+      const total = Math.max(0, Math.round(((end || now) - start) / 1000));
+      const text = total >= 60 ? `${Math.floor(total / 60)} 分 ${String(total % 60).padStart(2, '0')} 秒` : `${total} 秒`;
+      return h('span', { className: 'lwb-timer' }, `${prefix}${text}`);
+    }
+
     function ErrorNotice({ error }) {
-      return error ? h('p', { className: 'pb-error' }, String(error.message || error)) : null;
+      if (!error) return null;
+      return h('div', { className: 'lwb-callout', 'data-tone': 'danger', role: 'alert' },
+        h('p', { className: 'lwb-callout-title' }, '操作失败'),
+        h('p', null, String(error.message || error)),
+        h('ul', { className: 'lwb-callout-next' }, h('li', null, '重试一次；反复失败就把下面的原因发到团队群，或到「记录」页看截图证据。')),
+      );
     }
 
     /* ------------------------------- run banner ------------------------------- */
@@ -287,12 +314,26 @@ window.__ModuleLoader__.load({
         if (stalled) return '视频已上传并填好资料，正停在发布前。请在浏览器窗口里点「发表」完成最后一步，或在「记录」页取消。';
         return `正在${PHASE_LABEL[phase] || phase}…上传大文件可能需要几分钟，请不要关闭工作台。`;
       };
+      // 失败要能直接指路：原因 + 下一步，两行都在横幅里，不用再去翻记录页才知道发生了什么。
+      const nextSteps = () => {
+        if (failed) return [
+          newest.error || '原因未记录，请到「记录」页看这一轮的截图与日志。',
+          '点「查看记录」打开这一轮，先看截图卡在哪一步；修好后重新从「发布」页发起。',
+        ];
+        if (cancel) return ['任务已取消，视频没有发布出去。需要发布就重新从「发布」页发起。'];
+        return [];
+      };
 
       return h('div', { className: 'pb-run', 'data-state': newest.status, role: 'status', 'aria-live': 'polite' },
         h('div', { className: 'pb-run-head' },
           h('div', { className: 'pb-run-title' },
             h('span', null, newest.projectTitle || '发布任务'),
             h('span', { className: 'pb-run-sub' }, `${newest.platformLabel || newest.platform} · ${newest.accountLabel || ''}`),
+            // 进行中：呼吸点 + 走动计时，让「在跑」和「卡住」看得出来的区别。
+            !terminal(newest) ? h('span', { className: 'pb-run-sub lwb-live' },
+              h('span', { className: 'lwb-live-dot' }),
+              h(LiveTimer, { startedAt: newest.createdAt, finishedAt: newest.updatedAt }),
+            ) : null,
             h(Pill, { tone: JOB_TONE[newest.status] || 'muted' }, JOB_LABEL[newest.status] || newest.status),
           ),
           h('div', { className: 'pb-actions' },
@@ -356,6 +397,8 @@ window.__ModuleLoader__.load({
           );
         })(),
         h('p', { className: 'pb-run-msg', 'data-tone': ok ? 'green' : (failed || cancel) ? 'red' : 'muted' }, message()),
+        // 失败 / 取消：把「下一步」直接列在横幅里，不要再让人猜。
+        nextSteps().length ? h('ul', { className: 'lwb-callout-next' }, nextSteps().map((item, index) => h('li', { key: index }, item))) : null,
       );
     }
 
@@ -413,8 +456,13 @@ window.__ModuleLoader__.load({
       }, [reload, intervalMs]);
       return { jobs, error, reload };
     }
-    function EmptyState({ text }) {
-      return h('div', { className: 'pb-empty' }, text);
+    /** 空态：说清缺什么、接下来点哪里，有主操作就直接给按钮。 */
+    function EmptyState({ text, title, actions }) {
+      return h('div', { className: 'pb-empty' },
+        title ? h('p', { className: 'lwb-empty-title' }, title) : null,
+        text ? h('p', null, text) : null,
+        actions ? h('div', { className: 'lwb-empty-actions' }, actions) : null,
+      );
     }
     function Pill({ tone = 'muted', children }) {
       return h('span', { className: 'pb-pill', 'data-tone': tone }, children);
@@ -494,15 +542,22 @@ window.__ModuleLoader__.load({
         h(ErrorNotice, { error: error }),
         notice ? h('p', { className: 'pb-note' }, notice) : null,
 
-        browser && !browser.ready ? h('p', { className: 'pb-warn' },
-          '浏览器自动化尚未就绪：',
-          !browser.playwright ? '缺少 playwright-core 依赖，请在根目录运行「npm run publisher:install」。' : '',
-          !browser.executable ? '未找到 Chrome 或 Edge，请安装 Chrome 或设置 LWB_PUBLISHER_CHROME。' : ''
+        // 渲染浏览器没就绪时，必须直接给出下一步命令——这是用户唯一能自己修的一项。
+        browser && !browser.ready ? h('div', { className: 'lwb-callout', 'data-tone': 'warning', role: 'alert' },
+          h('p', { className: 'lwb-callout-title' }, '浏览器自动化还没就绪，现在不能自动发布'),
+          h('p', null, [
+            !browser.playwright ? '缺少 playwright-core 依赖。' : '',
+            !browser.executable ? '本机没找到 Chrome 或 Edge。' : '',
+          ].filter(Boolean).join('')),
+          h('ul', { className: 'lwb-callout-next' },
+            !browser.playwright ? h('li', null, '在仓库根目录运行 ', h('code', null, 'npm run publisher:install'), '，装完刷新本页。') : null,
+            !browser.executable ? h('li', null, '安装 Chrome 或 Edge；已经装了就在启动环境里设 ', h('code', null, 'LWB_PUBLISHER_CHROME'), ' 指向它的可执行文件，然后重启工作台。') : null,
+          ),
         ) : null,
 
-        browser && browser.ready ? h('p', { className: 'pb-note' },
-          `浏览器就绪（Chrome：${String(browser.executable).split(/[\\\\/]/u).pop()}）`,
-          browser.openSessions ? ` · 当前打开 ${browser.openSessions} 个会话` : ''
+        browser && browser.ready ? h('div', { className: 'lwb-callout', 'data-tone': 'success' },
+          h('p', { className: 'lwb-callout-title' }, '浏览器自动化已就绪'),
+          h('p', null, `Chrome：${String(browser.executable).split(/[\\\\/]/u).pop()}${browser.openSessions ? ` · 当前打开 ${browser.openSessions} 个会话` : ''}`),
         ) : null,
 
         h('div', { className: 'pb-section' },

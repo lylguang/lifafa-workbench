@@ -88,7 +88,6 @@ if not defined LWB_REMOTION_HEADLESS_SHELL set "LWB_REMOTION_BROWSER_EXECUTABLE=
 rem Let the launcher pick the scratch drive itself when it has not been told.
 set "LWB_SCRATCH_ROOT=%LWB_SCRATCH_ROOT%"
 set "LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL=http://127.0.0.1:8199"
-set "LWB_SPOKEN_VIDEO_BAILIAN_IMAGE_BASE_URL=http://127.0.0.1:8199"
 rem Extra args (e.g. --trusted-host <domain> for tunnel access) pass through to the harness CLI.
 rem
 rem The harness prints an authenticated URL (http://127.0.0.1:4173/?token=...) that

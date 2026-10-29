@@ -19,7 +19,7 @@ if (!spokenVideoWorkspace) {
     projectsStore: projects,
     background: (work) => work,
     credentials: { describe: async () => ({ configured: false }) },
-    connectionSettings: { get: () => ({ provider: 'bailian', model: '' }) },
+    connectionSettings: { get: () => ({ provider: 'scitiger', model: '' }) },
   })
   const store = new PublisherStore({ workspacePath: join(spokenVideoWorkspace, '..', 'publisher-probe') })
   const host = new PublisherHost({

@@ -13,16 +13,19 @@ import { buildVideoCreatorContinuationPrompt, VIDEO_REVIEW_SCHEMA } from './spok
 
 export const inject = ['lwbPackRegistry', 'lwbPackServices', 'subagents', 'tools', 'settings']
 
+// provider 仍允许旧词表（bailian/legacy）出现，是为了让已存盘的旧连接设置还能
+// 解析通过；真正读取时由 foldLegacyProvider 折到 scitiger。新写盘与 UI 只暴露 scitiger。
+// bailianReferenceVoices 随百炼直连下线一并移除，旧设置里若残留该字段会被忽略。
 const MediaConnectionSettings = z.object({
-  provider: z.union(['bailian', 'scitiger']).default('bailian'),
-  bailianReferenceVoices: z.any().default({}),
+  provider: z.union(['bailian', 'legacy', 'scitiger']).default('scitiger'),
 })
 
 // `enabled` is retained only so existing settings files remain readable. Cover
 // generation availability is derived from the selected provider's credential.
 const PublishConnectionSettings = z.object({
   enabled: z.boolean().default(false),
-  provider: z.union(['bailian', 'scitiger', 'custom']).default('bailian'),
+  // 旧设置里可能还存着 provider: 'bailian'，保留在联合里只为解析通过，读取时折到 scitiger。
+  provider: z.union(['bailian', 'scitiger', 'custom']).default('scitiger'),
   model: z.string().default(''),
   // 自定义云端生图的服务描述。只在 provider === 'custom' 时有意义，随任务一起
   // 冻结进 imageProvider，让已在跑的那一轮不会因为中途改配置而换服务。

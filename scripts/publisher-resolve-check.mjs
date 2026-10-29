@@ -21,7 +21,7 @@ if (!workspace) {
     projectsStore: projects,
     background: (work) => work,
     credentials: { describe: async () => ({ configured: false }) },
-    connectionSettings: { get: () => ({ provider: 'bailian', model: '' }) },
+    connectionSettings: { get: () => ({ provider: 'scitiger', model: '' }) },
   })
   const store = new PublisherStore({ workspacePath: join(workspace, '..', 'publisher-probe') })
   const host = new PublisherHost({

@@ -246,7 +246,22 @@ if (-not (Test-Alive 'http://127.0.0.1:4173/')) {
   }
   elseif (Test-Path -LiteralPath $startWorkbench) {
     Write-Log '工作台(4173)不在线，正在拉起'
-    Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'start', '/min', 'cmd', '/c', $startWorkbench -WindowStyle Hidden
+    # 本任务是 S4U（非交互）类型，直接 Start-Process 会把工作台开进 session 0：
+    # HTTP 正常、定时任务照跑，但发布自动化弹出的 Chrome 窗口开在没人看得见的
+    # 会话里（2026-10-20 实测：任务停在「等待确认」，用户却等不到窗口）。
+    # 走 LWBWorkbenchNow 计划任务拉起——它是 Interactive 类型，会落在当前
+    # 登录用户的桌面会话；用户未登录时它进不了桌面，由上面的告警兜底提示。
+    $relaunch = $false
+    try {
+      Start-ScheduledTask -TaskName 'LWBWorkbenchNow' -ErrorAction Stop
+      $relaunch = $true
+      Write-Log '已通过 LWBWorkbenchNow 计划任务请求拉起（Interactive，落在桌面会话）'
+    } catch {
+      Write-Log ('LWBWorkbenchNow 拉起失败，回退为直接启动：' + $_.Exception.Message)
+    }
+    if (-not $relaunch) {
+      Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'start', '/min', 'cmd', '/c', $startWorkbench -WindowStyle Hidden
+    }
     # 拉起后确认一次，失败就写一条告警让 lwb-alert 播报出来。
     # 此前工作台分支是「拉完就走」，工作台起不来时完全静默（桥接分支至少有 5 秒等待）。
     Start-Sleep -Seconds 15

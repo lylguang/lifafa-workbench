@@ -4,7 +4,7 @@
 // 缺哪张、存到哪）在 media host；这里只管提示词组装与桥接调用。
 //
 // 生图走本机媒体桥接（默认 http://127.0.0.1:8199，Qwen-Image 文生图）。
-// 桥接接口与云端 DashScope 同形状，方便将来切换云端；negative_prompt/seed
+// 桥接接口与云端多模态生成服务同形状，方便将来切换云端；negative_prompt/seed
 // 是本机桥接的扩展参数。
 //
 // 实测要点（2026-10-01）：Qwen-Image 按下面的规范前缀能稳定出「极简手绘线稿 +
@@ -154,7 +154,15 @@ export async function generateLineArtImage({ baseUrl = DEFAULT_BRIDGE_URL, visua
     body: JSON.stringify(body),
     signal,
   })
-  if (!response.ok) throw new Error(`生图服务返回 ${response.status}。`)
+  if (!response.ok) {
+    if (response.status === 404) {
+      throw new Error('本机媒体桥接没有生图接口：多半是机器上还跑着旧版桥接进程。请关掉旧的桥接窗口（或重启机器让保活脚本接管），用「启动工作台.cmd」重新拉起媒体桥接后重试；若仍复现，请反馈开发者检查 media-bridge/bridge.mjs 是否完整。')
+    }
+    if (response.status === 503 || response.status === 502) {
+      throw new Error(`生图服务暂时不可用（HTTP ${response.status}），生图引擎可能正在启动。请稍等半分钟重试；若持续失败，请检查桥接配置中心的「封面生图引擎」状态。`)
+    }
+    throw new Error(`生图服务返回 ${response.status}。`)
+  }
   const created = await response.json()
   const taskId = created?.output?.task_id
   if (!taskId) throw new Error('生图服务没有返回任务标识。')

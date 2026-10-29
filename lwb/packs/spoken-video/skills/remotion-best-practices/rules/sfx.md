@@ -5,26 +5,37 @@ metadata:
   tags: sfx, sound, effect, audio
 ---
 
-To include a sound effect, use the `<Audio>` tag:
+To include a sound effect, use the `<Audio>` tag with `staticFile()`:
 
 ```tsx
-import { Audio } from "@remotion/sfx";
+import { Audio, staticFile } from "remotion";
+import { Sequence } from "remotion";
 
-<Audio src={"https://remotion.media/whoosh.wav"} />;
+<Sequence from={frame} durationInFrames={24} layout="none" premountFor={30}>
+  <Audio src={staticFile("sfx/whoosh.wav")} volume={0.35} />
+</Sequence>
 ```
 
-The following sound effects are available:
+The following sound effects are pre-staged in `public/sfx/` (check `task.json.sfx.files` for the actual list):
 
-- `https://remotion.media/whoosh.wav`
-- `https://remotion.media/whip.wav`
-- `https://remotion.media/page-turn.wav`
-- `https://remotion.media/switch.wav`
-- `https://remotion.media/mouse-click.wav`
-- `https://remotion.media/shutter-modern.wav`
-- `https://remotion.media/shutter-old.wav`
-- `https://remotion.media/ding.wav`
-- `https://remotion.media/bruh.wav`
-- `https://remotion.media/vine-boom.wav`
-- `https://remotion.media/windows-xp-error.wav`
+| File | Category | Use case |
+|---|---|---|
+| whoosh.wav | transition | Scene transitions |
+| swoosh-soft.wav | transition | Soft scene transitions |
+| page-turn.wav | transition | Page/section turns |
+| whip.wav | entrance | Fast element entry |
+| pop.wav | entrance | Text/card pop-in |
+| ding.wav | emphasis | Key point highlight |
+| bell.wav | emphasis | Notification/chime |
+| riser.wav | emphasis | Rising tension before reveal |
+| impact.wav | emphasis | Heavy landing/impact |
+| switch.wav | ui | Toggle/interface switch |
+| click.wav | ui | Click confirmation |
+| typing.wav | text | Typing animation |
 
-For more sound effects, search the internet. A good resource is https://github.com/kapishdima/soundcn/tree/main/assets.
+Rules:
+- Every sound effect must correspond to a visible motion event.
+- 1–2 effects per scene; scene transitions always get a transition sound.
+- Adjacent scenes should not repeat the same effect for the same category.
+- Volume 0.3–0.4; never stack multiple effects on the same frame.
+- If `task.json.sfx.availableCount` is 0, do not invent sound effects and do not import external audio.

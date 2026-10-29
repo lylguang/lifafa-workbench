@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -171,7 +172,7 @@ test('parseScheduleRequest normalizes defaults and clamps to the topic contract'
 test('parseScheduleRequest rejects unknown depths and validates voice through the media normalizer', () => {
   const parsed = parseScheduleRequest({
     name: '带音色', days: [1], time: '09:00', depth: 'video',
-    production: { orientation: 'landscape', voice: { provider: 'bailian', voiceSource: 'preset', voiceId: 'Cherry', rate: 1.2, volume: 1, pitch: 0 } },
+    production: { orientation: 'landscape', voice: { provider: 'scitiger', voiceSource: 'preset', voiceId: 'Cherry', rate: 1.2, volume: 1, pitch: 0 } },
   })
   assert.equal(parsed.production.orientation, 'landscape')
   assert.equal(parsed.production.voice.voiceId, 'Cherry')
@@ -179,7 +180,7 @@ test('parseScheduleRequest rejects unknown depths and validates voice through th
   // Reusing the media normalizer means an invalid voice cannot be stored.
   assert.throws(() => parseScheduleRequest({
     name: '坏音色', days: [1], time: '09:00', depth: 'video',
-    production: { voice: { provider: 'bailian', voiceSource: 'upload' } },
+    production: { voice: { provider: 'scitiger', voiceSource: 'upload' } },
   }), /音色设置无效/u)
   assert.throws(() => parseScheduleRequest({ name: '坏方向', days: [1], time: '09:00', depth: 'topic', production: { orientation: 'square' } }), /portrait 或 landscape/u)
 })
@@ -246,6 +247,19 @@ test('scheduleFile disables a task whose account was hard deleted rather than fa
   const result = scheduleFile({ schemaVersion: SCHEDULE_SCHEMA, schedules: [record], runs: [] }, { validSourceIds: new Set(['baidu']), validAccountIds: new Set() })
   assert.equal(result.data.schedules[0].enabled, false)
   assert.match(result.data.schedules[0].disabledReason, /账号定位/u)
+})
+
+test('scheduleFile still loads tasks whose voice carries the retired bailian provider', () => {
+  // 2026-10 渠道收敛前保存的任务，voice.provider 存的是 bailian。重新用新词表
+  // 校验会抛「音色设置无效：生成方式不受支持」，把整个文件判死、内容安排页
+  // 全部不可用。旧名字必须折叠放行，而不是要求用户重建任务。
+  const voice = { provider: 'bailian', voiceSource: 'preset', voiceId: 'voice-mul6jh28', voiceName: 'voice-mul6jh28', referenceAudio: null, outputFormat: null, rate: 1, volume: 1, pitch: 0, bridge: { channel: 'cloud', style: '亲切自然。' } }
+  const record = { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', name: '晚间自动出片', enabled: true, accountId: null, days: [1], time: '21:00', angle: null, sources: { sourceIds: ['baidu'], platforms: [], excludeSignalIds: [] }, depth: 'packaging', perRunLimit: 1, production: { voice }, publish: null, disabledReason: null, createdAt: at('2026-10-14'), updatedAt: at('2026-10-14'), lastRunAt: null }
+  const result = scheduleFile({ schemaVersion: SCHEDULE_SCHEMA, schedules: [record], runs: [] }, { validSourceIds: new Set(['baidu']), validAccountIds: new Set() })
+  const loaded = result.data.schedules[0]
+  assert.equal(loaded.production.voice.provider, 'scitiger')
+  assert.equal(loaded.production.voice.voiceId, 'voice-mul6jh28')
+  assert.equal(loaded.production.voice.bridge.channel, 'cloud')
 })
 
 test('scheduleFile drops one corrupt run but keeps the rest of the file readable', () => {
@@ -359,7 +373,7 @@ function fakeHosts({ depth = 'packaging', perRunLimit = 1, failStep = null, neve
   }
 
   const media = {
-    async status() { return { ttsConfigured: true, connection: { provider: 'bailian', providers: { bailian: { configured: true, source: 'user', writable: true } } }, renderers: { remotion: true, 'local-ffmpeg': true }, providers: { legacy: { configured: false } } } },
+    async status() { return { ttsConfigured: true, connection: { provider: 'scitiger', providers: { scitiger: { configured: true, source: 'user', writable: true } } }, renderers: { remotion: true, 'local-ffmpeg': true }, providers: { bridge: { configured: false } } } },
     async startVoiceover(currentAgent, request) { record('startVoiceover', { request }); return { id: `voiceover:${request.projectId}` } },
     async startSubtitles(currentAgent, request) { record('startSubtitles', { request }); return { id: `subtitles:${request.projectId}` } },
     async stageScheduleVoiceReference(currentAgent, request) {
@@ -373,7 +387,7 @@ function fakeHosts({ depth = 'packaging', perRunLimit = 1, failStep = null, neve
   }
 
   const publish = {
-    async status() { return { configured: true, enabled: true, provider: 'bailian' } },
+    async status() { return { configured: true, enabled: true, provider: 'scitiger' } },
     async startPackaging(currentAgent, request) { record('startPackaging', { request }); return { id: `packaging:${request.projectId}` } },
     async task(currentAgent, { taskId }) {
       const done = neverDone === 'packaging' ? false : settle(taskId, 'packaging')
@@ -389,7 +403,7 @@ function fakeHosts({ depth = 'packaging', perRunLimit = 1, failStep = null, neve
       return {
         id: taskId, status: done ? failed ? 'failed' : 'succeeded' : 'running', phase: done ? failed ? 'failed' : 'ready' : 'agent',
         error: failed ? '发布资料失败：测试' : null,
-        imageProvider: { provider: 'bailian' }, coverErrors: {},
+        imageProvider: { provider: 'scitiger' }, coverErrors: {},
       }
     },
   }
@@ -440,6 +454,22 @@ function fakeHosts({ depth = 'packaging', perRunLimit = 1, failStep = null, neve
 async function setup(t, options = {}) {
   const { root, cwd } = await workspace(t)
   const fake = fakeHosts(options)
+  // 预检会探桥接（/health、/admin/engines）。桥接现在是唯一的配音通道，
+  // 探不通就整轮 blocked——所以这里起一个只读桩：/health 回在线，引擎回就绪。
+  // 它不代理任何真实服务，测试全程离线。
+  const bridgeStub = createServer((request, response) => {
+    const path = new URL(request.url || '/', 'http://127.0.0.1').pathname
+    const body = path === '/health'
+      ? { service: 'stub-bridge' }
+      : path === '/admin/engines'
+        ? { engines: [{ kind: 'tts', reachable: true }, { kind: 'image', reachable: true }] }
+        : {}
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify(body))
+  })
+  await new Promise((resolve) => bridgeStub.listen(0, '127.0.0.1', resolve))
+  const bridgeUrl = `http://127.0.0.1:${bridgeStub.address().port}`
+  t.after(() => bridgeStub.close())
   // The host resolves the sibling publisher pack through `ctx.get`; wire the
   // fake here so a publish-depth round exercises the real dispatch path. Tests
   // that need the pack absent overwrite `host.ctx` themselves.
@@ -463,7 +493,7 @@ async function setup(t, options = {}) {
     // 桥接自愈同样要桩，否则它会真的去打 127.0.0.1:1（连接被立刻拒绝，倒是不慢，
     // 但 2026-10-10 新增的自愈用例需要按用例控制它返回 ok 还是失败）。
     ensureLocalBridge: options.hostOptions?.ensureLocalBridge || (async () => ({ ok: true, reason: 'stub' })),
-    environment: { LWB_MEDIA_BRIDGE_URL: 'http://127.0.0.1:1', ...(options.hostOptions?.environment || {}) },
+    environment: { LWB_MEDIA_BRIDGE_URL: bridgeUrl, ...(options.hostOptions?.environment || {}) },
     ...options.hostOptions,
   })
   // A round left in flight (the neverDone fixtures poll until their deadline)
@@ -626,7 +656,7 @@ test('a stored voice preset rides the voiceover request and stages uploaded refe
   const created = await createTask(host, currentAgent, {
     production: {
       orientation: 'landscape', subtitleEnabled: true, scriptTier: 'medium', visualBrief: null,
-      voice: { provider: 'bailian', voiceSource: 'upload', voiceId: null, voiceName: '主播音色.mp3', referenceAudio: { id: referenceId, file: `voice-references/${referenceId}.mp3`, name: '主播音色.mp3', mediaType: 'audio/mpeg' }, outputFormat: null, rate: 1.2, volume: 0.9, pitch: 0 },
+      voice: { provider: 'scitiger', voiceSource: 'upload', voiceId: null, voiceName: '主播音色.mp3', referenceAudio: { id: referenceId, file: `voice-references/${referenceId}.mp3`, name: '主播音色.mp3', mediaType: 'audio/mpeg' }, outputFormat: null, rate: 1.2, volume: 0.9, pitch: 0 },
     },
   })
   const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
@@ -642,7 +672,7 @@ test('a stored voice preset rides the voiceover request and stages uploaded refe
   assert.equal(voiceover.request.referenceAudio.file, `audio-media/references/${referenceId}.mp3`)
   assert.equal(voiceover.request.rate, 1.2)
   assert.equal(voiceover.request.volume, 0.9)
-  assert.equal(voiceover.request.provider, 'bailian', 'the round voices through the configured connection channel')
+  assert.equal(voiceover.request.provider, 'scitiger', 'the round voices through the configured connection channel')
 })
 
 test('a builtin bridge voice preset reaches the voiceover request verbatim', async (t) => {
@@ -650,7 +680,7 @@ test('a builtin bridge voice preset reaches the voiceover request verbatim', asy
   const created = await createTask(host, currentAgent, {
     production: {
       orientation: 'landscape', subtitleEnabled: true, scriptTier: 'medium', visualBrief: null,
-      voice: { provider: 'bailian', voiceSource: 'preset', voiceId: '茉莉', voiceName: '茉莉', referenceAudio: null, outputFormat: null, rate: 1, volume: 1, pitch: 0, bridge: { channel: 'cloud', style: '清晰沉稳。' } },
+      voice: { provider: 'scitiger', voiceSource: 'preset', voiceId: '茉莉', voiceName: '茉莉', referenceAudio: null, outputFormat: null, rate: 1, volume: 1, pitch: 0, bridge: { channel: 'cloud', style: '清晰沉稳。' } },
     },
   })
   const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
@@ -668,7 +698,7 @@ test('media stages follow the configured connection channel instead of the baili
   const { host, currentAgent, fake } = await setup(t, { depth: 'packaging' })
   fake.hosts.media.status = async () => ({
     ttsConfigured: true,
-    connection: { provider: 'scitiger', providers: { scitiger: { configured: true, source: 'user', writable: true }, bailian: { configured: false } } },
+    connection: { provider: 'scitiger', providers: { scitiger: { configured: true, source: 'user', writable: true } } },
     renderers: { remotion: true, 'local-ffmpeg': true },
     providers: {},
   })
@@ -830,7 +860,7 @@ test('runtimeStatus warns about a missing TTS credential or renderer before the 
   assert.deepEqual(ready.blockers, [])
   assert.equal(ready.publish.available, true)
 
-  host.media.status = async () => ({ ttsConfigured: true, connection: { provider: 'bailian', providers: { bailian: { configured: false, source: null, writable: true } } }, renderers: { remotion: false }, providers: { legacy: { configured: false } } })
+  host.media.status = async () => ({ ttsConfigured: true, connection: { provider: 'scitiger', providers: { scitiger: { configured: false, source: null, writable: true } } }, renderers: { remotion: false }, providers: { bridge: { configured: false } } })
   const degraded = await host.runtimeStatus()
   assert.equal(degraded.remotion, false)
   assert.equal(degraded.tts.credential, false)
@@ -845,9 +875,9 @@ test('runtimeStatus warns about a missing TTS credential or renderer before the 
   // them disagree and asserting the host follows `connection.providers[p]`.
   host.media.status = async () => ({
     ttsConfigured: true,
-    connection: { provider: 'bailian', providers: { bailian: { configured: true, source: 'user', writable: true } } },
+    connection: { provider: 'scitiger', providers: { scitiger: { configured: true, source: 'user', writable: true } } },
     renderers: { remotion: true, 'local-ffmpeg': true },
-    providers: { bailian: { configured: true, credential: { configured: false } }, legacy: { configured: false } },
+    providers: { scitiger: { configured: true, credential: { configured: false } }, bridge: { configured: false } },
   })
   const split = await host.runtimeStatus()
   assert.equal(split.tts.credential, true, 'reads connection.providers[p].configured, not the nested providers[p].credential')
@@ -1171,7 +1201,7 @@ test('a blocked preflight stops the round before it burns a whole pipeline', asy
     hostOptions: { environment: { LWB_PREFLIGHT_DISK_FLOOR_GB: '999999' } },
   })
   fake.hosts.media.status = async () => ({
-    connection: { provider: 'bailian', providers: { bailian: { configured: true } } },
+    connection: { provider: 'scitiger', providers: { scitiger: { configured: true } } },
     ttsConfigured: true,
     renderers: { remotion: true },
   })
@@ -1207,7 +1237,7 @@ test('cloud voiceover is not blocked by the local-model memory floor', async (t)
   const report = await runPreflight({
     steps: ['voiceover'],
     mediaStatus: {
-      connection: { provider: 'bailian', providers: { bailian: { configured: true } } },
+      connection: { provider: 'scitiger', providers: { scitiger: { configured: true } } },
       ttsConfigured: true,
     },
     publishStatus: null,

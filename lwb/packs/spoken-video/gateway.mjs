@@ -117,6 +117,7 @@ export class SpokenVideoGateway extends TypertRemoteService {
   startAudioTaskSubtitles(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startAudioTaskSubtitles(context, request)) }
   saveAudioTaskSubtitles(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.saveAudioTaskSubtitles(context, request)) }
   readAudioTaskMedia(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.readAudioTaskMedia(context, request)) }
+  openAudioTaskFolder(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.openAudioTaskFolder(context, request)) }
   readVideoTaskMedia(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.readVideoTaskMedia(context, request)) }
   startVoiceover(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startVoiceover(context, request)) }
   startSubtitles(request) { return this.ctx.spokenVideoScope.request((context) => this.ctx.spokenVideoMedia.startSubtitles(context, request)) }
@@ -213,6 +214,7 @@ decorateRemote(SpokenVideoGateway.prototype, 'syncAudioTask', 'syncAudioTask')
 decorateRemote(SpokenVideoGateway.prototype, 'startAudioTaskSubtitles', 'startAudioTaskSubtitles')
 decorateRemote(SpokenVideoGateway.prototype, 'saveAudioTaskSubtitles', 'saveAudioTaskSubtitles')
 decorateRemote(SpokenVideoGateway.prototype, 'readAudioTaskMedia', 'readAudioTaskMedia')
+decorateRemote(SpokenVideoGateway.prototype, 'openAudioTaskFolder', 'openAudioTaskFolder')
 decorateRemote(SpokenVideoGateway.prototype, 'readVideoTaskMedia', 'readVideoTaskMedia')
 decorateRemote(SpokenVideoGateway.prototype, 'startVoiceover', 'startVoiceover')
 decorateRemote(SpokenVideoGateway.prototype, 'startSubtitles', 'startSubtitles')

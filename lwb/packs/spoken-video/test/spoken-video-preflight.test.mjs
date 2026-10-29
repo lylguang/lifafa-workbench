@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, lstat, symlink } fro
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
-import { inspectCreativeSource, inspectSceneBoundaryCoverage, inspectTimelineAlignment } from '../spoken-video-preflight.mjs'
+import { inspectCreativeSource, inspectSceneBoundaryCoverage, inspectStaticAssets, inspectTimelineAlignment } from '../spoken-video-preflight.mjs'
 import { inspectContentSafety } from '../spoken-video-content-safety.mjs'
 import { inspectSceneCueCoverage, parseSceneCueMap } from '../spoken-video-scene-cues.mjs'
 import { parseSceneSpans } from '../spoken-video-scene-table.mjs'
@@ -240,6 +240,25 @@ test('the drift gate checks bare-number scene tables, which it used to skip enti
 // 2026-10-15 补：AI 产物没有任何静态内容扫描，可以 import fs、读 process.env、
 // 硬编码密钥与本机路径，而求值门只验「能不能跑起来」。这里钉住检查项既能抓到东西、
 // 又不误伤正常产物——后者同样重要：误报会白白消耗修复轮。
+test('static assets referenced by staticFile must exist in public/ before render', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'lwb-static-'))
+  try {
+    await mkdir(join(dir, 'public', 'sfx'), { recursive: true })
+    await writeFile(join(dir, 'public', 'sfx', 'whoosh.wav'), 'fake wav')
+    const good = source('{transition:"none"}', 'import {staticFile, Audio} from "remotion"; const Sfx=()=> <Audio src={staticFile("sfx/whoosh.wav")} volume={0.35} />;')
+    const findings = await inspectStaticAssets(good, dir)
+    assert.deepEqual(findings, [], 'existing sfx file should pass')
+
+    const bad = source('{transition:"none"}', 'import {staticFile, Audio} from "remotion"; const Sfx=()=> <Audio src={staticFile("whoosh.wav")} volume={0.35} />;')
+    const missed = await inspectStaticAssets(bad, dir)
+    assert.equal(missed.length, 1)
+    assert.equal(missed[0].code, 'missing-asset')
+    assert.match(missed[0].message, /public\/ 下不存在/u)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('content safety catches credentials, local paths and capabilities a video component cannot need', () => {
   const cases = [
     ['secret:OpenAI sk-proj', 'const k = "sk-proj-abcdefghij1234567890ABCDEFGHIJ";', 'secret-pattern'],

@@ -3,6 +3,7 @@ import { parse } from '@babel/parser'
 import postcss from 'postcss'
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { SUSPICION_MAX, SUSPICION_MEAN, decodePcmMono8k, driftStats, estimateStarts, parseSrt, snapStarts, speechIntervalsFromPcm } from './spoken-video-subtitle-align.mjs'
@@ -172,6 +173,40 @@ export async function inspectSubtitleAudioAlignment(projectDir, srt) {
   return warnings
 }
 
+/**
+ * staticFile() 引用的文件必须真实存在于 public/ 下，否则渲染到对应帧才 404。
+ * 只检查字符串字面量：动态拼路径的场景无法静态验证，留给渲染阶段兜底。
+ */
+export async function inspectStaticAssets(source, projectDir) {
+  const findings = []
+  const report = (code, node, message) => findings.push({ code, file: 'src/CreativeVideo.tsx', line: node?.loc?.start?.line || 1, column: (node?.loc?.start?.column || 0) + 1, message })
+  let ast
+  try { ast = parse(source, { sourceType: 'module', plugins: ['typescript', 'jsx'] }) }
+  catch { return findings }
+  const visit = (node) => {
+    if (!node || typeof node !== 'object') return
+    if (node.type === 'CallExpression' && node.callee?.type === 'Identifier' && node.callee.name === 'staticFile' && node.arguments.length >= 1) {
+      const arg = node.arguments[0]
+      const value = arg?.type === 'StringLiteral' ? arg.value : (arg?.type === 'TemplateLiteral' && arg.expressions.length === 0 ? arg.quasis[0].value.cooked : null)
+      if (typeof value === 'string' && value.trim()) {
+        // staticFile 的基准目录是 public/；绝对路径 / 开头会去掉首斜杠再拼
+        const rel = value.replace(/^\/+/, '')
+        const target = join(projectDir, 'public', rel)
+        if (!existsSync(target)) {
+          report('missing-asset', node, `staticFile 引用的 ${value} 在 public/ 下不存在。请检查路径拼写（音效在 public/sfx/ 下）或删除该引用；渲染到这里会 404。`)
+        }
+      }
+    }
+    for (const [key, child] of Object.entries(node)) {
+      if (['loc', 'comments', 'tokens', 'extra'].includes(key)) continue
+      if (Array.isArray(child)) child.forEach(visit)
+      else if (child && typeof child === 'object') visit(child)
+    }
+  }
+  visit(ast.program)
+  return findings
+}
+
 export async function inspectAgentProject(workspace) {
   const findings = []
   const warnings = []
@@ -183,6 +218,10 @@ export async function inspectAgentProject(workspace) {
   if (!creativeSource.trim()) findings.push({ code: 'empty', file: 'src/CreativeVideo.tsx', line: 1, column: 1, message: 'CreativeVideo.tsx 为空。' })
   else {
     findings.push(...inspectCreativeSource(creativeSource))
+    // 静态资源存在性检查：staticFile() 引用的文件必须在 public/ 下。实测漏掉
+    // sfx/ 前缀的 whoosh.wav 让渲染到第 52 帧才 404 崩掉（2026-10-19 23:30），
+    // 整轮报废。这里在渲染前拦住，报错直接给行号。
+    findings.push(...await inspectStaticAssets(creativeSource, workspace.projectDir))
     // 产物内容安全：凭据、本机路径、不该有的能力、自动加载指令文件。只警告不阻塞——
     // 见 spoken-video-content-safety.mjs 头注（现存产物零命中，这道闸防的是以后）。
     warnings.push(...inspectContentSafety(creativeSource))

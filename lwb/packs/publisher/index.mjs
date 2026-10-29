@@ -63,8 +63,13 @@ export async function apply(ctx, config = {}) {
   await host.recoverInterrupted().catch(() => {})
   ctx.provide('publisherHost', host)
   ctx.plugin(PublisherGateway)
+  // 视频号登录态是服务端短时效票据，必须周期性真实访问才能续期。
+  host.startKeepAlive()
   ctx.effect(() => {
-    const stop = () => { void host.shutdown() }
+    const stop = () => {
+      host.stopKeepAlive()
+      void host.shutdown()
+    }
     scope.onStop(stop)
     return stop
   }, 'publisher: close browser sessions on stop')

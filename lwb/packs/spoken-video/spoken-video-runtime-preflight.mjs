@@ -30,7 +30,7 @@ const CLOUD_MEMORY_FLOOR_MIB = 2_000
 /**
  * 本轮是否真的要跑本地模型。
  *
- * 桥接的 `local` 通道才是本地合成；`scitiger` 走的是桥接的云端转发（小米/百炼），
+ * 桥接的 `local` 通道才是本地合成；`scitiger` 走的是桥接的云端转发（小米 MiMo），
  * 内存占用和纯云端没区别。把这两者混为一谈会让预检在不该拦的时候拦下整轮
  * ——2026-10-09 实测：机器空闲 9.8 GB，走云端配音却被 12 GB 门槛挡成 blocked。
  */
@@ -243,13 +243,14 @@ export async function runPreflight({ steps = [], mediaStatus = null, publishStat
       repaired.push('bridge.reachable')
       checks[checks.length - 1] = ok('bridge.reachable', '本地媒体桥接', '桥接已自动拉起')
     } else {
-      // 桥接拉不起来不算硬阻断：云端配音（百炼/小米）不需要本地桥接。
+      // 桥接拉不起来算硬阻断：百炼直连下线后，配音统一走本机桥接（scitiger），
+      // 桥接本身不可达就没有可用的本地配音路径。
       //
       // 2026-10-10 18:13：桥接整个进程没起来时，这里让人「打开 8199 点一键启动」，
       // 而那个端口当时就是死的——建议在当场根本执行不了。桥接自己不可达时，
       // 唯一能做的动作是在别处把它拉起来，所以指向保活计划任务与桥接目录。
       const provider = mediaStatus?.connection?.provider || ''
-      const cloudOnly = ['bailian', 'mimo'].includes(provider)
+      const cloudOnly = ['mimo'].includes(provider)
       const manual = '桥接自动拉起失败。请确认计划任务 LWBKeepAlive 处于「就绪」状态（它每 5 分钟会把桥接拉回来），或手工运行 E:\\lifa-scratch\\lwb-keepalive.ps1；确认无误后本任务可重试。'
       checks.push(cloudOnly
         ? degraded('bridge.reachable', '本地媒体桥接', `桥接不可达（${health.error}），但当前走云端配音，不阻断`, `${manual}如需本地配音还需先恢复桥接。`)
@@ -285,7 +286,7 @@ export async function runPreflight({ steps = [], mediaStatus = null, publishStat
 
   // --- 云端凭据（只判配置，不消耗配额）---
   if (wantsMedia && mediaStatus) {
-    const provider = mediaStatus.connection?.provider || 'bailian'
+    const provider = mediaStatus.connection?.provider || 'scitiger'
     const configured = mediaStatus.connection?.providers?.[provider]?.configured === true
     const ttsReady = mediaStatus.ttsConfigured === true
     const localBridge = provider === 'scitiger'

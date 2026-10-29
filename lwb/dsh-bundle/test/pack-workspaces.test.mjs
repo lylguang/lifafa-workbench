@@ -227,9 +227,9 @@ test('rejects corrupt index, path traversal and unowned nonempty directories', a
 })
 
 test('credential references obey DSH syntax and cannot collide across pack/purpose boundaries', () => {
-  const first = packCredentialRef('spoken-video', 'bailian')
+  const first = packCredentialRef('spoken-video', 'scitiger')
   assert.match(first, /^[A-Za-z_][A-Za-z0-9_]*$/u)
-  assert.notEqual(first, packCredentialRef('second-pack', 'bailian'))
+  assert.notEqual(first, packCredentialRef('second-pack', 'scitiger'))
   assert.notEqual(packCredentialRef('ab-cd', 'ef'), packCredentialRef('ab', 'cd-ef'))
   assert.throws(() => packCredentialRef('spoken-video', '../secret'), code('PACK_WORKSPACE_INVALID'))
 })

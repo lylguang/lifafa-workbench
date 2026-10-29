@@ -29,10 +29,10 @@ window.__ModuleLoader__.load({
       .wb-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
       .wb-pill { display:inline-flex; min-height:21px; flex:none; align-items:center; padding:0 7px; border-radius:5px; color:var(--lwb-blue); background:var(--lwb-blue-soft); font-size:var(--lwb-text-xs,12px); font-weight:700; white-space:nowrap; }
       .wb-pill[data-tone="green"] { color:var(--lwb-green); background:var(--lwb-green-soft); }
-      .wb-pill[data-tone="orange"] { color:#7a5b17; background:#fff4dd; }
-      .wb-pill[data-tone="red"] { color:#a94343; background:#ffecec; }
+      .wb-pill[data-tone="orange"] { color:var(--lwb-warm); background:var(--lwb-warm-soft); }
+      .wb-pill[data-tone="red"] { color:var(--lwb-danger); background:var(--lwb-danger-soft); }
       .wb-pill[data-tone="muted"] { color:var(--lwb-muted); background:var(--lwb-line); }
-      .wb-error, .wb-note { margin:0; padding:10px 11px; border:1px solid #e6b5b5; border-radius:7px; color:#994646; background:#fff7f7; font-size:var(--lwb-text-sm,13px); line-height:1.55; white-space:pre-wrap; }
+      .wb-error, .wb-note { margin:0; padding:10px 11px; border:1px solid var(--lwb-danger-line); border-radius:var(--lwb-radius-md,9px); color:var(--lwb-danger); background:var(--lwb-danger-soft); font-size:var(--lwb-text-sm,13px); line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }
       .wb-note { border-color:#bad5ed; color:#486277; background:#f7fbff; }
       .wb-empty { padding:34px 12px; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); text-align:center; border:1px dashed var(--lwb-line); border-radius:9px; }
       .wb-list { display:grid; gap:8px; }
@@ -47,6 +47,7 @@ window.__ModuleLoader__.load({
       body[data-ds-dark-theme] .wb-note { border-color:#2c5578; color:#a9c9e6; background:#16324a; }
       body[data-ds-dark-theme] .wb-pill[data-tone="orange"] { color:#e8d9a9; background:#332b1b; }
       body[data-ds-dark-theme] .wb-pill[data-tone="red"] { color:#e8b9b9; background:#3a2323; }
+      @media (max-width:390px) { .wb-form-grid { grid-template-columns:1fr; } .wb-card, .wb-form { padding:var(--lwb-space-3); } .wb-scene-row { grid-template-columns:1fr; } }
     `;
 
     function installStyle() {

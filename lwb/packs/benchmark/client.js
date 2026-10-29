@@ -32,12 +32,12 @@ window.__ModuleLoader__.load({
       .bm-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
       .bm-tag, .bm-pill { display:inline-flex; min-height:21px; flex:none; align-items:center; padding:0 7px; border-radius:5px; color:var(--lwb-blue); background:var(--lwb-blue-soft); font-size:var(--lwb-text-xs,12px); font-weight:700; white-space:nowrap; }
       .bm-pill[data-tone="green"] { color:var(--lwb-green); background:var(--lwb-green-soft); }
-      .bm-pill[data-tone="orange"] { color:#7a5b17; background:#fff4dd; }
-      .bm-pill[data-tone="red"] { color:#a94343; background:#ffecec; }
+      .bm-pill[data-tone="orange"] { color:var(--lwb-warm); background:var(--lwb-warm-soft); }
+      .bm-pill[data-tone="red"] { color:var(--lwb-danger); background:var(--lwb-danger-soft); }
       .bm-pill[data-tone="muted"] { color:var(--lwb-muted); background:var(--lwb-line); }
-      .bm-error, .bm-note { margin:0; padding:10px 11px; border:1px solid #e6b5b5; border-radius:7px; color:#994646; background:#fff7f7; font-size:var(--lwb-text-sm,13px); line-height:1.55; }
+      .bm-error, .bm-note { margin:0; padding:10px 11px; border:1px solid var(--lwb-danger-line); border-radius:var(--lwb-radius-md,9px); color:var(--lwb-danger); background:var(--lwb-danger-soft); font-size:var(--lwb-text-sm,13px); line-height:1.6; overflow-wrap:anywhere; }
       .bm-note { border-color:#bad5ed; color:#486277; background:#f7fbff; }
-      .bm-empty { padding:34px 12px; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); text-align:center; border:1px dashed var(--lwb-line); border-radius:9px; }
+      .bm-empty { display:grid; gap:var(--lwb-space-2,8px); justify-items:center; padding:var(--lwb-space-6,24px) var(--lwb-space-3,12px); color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); line-height:1.7; text-align:center; border:1px dashed var(--lwb-line); border-radius:var(--lwb-radius-md,9px); }
       .bm-list { display:grid; gap:8px; }
       .bm-card-head { display:flex; min-width:0; align-items:flex-start; justify-content:space-between; gap:9px; }
       .bm-card-title { overflow:hidden; font-size:var(--lwb-text-md,15px); font-weight:700; text-overflow:ellipsis; white-space:nowrap; }
@@ -53,12 +53,13 @@ window.__ModuleLoader__.load({
       .bm-backdrop { position:fixed; z-index:40; inset:0; display:grid; place-items:center; border:0; background:rgba(24,39,52,.35); }
       .bm-modal { display:grid; gap:10px; width:min(440px,calc(100vw - 48px)); padding:18px; border:1px solid var(--lwb-line); border-radius:11px; background:var(--lwb-surface); box-shadow:0 18px 48px rgba(23,47,70,.22); }
       .bm-modal h3 { margin:0; font-size:var(--lwb-text-md,15px); } .bm-modal p { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); line-height:1.6; }
-      .bm-danger { border:1px solid #d98c8c; border-radius:6px; padding:0 14px; height:34px; color:#a94343; background:#fff1f1; cursor:pointer; font:inherit; font-size:var(--lwb-text-base,14px); font-weight:700; }
+      .bm-danger { min-height:var(--lwb-control-h,36px); border:1px solid var(--lwb-danger-line); border-radius:var(--lwb-radius-sm,6px); padding:0 var(--lwb-space-4,16px); color:var(--lwb-danger); background:var(--lwb-danger-soft); cursor:pointer; font:inherit; font-size:var(--lwb-text-base,14px); font-weight:700; transition:border-color .15s ease,background .15s ease,box-shadow .15s ease; } .bm-danger:hover:not(:disabled) { border-color:#c98d8d; color:#8f3330; background:#fdeceb; } .bm-danger:disabled { opacity:.55; cursor:default; } .bm-danger:focus-visible { outline:0; border-color:var(--lwb-danger); box-shadow:var(--lwb-focus-ring); }
       body[data-ds-dark-theme] .bm-error { border-color:#7a4444; color:#e8b9b9; background:#3a2323; }
       body[data-ds-dark-theme] .bm-note { border-color:#2c5578; color:#a9c9e6; background:#16324a; }
       body[data-ds-dark-theme] .bm-pill[data-tone="orange"] { color:#e8d9a9; background:#332b1b; }
       body[data-ds-dark-theme] .bm-pill[data-tone="red"] { color:#e8b9b9; background:#3a2323; }
-      body[data-ds-dark-theme] .bm-danger { border-color:#7a4444; color:#e8b9b9; background:#3a2323; }
+      body[data-ds-dark-theme] .bm-danger { border-color:#7a4444; color:#e8b9b9; background:#3a2323; } body[data-ds-dark-theme] .bm-danger:hover:not(:disabled) { border-color:#a35b5b; color:#ffd0d0; background:#542f31; }
+      @media (max-width:390px) { .bm-form-grid { grid-template-columns:1fr; } .bm-card, .bm-form { padding:var(--lwb-space-3); } .bm-modal { width:min(440px,calc(100vw - 24px)); padding:var(--lwb-space-4); } .bm-toolbar .bm-input, .bm-toolbar .bm-select { min-width:0; flex:1 1 140px; } }
     `;
 
     function installStyle() {
@@ -94,16 +95,45 @@ window.__ModuleLoader__.load({
     }
 
     function ErrorNotice({ error }) {
-      return error ? h('p', { className: 'bm-error' }, error) : null;
+      if (!error) return null;
+      // 失败必须同时给出「原因」和「下一步」：只报错不指路，用户只能重试到放弃。
+      return h('div', { className: 'lwb-callout', 'data-tone': 'danger', role: 'alert' },
+        h('p', { className: 'lwb-callout-title' }, '操作失败'),
+        h('p', null, error),
+      );
     }
 
-    function EmptyState({ text }) {
-      return h('div', { className: 'bm-empty' }, text);
+    /** 空态：说清缺什么、接下来点哪里，有主操作就直接给按钮。 */
+    function EmptyState({ text, title, actions }) {
+      return h('div', { className: 'bm-empty' },
+        title ? h('p', { className: 'lwb-empty-title' }, title) : null,
+        text ? h('p', null, text) : null,
+        actions ? h('div', { className: 'lwb-empty-actions' }, actions) : null,
+      );
     }
 
     function TagRow({ tags }) {
       const list = Array.isArray(tags) ? tags : [];
       return list.length ? h('div', { className: 'bm-tag-row' }, list.map((tag) => h('span', { key: tag, className: 'bm-tag' }, tag))) : null;
+    }
+
+    /**
+     * 实时计时：跑着就每秒走，结束定格成最终用时。拿不到起始时间就什么都不显示——
+     * 宁可没有计时，也不编一个看着准的数。
+     */
+    function LiveTimer({ startedAt, finishedAt, prefix = '' }) {
+      const start = React.useMemo(() => (typeof startedAt === 'string' ? Date.parse(startedAt) : Number(startedAt)) || null, [startedAt]);
+      const end = React.useMemo(() => (finishedAt ? (typeof finishedAt === 'string' ? Date.parse(finishedAt) : Number(finishedAt)) || null : null), [finishedAt]);
+      const [now, setNow] = React.useState(() => Date.now());
+      React.useEffect(() => {
+        if (!start || end) return undefined;
+        const timer = window.setInterval(() => setNow(Date.now()), 1000);
+        return () => window.clearInterval(timer);
+      }, [start, end]);
+      if (!start) return null;
+      const total = Math.max(0, Math.round(((end || now) - start) / 1000));
+      const text = total >= 60 ? `${Math.floor(total / 60)} 分 ${String(total % 60).padStart(2, '0')} 秒` : `${total} 秒`;
+      return h('span', { className: 'lwb-timer' }, `${prefix}${text}`);
     }
 
     function StatusPill({ status }) {
@@ -293,7 +323,8 @@ window.__ModuleLoader__.load({
       const [form, setForm] = React.useState({ accountId: '', title: '', url: '', content: '', views: '', likes: '', comments: '', favorites: '', tags: '' });
       const teardowns = teardownsData.data || [];
       const accounts = accountsData.data || [];
-      const running = teardowns.some((item) => item.status === 'analyzing');
+      const runningRecord = teardowns.find((item) => item.status === 'analyzing');
+      const running = Boolean(runningRecord);
       usePolling(teardownsData.reload, running);
       const patchForm = (patch) => setForm((current) => ({ ...current, ...patch }));
       const selectedAccount = accounts.find((item) => item.id === form.accountId);
@@ -331,7 +362,9 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'bm-page' },
         h('div', { className: 'bm-top' },
           h('div', null, h('h1', null, '爆款拆解'), h('p', null, '把对标账号的爆款内容粘贴进来（标题 + 文案，可附数据和链接），AI 会拆解钩子、结构、节奏与标题套路，结果自动进入方法论库。')),
-          h('span', { className: 'bm-pill', 'data-tone': 'muted' }, running ? 'AI 拆解进行中…' : `共 ${teardowns.length} 条`),
+          h('span', { className: 'bm-pill', 'data-tone': running ? 'orange' : 'muted' }, running
+            ? h('span', { className: 'lwb-live' }, h('span', { className: 'lwb-live-dot' }), 'AI 拆解进行中 ', h(LiveTimer, { startedAt: runningRecord.createdAt }))
+            : `共 ${teardowns.length} 条`),
         ),
         h(ErrorNotice, { error: teardownsData.error }),
         h('div', { className: 'bm-form' },
@@ -376,8 +409,18 @@ window.__ModuleLoader__.load({
                   h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => remove(record) }, '删除'),
                 ),
               ),
-              record.status === 'failed' && record.error ? h('p', { className: 'bm-error' }, record.error) : null,
-              record.status === 'analyzing' ? h('p', { className: 'bm-note' }, 'AI 正在拆解这条内容，完成后自动更新。') : null,
+              record.status === 'failed' && record.error ? h('div', { className: 'lwb-callout', 'data-tone': 'danger', role: 'alert' },
+                h('p', { className: 'lwb-callout-title' }, '这条拆解失败'),
+                h('p', null, record.error),
+                h('ul', { className: 'lwb-callout-next' },
+                  h('li', null, '把标题和文案重新粘到上方表单再提交一次；内容太短或全是图片链接时拆解拿不到素材。'),
+                  h('li', null, '反复失败就换一条内容试，先确认是不是这一条本身的问题。'),
+                )) : null,
+              record.status === 'analyzing' ? h('p', { className: 'bm-note lwb-live' },
+                h('span', { className: 'lwb-live-dot' }),
+                h('span', null, 'AI 正在拆解，完成后自动刷新'),
+                h(LiveTimer, { startedAt: record.createdAt, finishedAt: record.completedAt }),
+              ) : null,
               isExpanded && record.status === 'completed' ? h(AnalysisView, { analysis: record.analysis }) : null,
               h(TagRow, { tags: record.tags }),
             );

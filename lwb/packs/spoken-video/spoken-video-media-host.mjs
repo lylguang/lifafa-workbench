@@ -10,7 +10,6 @@ import { spokenVideoDataPath } from './spoken-video-paths.mjs'
 import { guardSubtitleTimeline, decodePcmMono8k, speechIntervalsFromPcm } from './spoken-video-subtitle-align.mjs'
 import { buildLineArtPlanPrompt, checkImageEngine, generateLineArtImage, LINE_ART_PLAN_SCHEMA, normalizeLineArtPlan, whiteboardBridgeUrl } from './spoken-video-whiteboard-art.mjs'
 import { executionEvent, executionTransition } from './spoken-video-execution.mjs'
-import WebSocket from 'ws'
 import {
   buildTechnicalReport,
   DEFAULT_VOICE_PROFILE,
@@ -19,15 +18,12 @@ import {
   MEDIA_OPERATION_TYPES,
   mediaServiceConfig,
   mediaCredentialRef,
+  foldLegacyProvider,
   normalizeProbe,
   normalizeRenderRequest,
   normalizeSubtitleRequest,
   normalizeVoiceoverRequest,
-  serviceData,
-  serviceHeaders,
   subtitleResult,
-  taskIdFromService,
-  taskState,
   SpokenVideoMediaError,
 } from './spoken-video-media.mjs'
 import { appendDshSessionTrace, dshChildStarted, ensureDshTrace, projectDshSessionEvent, startDshTraceSession } from './spoken-video-dsh-trace.mjs'
@@ -43,6 +39,15 @@ import { cueChars, splitLongCues, validateSrt } from './spoken-video-subtitles.m
 import { buildVideoCreatorPrompt, buildVideoCreatorRepairPrompt, buildVideoEditorialRepairPrompt, buildVideoReviewerPrompt, normalizeVideoReview, VIDEO_REVIEW_SCHEMA } from './spoken-video-video-agent.mjs'
 
 const execFilePromise = promisify(execFile)
+/**
+ * Python 子进程统一以 UTF-8 跑，不依赖用户机器的 locale。
+ * 本机中文 Windows 的 Python 3.13 默认 stdout.encoding = gbk，而白板引擎脚本
+ * json.dumps(..., ensure_ascii=False) 直接把中文打上 stdout、宿主按 utf8 解码，
+ * GBK 字节被当 UTF-8 解成乱码——JSON 结构仍合法，所以不报错、静默出错。
+ */
+function pythonEnv(extra = null) {
+  return { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', ...extra }
+}
 async function execFileAsync(...args) {
   const result = execFilePromise(...args)
   // AbortError may reject before the child has exited. Keep the workspace
@@ -62,15 +67,10 @@ const AUDIO_UPLOAD_FORMATS = Object.freeze({
 })
 const POLL_INTERVAL_MS = 1_500
 const MAX_POLL_MS = 15 * 60 * 1000
-const BAILIAN_WAV_DOWNLOAD_ATTEMPTS = 2
-const BAILIAN_TTS_SEGMENT_ATTEMPTS = 2
 // A provider may report a job complete before its produced asset is actually
 // retrievable from the CDN, so a first fetch can 404 on a perfectly good job.
 const SCITIGER_DOWNLOAD_ATTEMPTS = 4
 const SCITIGER_DOWNLOAD_BACKOFF_MS = 600
-const BAILIAN_ASR_SAMPLE_RATE = 16_000
-const BAILIAN_ASR_CHUNK_MS = 100
-const BAILIAN_ASR_CHUNK_BYTES = BAILIAN_ASR_SAMPLE_RATE * 2 * BAILIAN_ASR_CHUNK_MS / 1_000
 const VIDEO_EDITORIAL_REPAIR_MAX_ATTEMPTS = 2
 const PACK_ROOT = dirname(fileURLToPath(import.meta.url))
 const DEFAULT_VOICE_FILE = join(PACK_ROOT, DEFAULT_VOICE_PROFILE.file)
@@ -354,7 +354,7 @@ function providerFailure(label, detail, endpoint = null, environment = process.e
   if (label.startsWith('SciTiger') && /(?:insufficient[ _-]*points|积分不足|余额不足)/iu.test(detail)) {
     return new SpokenVideoMediaError(
       'SPOKEN_VIDEO_MEDIA_INSUFFICIENT_POINTS',
-      'SciTiger 账户积分不足，请充值后重试，或切换到百炼 BYOK。',
+      'SciTiger 账户积分不足，请充值后重试；或在桥接配置中心把配音切到本地合成（不消耗云端积分，配置地址见本机桥接页）。',
     )
   }
   // 认证失败不能只说"失败"：本机部署最常见的成因是渠道没指向本机桥接，
@@ -367,12 +367,6 @@ function providerFailure(label, detail, endpoint = null, environment = process.e
         isLoopbackEndpoint(endpoint)
           ? `本机桥接拒绝了配音请求（${detail}）。请打开桥接配置中心 ${localBridgeBase(environment)}/ 检查配音方式与小米 API Key。`
           : `配音服务返回「${detail}」。当前渠道指向远端 SciTiger 云端，但本机部署应走本机桥接：请用「启动工作台.cmd」启动（它会把渠道指到 ${localBridgeBase(environment)}），或在「连接配置」里更新 SciTiger API Key。`,
-      )
-    }
-    if (label.startsWith('百炼')) {
-      return new SpokenVideoMediaError(
-        'SPOKEN_VIDEO_MEDIA_CREDENTIAL_REJECTED',
-        `百炼拒绝了当前 API Key（${detail}）。请在「连接配置」更新百炼 API Key，或把「配音服务」切换到本机桥接的云端/本地合成。`,
       )
     }
   }
@@ -663,6 +657,16 @@ function audioTaskSummary(task) {
     projectSync: task.projectSync || null,
     projectSyncError: task.projectSyncError || null,
     subtitleSyncError: task.subtitleSyncError || null,
+    // 可展示的渠道标签：input.provider 可能是旧渠道名（bailian/legacy），先折叠到
+    // 现行渠道（scitiger/bridge）再给真实标签，避免存量任务被谎报成已下线的渠道。
+    // 真实标签由桥接通道决定：云端通道走云端合成，本机通道才是「本机桥接（小米 MiMo）」，
+    // 不能一律说本机桥接——百炼下线后存量任务折叠成 scitiger，其中云端通道的要如实标云端。
+    providerLabel: (() => {
+      const displayProvider = foldLegacyProvider(task.input?.provider)
+      if (displayProvider !== 'scitiger' && displayProvider !== 'bridge') return null
+      const channel = task.input?.bridge?.channel
+      return channel === 'cloud' ? '云端合成' : '本机桥接（小米 MiMo）'
+    })(),
     source: {
       kind: task.source?.kind || 'manual-text',
       projectId: task.source?.projectId || null,
@@ -704,26 +708,29 @@ function delay(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds))
 }
 
-async function awaitWithin(promise, milliseconds, code, message) {
-  let timeout
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        timeout = setTimeout(() => reject(new SpokenVideoMediaError(code, message)), milliseconds)
-      }),
-    ])
-  } finally {
-    clearTimeout(timeout)
-  }
-}
-
 function mediaTypeForFormat(format) {
   return ({ wav: 'audio/wav', mp3: 'audio/mpeg', m4a: 'audio/mp4', ogg: 'audio/ogg' })[format] || 'application/octet-stream'
 }
 
 function extensionForFormat(format) {
   return ({ wav: 'wav', mp3: 'mp3', m4a: 'm4a', ogg: 'ogg' })[format] || 'wav'
+}
+
+/**
+ * 在系统文件管理器里选中一个文件。
+ *
+ * 三个平台的命令行不同：Windows 用 explorer 的 /select,（注意逗号属于参数的一部分，
+ * 不能拆开），macOS 用 open 的 -R，Linux 只有 xdg-open，打开所在目录。
+ * 进程要 detached 且丢掉 stdio，否则资源管理器会继承工作台的管道，界面看着像卡住。
+ */
+function revealInFileManager(file) {
+  const [command, args] = process.platform === 'win32'
+    ? ['explorer', ['/select,', file]]
+    : process.platform === 'darwin'
+      ? ['open', ['-R', file]]
+      : ['xdg-open', [dirname(file)]]
+  const child = spawn(command, args, { detached: true, stdio: 'ignore' })
+  child.unref()
 }
 
 async function defaultVoiceReference() {
@@ -822,256 +829,6 @@ function boundedHttpUrl(value, label) {  const raw = text(value, label, 4000)
     fail('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', `${label}不受支持。`)
   }
   return parsed.toString()
-}
-
-function srtTime(milliseconds) {
-  const total = Math.max(0, Math.round(milliseconds))
-  const hours = Math.floor(total / 3_600_000)
-  const minutes = Math.floor((total % 3_600_000) / 60_000)
-  const seconds = Math.floor((total % 60_000) / 1_000)
-  const millis = total % 1_000
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')},${String(millis).padStart(3, '0')}`
-}
-
-function subtitleReferenceWeight(value) {
-  let weight = 0
-  for (const character of Array.from(String(value || ''))) {
-    if (/\p{L}|\p{N}/u.test(character)) weight += 1
-    else if (/\s/u.test(character)) weight += 0.15
-    else weight += 0.35
-  }
-  return weight
-}
-
-function referenceBoundary(chars, desired, minimum, maximum) {
-  const target = Math.max(minimum, Math.min(maximum, Math.round(desired)))
-  const lower = Math.max(minimum, target - 36)
-  const upper = Math.min(maximum, target + 36)
-  let best = target
-  let distance = Number.POSITIVE_INFINITY
-  for (let index = lower; index <= upper; index += 1) {
-    if (index !== 0 && index !== chars.length && !/[\s，。！？!?；;、：:,\n]/u.test(chars[index - 1])) continue
-    const nextDistance = Math.abs(index - target)
-    if (nextDistance < distance) { best = index; distance = nextDistance }
-  }
-  return best
-}
-
-/** Keep ASR timing anchors but use the authored script for terminology-safe subtitle text. */
-function alignSentencesToReference(sentences, referenceText) {
-  const reference = String(referenceText || '').replace(/\s+/gu, ' ').trim()
-  const sourceChars = Array.from(reference)
-  const usable = (sentences || []).filter((sentence) => sentence && typeof sentence.text === 'string' && sentence.text.trim() && Number.isFinite(sentence.begin) && Number.isFinite(sentence.end))
-  if (!sourceChars.length || !usable.length) return sentences
-  const sourceWeight = Math.max(1, subtitleReferenceWeight(reference))
-  const sourceWeights = []
-  let cumulativeSourceWeight = 0
-  for (const character of sourceChars) {
-    cumulativeSourceWeight += subtitleReferenceWeight(character)
-    sourceWeights.push(cumulativeSourceWeight)
-  }
-  const sentenceWeights = usable.map((sentence) => Math.max(1, subtitleReferenceWeight(sentence.text)))
-  const totalWeight = sentenceWeights.reduce((sum, value) => sum + value, 0)
-  let consumedWeight = 0
-  let sourceStart = 0
-  return usable.map((sentence, index) => {
-    consumedWeight += sentenceWeights[index]
-    const remainingSentences = usable.length - index - 1
-    const minimum = sourceStart + 1
-    const maximum = Math.max(minimum, sourceChars.length - remainingSentences)
-    let sourceEnd = sourceChars.length
-    if (index !== usable.length - 1) {
-      const desiredWeight = sourceWeight * consumedWeight / totalWeight
-      const desired = sourceWeights.findIndex((value) => value >= desiredWeight) + 1
-      sourceEnd = referenceBoundary(sourceChars, desired < 1 ? minimum : desired, minimum, maximum)
-    }
-    const text = sourceChars.slice(sourceStart, sourceEnd).join('').trim()
-    sourceStart = sourceEnd
-    return { ...sentence, text: text || sentence.text.trim() }
-  })
-}
-
-function srtFromSentences(sentences) {
-  const expanded = []
-  for (const sentence of sentences || []) {
-    if (!sentence || typeof sentence.text !== 'string' || !sentence.text.trim() || !Number.isFinite(sentence.begin) || !Number.isFinite(sentence.end)) continue
-    const source = sentence.text.trim()
-    // Realtime ASR returns VAD turns, which can span an entire paragraph. Split
-    // locally at punctuation and then enforce video-readable limits.
-    const clauses = source.match(/[^。！？!?；;，,、：:]+[。！？!?；;，,、：:]?/gu) || [source]
-    const chunks = []
-    for (const clause of clauses) {
-      const chars = Array.from(clause.trim())
-      for (let offset = 0; offset < chars.length; offset += 22) chunks.push(chars.slice(offset, offset + 22).join(''))
-    }
-    const totalChars = Math.max(1, Array.from(source).length)
-    const duration = Math.max(1, sentence.end - sentence.begin)
-    let cursor = 0
-    for (const chunk of chunks) {
-      const start = sentence.begin + Math.round(duration * cursor / totalChars)
-      cursor += Array.from(chunk).length
-      const end = sentence.begin + Math.round(duration * cursor / totalChars)
-      expanded.push({ begin: start, end: Math.max(end, start + 250), text: chunk })
-    }
-  }
-  const rows = expanded
-    .filter((sentence) => sentence && typeof sentence.text === 'string' && sentence.text.trim() && Number.isFinite(sentence.begin) && Number.isFinite(sentence.end))
-    .sort((left, right) => left.begin - right.begin)
-    .map((sentence, index) => `${index + 1}\n${srtTime(sentence.begin)} --> ${srtTime(Math.max(sentence.end, sentence.begin + 250))}\n${sentence.text.trim()}`)
-  if (!rows.length) fail('SPOKEN_VIDEO_SUBTITLES_INVALID', '百炼没有返回可用的最终识别结果。')
-  return `${rows.join('\n\n')}\n`
-}
-
-/** Qwen TTS accepts at most 512 input tokens. Four hundred Unicode code points is intentionally conservative. */
-function splitTtsText(value, maximum = 400) {
-  const source = text(value, '配音文稿', 60_000)
-  const sentences = source.match(/[^。！？!?；;…\n]+[。！？!?；;…]?|\n+/gu) || [source]
-  const pieces = []
-  let current = ''
-  const flush = () => {
-    const next = current.trim()
-    if (next) pieces.push(next)
-    current = ''
-  }
-  for (const sentence of sentences) {
-    const normalized = sentence.trim()
-    if (!normalized) continue
-    const chars = Array.from(normalized)
-    if (chars.length > maximum) {
-      flush()
-      for (let offset = 0; offset < chars.length; offset += maximum) pieces.push(chars.slice(offset, offset + maximum).join(''))
-      continue
-    }
-    if (current && Array.from(current).length + chars.length > maximum) flush()
-    current = `${current}${normalized}`
-  }
-  flush()
-  if (!pieces.length) fail('SPOKEN_VIDEO_MEDIA_INVALID_INPUT', '配音文稿为空。')
-  return pieces
-}
-
-function wavSizeIsUnbounded(value) {
-  // Some Bailian voice-clone WAVs retain a non-final size near the 2 GiB RIFF limit.
-  return value === 0xffffffff || value >= 0x7fff0000
-}
-
-function wavContainerError(bytes, options = {}) {
-  const allowUnboundedSize = options.allowUnboundedSize === true
-  if (!Buffer.isBuffer(bytes) || bytes.length < 44 || bytes.toString('ascii', 0, 4) !== 'RIFF' || bytes.toString('ascii', 8, 12) !== 'WAVE') {
-    return '返回的不是有效 WAV 音频'
-  }
-  const riffSize = bytes.readUInt32LE(4)
-  if (riffSize !== 0xffffffff && riffSize + 8 > bytes.length && !(allowUnboundedSize && wavSizeIsUnbounded(riffSize))) {
-    return `RIFF 声明 ${riffSize + 8} 字节，实际仅下载 ${bytes.length} 字节`
-  }
-  let offset = 12
-  let hasFormat = false
-  let hasData = false
-  while (offset + 8 <= bytes.length) {
-    const name = bytes.toString('ascii', offset, offset + 4)
-    const size = bytes.readUInt32LE(offset + 4)
-    const content = offset + 8
-    const end = content + size
-    if (end > bytes.length) {
-      if (allowUnboundedSize && name === 'data' && wavSizeIsUnbounded(size) && content < bytes.length) {
-        hasData = true
-        break
-      }
-      return `${name.trim() || '未知'} 块声明 ${size} 字节，但文件在第 ${bytes.length} 字节结束`
-    }
-    if (name === 'fmt ' && size >= 16) hasFormat = true
-    if (name === 'data' && size > 0) hasData = true
-    offset = end + (size % 2)
-  }
-  if (!hasFormat) return '缺少有效的 fmt 格式块'
-  if (!hasData) return '缺少非空的 data 音频块'
-  return null
-}
-
-function repairUnboundedWavHeader(bytes) {
-  const repaired = Buffer.from(bytes)
-  const actualRiffSize = repaired.length - 8
-  if (wavSizeIsUnbounded(repaired.readUInt32LE(4))) repaired.writeUInt32LE(actualRiffSize, 4)
-  let offset = 12
-  while (offset + 8 <= repaired.length) {
-    const name = repaired.toString('ascii', offset, offset + 4)
-    const size = repaired.readUInt32LE(offset + 4)
-    const content = offset + 8
-    const end = content + size
-    if (end > repaired.length) {
-      if (name === 'data' && wavSizeIsUnbounded(size) && content < repaired.length) {
-        repaired.writeUInt32LE(repaired.length - content, offset + 4)
-      }
-      break
-    }
-    offset = end + (size % 2)
-  }
-  return repaired
-}
-
-function ffmpegConcatEntry(file) {
-  return `file '${file.replace(/'/gu, "'\\''")}'`
-}
-
-function sendSocket(socket, data, options) {
-  return new Promise((resolvePromise, reject) => {
-    socket.send(data, options, (error) => error ? reject(error) : resolvePromise())
-  })
-}
-
-async function sendRealtimePcm(socket, stream, failure) {
-  let pending = Buffer.alloc(0)
-  let nextSendAt = Date.now()
-  const send = async (chunk) => {
-    const wait = nextSendAt - Date.now()
-    if (wait > 0) await Promise.race([delay(wait), failure])
-    await Promise.race([
-      sendSocket(socket, JSON.stringify({ type: 'input_audio_buffer.append', event_id: randomUUID(), audio: chunk.toString('base64') })),
-      failure,
-    ])
-    nextSendAt = Math.max(nextSendAt + BAILIAN_ASR_CHUNK_MS, Date.now())
-  }
-  for await (const chunk of stream) {
-    pending = pending.length ? Buffer.concat([pending, chunk]) : Buffer.from(chunk)
-    while (pending.length >= BAILIAN_ASR_CHUNK_BYTES) {
-      await send(pending.subarray(0, BAILIAN_ASR_CHUNK_BYTES))
-      pending = pending.subarray(BAILIAN_ASR_CHUNK_BYTES)
-    }
-  }
-  if (pending.length) await send(pending)
-}
-
-function closeSocket(socket) {
-  if (socket.readyState === WebSocket.CLOSED) return Promise.resolve()
-  return new Promise((resolvePromise) => {
-    let settled = false
-    const done = () => {
-      if (settled) return
-      settled = true
-      clearTimeout(timeout)
-      resolvePromise()
-    }
-    const timeout = setTimeout(() => {
-      socket.terminate()
-      done()
-    }, 2_000)
-    socket.once('close', done)
-    socket.close()
-  })
-}
-
-function waitForChild(child, label) {
-  return new Promise((resolvePromise, reject) => {
-    let stderr = ''
-    let failure
-    child.stderr?.on('data', (chunk) => { stderr = `${stderr}${chunk}`.slice(-2000) })
-    child.once('error', (error) => { failure = commandError(error, label) })
-    child.once('close', (code) => {
-      if (failure) reject(failure)
-      else if (code === 0) resolvePromise()
-      else reject(new SpokenVideoMediaError('SPOKEN_VIDEO_MEDIA_COMMAND_FAILED', `${label}失败：${stderr.trim() || `退出码 ${code}`}`))
-    })
-  })
 }
 
 function commandError(error, label) {
@@ -1359,7 +1116,7 @@ async function measureVisualVariation(frameFiles, orientation, durationSeconds, 
  * only sees durable operation summaries and bounded media reads through the gateway.
  */
 export class SpokenVideoMediaHost {
-  constructor({ background = (work) => work, signal, projectsStore, credentials, connectionSettings, videoCreator, videoReviewer, lineArtPlanner, fetch = globalThis.fetch, environment = process.env } = {}) {
+  constructor({ background = (work) => work, signal, projectsStore, credentials, connectionSettings, videoCreator, videoReviewer, lineArtPlanner, fileRevealer, fetch = globalThis.fetch, environment = process.env } = {}) {
     if (!projectsStore) throw new Error('SpokenVideoMediaHost requires projectsStore.')
     this.background = background
     this.signal = signal
@@ -1369,13 +1126,12 @@ export class SpokenVideoMediaHost {
     this.videoCreator = typeof videoCreator === 'function' ? videoCreator : null
     this.videoReviewer = typeof videoReviewer === 'function' ? videoReviewer : null
     this.lineArtPlanner = typeof lineArtPlanner === 'function' ? lineArtPlanner : null
+    this.fileRevealer = typeof fileRevealer === 'function' ? fileRevealer : null
     this.fetch = fetch
     this.environment = environment
     this.queues = new Map()
     this.runSecrets = new Map()
     this.activeRunIds = new Set()
-    this.bailianReferenceVoices = new Map()
-    this.bailianReferenceVoiceEnrollments = new Map()
     this.audioTaskWrites = new Map()
     this.runWrites = new Map()
     this.activeAudioTaskRuns = new Set()
@@ -1394,16 +1150,14 @@ export class SpokenVideoMediaHost {
       ttsEndpoint: config.baseUrl ? new URL(config.baseUrl).origin : null,
       defaultVoice: { id: DEFAULT_VOICE_PROFILE.id, name: DEFAULT_VOICE_PROFILE.name },
       providers: {
-        bailian: { configured: true, referenceVoiceConfigured, label: '使用自己的百炼账户', credential: connection.providers.bailian },
         scitiger: {
           configured: config.scitigerConfigured,
           referenceVoiceConfigured,
-          label: scitigerLoopback ? '本机桥接' : 'SciTiger 云端',
+          label: scitigerLoopback ? '本机桥接（小米 MiMo）' : 'SciTiger 云端',
           endpoint: config.scitigerBaseUrl,
           loopback: scitigerLoopback,
           credential: connection.providers.scitiger,
         },
-        legacy: { configured: config.configured, referenceVoiceConfigured: false, label: '兼容 TTS 服务' },
       },
       connection,
       renderer: 'remotion',
@@ -1415,11 +1169,13 @@ export class SpokenVideoMediaHost {
   }
 
   async connection() {
-    const provider = this.connectionSettings?.get?.().provider || 'bailian'
+    // 存量连接设置里可能还带着已下线的渠道名（bailian/legacy）；不折叠的话
+    // status() 不会发布对应的 providers 条目，前端读 undefined → 「服务不可用」，
+    // 用户明明存了 Key 也点不了生成（与 schedule-host 的折叠规则保持一致）。
+    const provider = foldLegacyProvider(this.connectionSettings?.get?.().provider) || 'scitiger'
     return {
       provider,
       providers: {
-        bailian: await this.#credentialStatus('bailian'),
         scitiger: await this.#credentialStatus('scitiger'),
       },
     }
@@ -1444,11 +1200,17 @@ export class SpokenVideoMediaHost {
       return {
         available: true,
         ttsProvider: info.tts_provider === 'local' ? 'local' : 'cloud',
+        mimoModel: typeof info.mimo_model === 'string' && info.mimo_model.trim() ? info.mimo_model.trim() : 'mimo-v2.5-tts',
         mimoVoice: typeof info.mimo_voice === 'string' && info.mimo_voice.trim() ? info.mimo_voice.trim() : null,
         mimoStyle: typeof info.mimo_style === 'string' && info.mimo_style.trim() ? info.mimo_style.trim() : null,
+        mimoVoiceDesign: typeof info.mimo_voice_design === 'string' && info.mimo_voice_design.trim() ? info.mimo_voice_design.trim() : null,
         mimoKeyConfigured: info.mimo_key_configured === true,
         defaultVoice: typeof info.default_voice === 'string' && info.default_voice.trim() ? info.default_voice.trim() : null,
         builtinVoices: Array.isArray(info.builtin_voices) ? info.builtin_voices.filter((voice) => typeof voice === 'string' && voice.trim()) : [],
+        models: Array.isArray(info.mimo_models) ? info.mimo_models.filter((model) => typeof model === 'string' && model.trim()) : [],
+        voiceDesignPresets: Array.isArray(info.voice_design_presets)
+          ? info.voice_design_presets.filter((item) => item && typeof item.text === 'string' && item.text.trim())
+          : [],
         voices: voices
           .filter((voice) => voice && typeof voice.id === 'string' && voice.id.trim())
           .map((voice) => ({ id: voice.id.trim(), hasTxt: voice.hasTxt === true })),
@@ -1596,10 +1358,18 @@ export class SpokenVideoMediaHost {
         mimo: {
           // 只有布尔，没有值。
           apiKeyConfigured: typeof body.mimo?.apiKey === 'string' && Boolean(body.mimo.apiKey.trim()),
+          model: typeof body.mimo?.model === 'string' && body.mimo.model ? body.mimo.model : 'mimo-v2.5-tts',
           voice: typeof body.mimo?.voice === 'string' ? body.mimo.voice : '',
           style: typeof body.mimo?.style === 'string' ? body.mimo.style : '',
+          voiceDesign: typeof body.mimo?.voiceDesign === 'string' ? body.mimo.voiceDesign : '',
           builtinVoices: Array.isArray(info?.builtin_voices)
             ? info.builtin_voices.filter((voice) => typeof voice === 'string' && voice.trim())
+            : [],
+          models: Array.isArray(info?.mimo_models)
+            ? info.mimo_models.filter((model) => typeof model === 'string' && model.trim())
+            : [],
+          voiceDesignPresets: Array.isArray(info?.voice_design_presets)
+            ? info.voice_design_presets.filter((item) => item && typeof item.text === 'string' && item.text.trim())
             : [],
         },
         voices: Array.isArray(voices)
@@ -1630,10 +1400,14 @@ export class SpokenVideoMediaHost {
     if (typeof input.chineseNumbers === 'boolean') patch.chineseNumbers = input.chineseNumbers
     const voice = stringAt(input, ['mimo', 'voice'])
     const style = stringAt(input, ['mimo', 'style'])
+    const model = stringAt(input, ['mimo', 'model'])
+    const voiceDesign = stringAt(input, ['mimo', 'voiceDesign'])
     // 桥接把 style 当可选的语气指令，空串就是「用默认」，不是「清空风格」。
     const mimo = {}
     if (voice !== null) mimo.voice = voice
     if (style !== null) mimo.style = style
+    if (model !== null) mimo.model = model
+    if (voiceDesign !== null) mimo.voiceDesign = voiceDesign
     const apiKey = stringAt(input, ['mimo', 'apiKey'])
     if (apiKey) mimo.apiKey = apiKey
     if (Object.keys(mimo).length) patch.mimo = mimo
@@ -1664,9 +1438,13 @@ export class SpokenVideoMediaHost {
     const body = {}
     const voice = stringAt(input, ['voice'])
     const style = stringAt(input, ['style'])
+    const model = stringAt(input, ['model'])
+    const voiceDesign = stringAt(input, ['voiceDesign'])
     const apiKey = stringAt(input, ['apiKey'])
     if (voice) body.voice = voice
     if (style) body.style = style
+    if (model) body.model = model
+    if (voiceDesign) body.voiceDesign = voiceDesign
     if (apiKey) body.apiKey = apiKey
     try {
       const result = await this.#externalJson(`${base}/admin/mimo-test`, {
@@ -2120,7 +1898,7 @@ export class SpokenVideoMediaHost {
     const tasks = await readAudioTasks(root)
     const query = typeof input.query === 'string' ? input.query.trim().toLowerCase() : ''
     const status = typeof input.status === 'string' && ['all', 'active', 'terminal', 'queued', 'running', 'succeeded', 'failed'].includes(input.status) ? input.status : 'all'
-    const provider = typeof input.provider === 'string' && ['all', 'bailian', 'scitiger', 'legacy'].includes(input.provider) ? input.provider : 'all'
+    const provider = typeof input.provider === 'string' && ['all', 'scitiger', 'bridge'].includes(input.provider) ? input.provider : 'all'
     const recovered = await this.#recoverInterruptedAudioTasks(root, tasks)
     const projects = accountId || generalOnly ? await this.projectsStore.list(agent) : []
     const accountsByProject = new Map(projects.map((project) => [project.id, project.account?.id || null]))
@@ -2130,7 +1908,7 @@ export class SpokenVideoMediaHost {
     })
     const filtered = scoped
       .filter((task) => status === 'all' || (status === 'active' ? ['queued', 'running'].includes(task.status) : status === 'terminal' ? ['succeeded', 'failed'].includes(task.status) : task.status === status))
-      .filter((task) => provider === 'all' || task.input?.provider === provider)
+      .filter((task) => provider === 'all' || foldLegacyProvider(task.input?.provider) === provider)
       .filter((task) => !query || `${task.source?.title || ''}\n${task.source?.text || ''}`.toLowerCase().includes(query))
       .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
     const offset = Number.isSafeInteger(input.offset) && input.offset >= 0 ? input.offset : 0
@@ -2315,6 +2093,25 @@ export class SpokenVideoMediaHost {
     const info = await stat(file)
     if (info.size > MAX_MEDIA_BYTES) fail('SPOKEN_VIDEO_MEDIA_FILE_TOO_LARGE', '媒体文件超过浏览器预览的 80 MiB 限制。')
     return { file: task.result.audio.file, mediaType: task.result.audio.mediaType, bytes: info.size, data: (await readFile(file)).toString('base64') }
+  }
+
+  /**
+   * 在系统文件管理器里定位这条任务的音频文件。
+   *
+   * 工作台跑在本机，弹出的窗口就是本机文件夹；通过外网隧道访问时，打开的仍是
+   * 服务器那台机器的文件夹——所以这里用宿主机的文件管理器，而不是浏览器下载。
+   */
+  async openAudioTaskFolder(agent, request) {
+    const input = object(request, '打开音频目录请求')
+    const taskId = text(input.taskId, '音频任务标识', 64)
+    const root = await audioTasksRootFor(agent)
+    const task = (await this.#recoverInterruptedAudioTasks(root)).tasks.find((item) => item.id === taskId)
+    if (!task?.result?.audio?.file) fail('SPOKEN_VIDEO_STAGE_BLOCKED', '当前音频任务没有可用音频。')
+    // 路径先过校验再交给系统命令：任务文件里存的是相对路径，越界的引用必须在这里拦下。
+    const file = await this.#audioTaskFile(root, task.result.audio.file, '音频任务媒体')
+    if (this.fileRevealer) await this.fileRevealer(file)
+    else revealInFileManager(file)
+    return { file: task.result.audio.file }
   }
 
   async readVideoTaskMedia(agent, request) {
@@ -2540,23 +2337,9 @@ export class SpokenVideoMediaHost {
       await this.#prepareRunCredentials(task)
       let generated
       let outputFormat = task.input.outputFormat || 'wav'
-      if (task.input.provider === 'bailian') {
-        generated = await this.#bailianVoiceover(root, task, task.source.text, task.input)
-        outputFormat = 'wav'
-      } else if (task.input.provider === 'scitiger') {
-        generated = await this.#scitigerVoiceover(root, task, task.source.text, task.input)
-      } else {
-        const config = this.#legacyConfig()
-        outputFormat = task.input.outputFormat || config.outputFormat
-        const submitted = serviceData(await this.#json(config, '/api/v1/tts/synthesize', {
-          method: 'POST', body: JSON.stringify({ text: task.source.text, provider: config.provider, output_format: outputFormat, voice_settings: { rate: task.input.rate, volume: task.input.volume, pitch: task.input.pitch }, interval_silence: 200, max_text_tokens_per_segment: 120, ...(task.input.voiceId ? { voice_id: task.input.voiceId } : {}) }),
-        }), 'TTS 提交')
-        const externalTaskId = taskIdFromService(submitted, 'TTS')
-        const completed = await this.#poll(config, `/api/v1/tts/tasks/${encodeURIComponent(externalTaskId)}`, 'TTS')
-        generated = { provider: 'legacy', taskId: externalTaskId, voiceId: task.input.voiceId || null, audio: await this.#download(`${config.baseUrl}/api/v1/tts/tasks/${encodeURIComponent(externalTaskId)}/audio`, '兼容服务配音', serviceHeaders(config)), durationSeconds: Number(completed.duration) || null }
-      }
+      generated = await this.#scitigerVoiceover(root, task, task.source.text, task.input)
       await this.#audioEvent(root, task.id, '配音服务已返回，处理并检测音频', { provider: generated.provider, taskId: generated.taskId || null })
-      const written = await this.#writeAudioTaskVoiceover(root, task.id, generated.audio, outputFormat, task.input, generated.provider === 'bailian')
+      const written = await this.#writeAudioTaskVoiceover(root, task.id, generated.audio, outputFormat, task.input, false)
       const probe = await this.#probe(written.output)
       const audio = { file: written.relativePath, mediaType: mediaTypeForFormat(outputFormat), bytes: written.bytes, durationSeconds: probe.durationSeconds || generated.durationSeconds || null, sampleRate: probe.sampleRate }
       task = await this.#mutateAudioTask(root, task.id, (current) => ({ ...current, result: { audio, provider: generated.provider, taskId: generated.taskId || null, voiceId: generated.voiceId || current.input.voiceId || null } }))
@@ -2637,7 +2420,7 @@ export class SpokenVideoMediaHost {
       // 句在段内按字符占比），有它就直接产出精确 SRT、跳过 ASR——时间不靠猜。
       // 拿不到（旧任务 / 非桥接 provider / 原稿与时间轴句数对不上）才走 ASR+守卫。
       let viaTimeline = false
-      if (input.provider === 'scitiger') {
+      if (input.provider === 'scitiger' || input.provider === 'bridge') {
         try {
           const timelineSrt = await segmentTimelineSrt(task, this.environment, (url, label) => this.#externalJson(url, { signal: AbortSignal.timeout(8000) }, label))
           if (timelineSrt) {
@@ -2646,18 +2429,8 @@ export class SpokenVideoMediaHost {
           }
         } catch { /* 快路径失败不阻塞：落回 ASR 路径 */ }
       }
-      if (!viaTimeline && input.provider === 'bailian') {
-        const generated = await this.#bailianSubtitles({ id: subtitleId }, audioPath, input.language, task.source.text)
-        result = { taskId: generated.taskId, subtitle: subtitleResult({ subtitle_srt: generated.srt }), diagnostics: { provider: 'bailian-realtime-asr', alignment: generated.referenceAligned ? 'reference-text' : 'asr' } }
-      }
-      if (!viaTimeline && input.provider === 'scitiger') {
+      if (!viaTimeline) {
         result = await this.#scitigerSubtitles({ id: subtitleId }, audio, audioPath, task.source.text, input)
-      } else if (!viaTimeline) {
-        const config = this.#legacyConfig()
-        const submitted = serviceData(await this.#json(config, '/api/v1/subtitles/generate', { method: 'POST', body: JSON.stringify({ audio_base64: audio.toString('base64'), audio_format: extname(audioPath).slice(1) || 'wav', language: input.language, reference_text: task.source.text, return_diagnostics: true, subtitle_options: { max_chars: 22, min_duration: 0.6, max_duration: 4, punctuation_policy: 'strip_trailing', ai_optimize: input.aiOptimize } }) }), '字幕对齐提交')
-        const externalTaskId = taskIdFromService(submitted, '字幕对齐')
-        const completed = await this.#poll(config, `/api/v1/subtitles/tasks/${encodeURIComponent(externalTaskId)}`, '字幕对齐')
-        result = { taskId: externalTaskId, subtitle: subtitleResult(completed), diagnostics: completed.diagnostics || null }
       }
       // 与视频路径同源的对齐守卫：云端 ASR 的时间轴可能与真实音频脱节（文本全对、
       // 时间轴滞后 4-10 秒且各段不均匀，实测 2026-10-01《牡丹亭》）。守卫把 cue 与
@@ -2803,12 +2576,6 @@ export class SpokenVideoMediaHost {
     }
   }
 
-  #legacyConfig() {
-    const config = mediaServiceConfig(this.environment)
-    if (!config.configured) fail('SPOKEN_VIDEO_MEDIA_NOT_CONFIGURED', '未配置兼容 TTS/ASR 服务。设置 LWB_SPOKEN_VIDEO_TTS_BASE_URL 后重试，或选择百炼 BYOK / SciTiger 云端。')
-    return config
-  }
-
   #apiKey(run, provider) {
     const apiKey = this.runSecrets.get(run.id)?.apiKey
     if (!apiKey) fail('SPOKEN_VIDEO_MEDIA_CREDENTIAL_REQUIRED', `${provider}尚未保存 API Key。请在连接设置中保存后重试。`)
@@ -2835,11 +2602,10 @@ export class SpokenVideoMediaHost {
   async #prepareRunCredentials(run) {
     if (!['voiceover', 'subtitles'].includes(run.type)) return
     const provider = run.input?.provider
-    if (provider === 'legacy') return
     const ref = mediaCredentialRef(provider)
     const resolved = await this.#credentials().resolve(ref)
     if (!resolved?.value) {
-      const label = provider === 'bailian' ? '百炼 BYOK' : 'SciTiger 云端'
+      const label = '本机桥接（小米 MiMo）'
       fail('SPOKEN_VIDEO_MEDIA_CREDENTIAL_REQUIRED', `${label}尚未保存 API Key。请在连接设置中保存后重试。`)
     }
     this.runSecrets.set(run.id, { apiKey: resolved.value })
@@ -2919,190 +2685,14 @@ export class SpokenVideoMediaHost {
     )
   }
 
-  async #normalizeBailianWav(source, output, label) {
-    try {
-      await execFileAsync('ffmpeg', ['-v', 'error', '-xerror', '-y', '-i', source, '-map', '0:a:0', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', output], { signal: this.signal, maxBuffer: 1024 * 1024 * 4 })
-      await chmod(output, 0o600)
-      const audio = await readFile(output)
-      const containerError = wavContainerError(audio)
-      if (containerError) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `${label}标准化后 WAV 校验失败：${containerError}。`)
-      const probe = await this.#probe(output)
-      if (!probe.hasAudio || !probe.durationSeconds) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `${label}标准化后 WAV 不含可播放的音频流。`)
-      return { bytes: audio.length, probe }
-    } catch (error) {
-      if (error instanceof SpokenVideoMediaError) throw error
-      throw commandError(error, `${label}音频标准化`)
-    }
-  }
 
-  async #downloadBailianWav(url, source, output, details) {
-    const label = `百炼 TTS 第 ${details.index}/${details.total} 段配音`
-    let lastError = null
-    for (let attempt = 1; attempt <= BAILIAN_WAV_DOWNLOAD_ATTEMPTS; attempt += 1) {
-      try {
-        const downloaded = await this.#downloadData(url, label)
-        const containerError = wavContainerError(downloaded.bytes, { allowUnboundedSize: true })
-        if (containerError) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `${label} WAV 校验失败：${containerError}。`)
-        const sourceAudio = repairUnboundedWavHeader(downloaded.bytes)
-        const repairedError = wavContainerError(sourceAudio)
-        if (repairedError) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `${label} WAV 长度修复后校验失败：${repairedError}。`)
-        await writeFile(source, sourceAudio, { mode: 0o600 })
-        const probe = await this.#probe(source)
-        if (!probe.hasAudio || !probe.durationSeconds) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `${label} WAV 不含可播放的音频流。`)
-        return this.#normalizeBailianWav(source, output, label)
-      } catch (error) {
-        lastError = error
-        await unlink(source).catch(() => {})
-        await unlink(output).catch(() => {})
-        if (attempt < BAILIAN_WAV_DOWNLOAD_ATTEMPTS) await delay(250 * attempt)
-      }
-    }
-    if (lastError?.code === 'SPOKEN_VIDEO_MEDIA_SERVICE_UNREACHABLE') throw lastError
-    const reason = lastError instanceof Error ? lastError.message : String(lastError)
-    throw new SpokenVideoMediaError(
-      'SPOKEN_VIDEO_MEDIA_FILE_INVALID',
-      `${label}下载或校验失败（已重试 ${BAILIAN_WAV_DOWNLOAD_ATTEMPTS} 次${details.requestId ? `，请求 ${details.requestId}` : ''}）：${reason}`,
-    )
-  }
 
-  async #bailianTtsSegment(config, apiKey, model, voice, segment, details, source, output) {
-    let lastError = null
-    for (let attempt = 1; attempt <= BAILIAN_TTS_SEGMENT_ATTEMPTS; attempt += 1) {
-      const body = await this.#externalJson(`${config.bailianBaseUrl}/services/aigc/multimodal-generation/generation`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, input: { text: segment, voice, language_type: 'Chinese' } }),
-        signal: AbortSignal.timeout(MAX_POLL_MS),
-      }, `百炼 TTS 第 ${details.index}/${details.total} 段`)
-      const audioUrl = stringAt(body, ['output', 'audio', 'url'])
-      if (!audioUrl) fail('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', `百炼 TTS 第 ${details.index}/${details.total} 段没有返回完整音频地址。`)
-      const requestId = stringAt(body, ['request_id'])
-      try {
-        const downloaded = await this.#downloadBailianWav(audioUrl, source, output, { ...details, requestId })
-        return { ...downloaded, requestId }
-      } catch (error) {
-        if (error?.code && error.code !== 'SPOKEN_VIDEO_MEDIA_FILE_INVALID') throw error
-        lastError = error
-        if (attempt < BAILIAN_TTS_SEGMENT_ATTEMPTS) await delay(500 * attempt)
-      }
-    }
-    if (lastError?.code && lastError.code !== 'SPOKEN_VIDEO_MEDIA_FILE_INVALID') throw lastError
-    const reason = lastError instanceof Error ? lastError.message : String(lastError)
-    throw new SpokenVideoMediaError(
-      'SPOKEN_VIDEO_MEDIA_FILE_INVALID',
-      `百炼 TTS 第 ${details.index}/${details.total} 段在重新合成后仍无有效 WAV：${reason}`,
-    )
-  }
 
-  async #concatBailianWavSegments(directory, chunks) {
-    if (chunks.length === 1) return readFile(chunks[0].file)
-    const manifest = join(directory, 'concat.txt')
-    const output = join(directory, 'merged.wav')
-    await writeFile(manifest, `${chunks.map((chunk) => ffmpegConcatEntry(chunk.file)).join('\n')}\n`, { encoding: 'utf8', mode: 0o600 })
-    try {
-      await execFileAsync('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', manifest, '-map', '0:a:0', '-c:a', 'pcm_s16le', output], { signal: this.signal, maxBuffer: 1024 * 1024 * 4 })
-      await chmod(output, 0o600)
-      const audio = await readFile(output)
-      if (!audio.length || audio.length > MAX_MEDIA_BYTES) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '百炼 TTS 合并后的 WAV 为空或超出 80 MiB 限制。')
-      const containerError = wavContainerError(audio)
-      if (containerError) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', `百炼 TTS 合并后的 WAV 校验失败：${containerError}。`)
-      const probe = await this.#probe(output)
-      if (!probe.hasAudio || !probe.durationSeconds) fail('SPOKEN_VIDEO_MEDIA_FILE_INVALID', '百炼 TTS 合并后的 WAV 不含可播放的音频流。')
-      return audio
-    } catch (error) {
-      if (error instanceof SpokenVideoMediaError) throw error
-      throw commandError(error, '百炼 TTS 分段音频合并')
-    }
-  }
 
-  async #bailianVoiceover(root, run, script, input) {
-    const config = mediaServiceConfig(this.environment)
-    const apiKey = this.#apiKey(run, '百炼 BYOK')
-    const usesReference = ['system', 'reference', 'upload'].includes(input.voiceSource)
-    const reference = usesReference ? await this.#voiceReference(root, input) : null
-    const voice = reference
-      ? await this.#bailianReferenceVoice(config, apiKey, reference)
-      : input.voiceSource === 'preset' && input.voiceId
-        ? input.voiceId
-        : config.bailianDefaultVoice
-    const model = reference ? config.bailianVoiceCloneModel : config.bailianModel
-    const segments = splitTtsText(script)
-    const directory = await mkdtemp(join(tmpdir(), 'lwb-spoken-video-bailian-'))
-    const chunks = []
-    const taskIds = []
-    try {
-      for (const [offset, segment] of segments.entries()) {
-        const index = offset + 1
-        const file = join(directory, `segment-${String(index).padStart(3, '0')}.wav`)
-        const source = join(directory, `segment-${String(index).padStart(3, '0')}.source.wav`)
-        const chunk = await this.#bailianTtsSegment(config, apiKey, model, voice, segment, { index, total: segments.length }, source, file)
-        chunks.push({ ...chunk, file })
-        if (chunk.requestId) taskIds.push(chunk.requestId)
-      }
-      return { provider: 'bailian', taskId: taskIds.at(-1) || null, voiceId: voice, audio: await this.#concatBailianWavSegments(directory, chunks) }
-    } finally {
-      await rm(directory, { recursive: true, force: true }).catch(() => {})
-    }
-  }
 
-  #storedBailianReferenceVoices() {
-    const values = this.connectionSettings?.get?.().bailianReferenceVoices
-    if (!values || typeof values !== 'object' || Array.isArray(values)) return {}
-    return Object.fromEntries(Object.entries(values).filter(([key, voice]) => /^[a-f0-9]{64}$/u.test(key) && typeof voice === 'string' && voice.trim()))
-  }
 
-  async #storeBailianReferenceVoice(cacheKey, voice) {
-    if (!this.connectionSettings?.update) return
-    const entries = Object.entries(this.#storedBailianReferenceVoices()).filter(([key]) => key !== cacheKey)
-    const referenceVoices = Object.fromEntries([...entries.slice(-15), [cacheKey, voice]])
-    await this.connectionSettings.update({ bailianReferenceVoices: referenceVoices })
-  }
 
-  async #bailianReferenceVoice(config, apiKey, reference) {
-    const cacheKey = createHash('sha256')
-      .update(`${config.bailianBaseUrl}\u0000${apiKey}\u0000${config.bailianVoiceCloneModel}\u0000${reference.id}\u0000`)
-      .update(reference.audio)
-      .digest('hex')
-    const cached = this.bailianReferenceVoices.get(cacheKey)
-    if (cached) return cached
-    const saved = this.#storedBailianReferenceVoices()[cacheKey]
-    if (saved) {
-      this.bailianReferenceVoices.set(cacheKey, saved)
-      return saved
-    }
-    const inFlight = this.bailianReferenceVoiceEnrollments.get(cacheKey)
-    if (inFlight) return inFlight
-    const enrollment = this.#enrollBailianReferenceVoice(cacheKey, config, apiKey, reference)
-    this.bailianReferenceVoiceEnrollments.set(cacheKey, enrollment)
-    try {
-      return await enrollment
-    } finally {
-      this.bailianReferenceVoiceEnrollments.delete(cacheKey)
-    }
-  }
 
-  async #enrollBailianReferenceVoice(cacheKey, config, apiKey, reference) {
-    const body = await this.#externalJson(`${config.bailianBaseUrl}/services/audio/tts/customization`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: config.bailianVoiceEnrollmentModel,
-        input: {
-          action: 'create',
-          target_model: config.bailianVoiceCloneModel,
-          preferred_name: `${reference.id === DEFAULT_VOICE_PROFILE.id ? 'lwb_tiffy' : 'lwb_voice'}_${cacheKey.slice(0, 6)}`,
-          audio: { data: `data:${reference.mediaType};base64,${reference.audio.toString('base64')}` },
-          language: 'zh',
-        },
-      }),
-      signal: AbortSignal.timeout(MAX_POLL_MS),
-    }, '百炼参考音色复刻')
-    const voice = stringAt(body, ['output', 'voice'])
-    if (!voice) fail('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', '百炼参考音色复刻没有返回有效结果。')
-    this.bailianReferenceVoices.set(cacheKey, voice)
-    await this.#storeBailianReferenceVoice(cacheKey, voice)
-    return voice
-  }
 
   #scitigerHeaders(run, json = true) {
     return {
@@ -3125,7 +2715,7 @@ export class SpokenVideoMediaHost {
 
   async #scitigerJson(run, path, init, label) {
     const config = mediaServiceConfig(this.environment)
-    if (!config.scitigerConfigured) fail('SPOKEN_VIDEO_MEDIA_NOT_CONFIGURED', '未配置 SciTiger 云端地址。')
+    if (!config.scitigerConfigured) fail('SPOKEN_VIDEO_MEDIA_NOT_CONFIGURED', '本地媒体桥接地址无效：请检查 LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL 配置，或用「启动工作台.cmd」启动（它会把桥接指到 127.0.0.1:8199）后重试。')
     const { json = true, headers = {}, ...request } = init
     return this.#externalJson(`${config.scitigerBaseUrl}${path}`, { ...request, headers: { ...this.#scitigerHeaders(run, json), ...headers } }, label)
   }
@@ -3150,7 +2740,10 @@ export class SpokenVideoMediaHost {
         const key = `${stage ?? ''}@${progress ?? ''}@${queueAhead ?? ''}`
         if (key !== lastProgressKey) {
           lastProgressKey = key
-          await Promise.resolve(onProgress({ stage, progress, queueAhead })).catch(() => {})
+          // 进度写盘失败必须可见：此前这里的 .catch(() => {}) 把存储错误吞掉，
+          // 「进度写不进去」变成了「看起来像卡死」，且执行记录一条都不留。
+          // 现在直接让错误传出去，由调用方按任务失败落盘并报给用户。
+          await onProgress({ stage, progress, queueAhead })
         }
       }
       await delay(POLL_INTERVAL_MS)
@@ -3158,7 +2751,34 @@ export class SpokenVideoMediaHost {
     fail('SPOKEN_VIDEO_MEDIA_SERVICE_TIMEOUT', `${label}任务在 ${MAX_POLL_MS / 60_000} 分钟内未完成。`)
   }
 
-  async #scitigerVoiceover(root, run, script, input) {
+  /**
+   * 音频任务路径的进度落地器：写 audio-tasks 存储。
+   * 项目配音路径走 #mutateRun，不能硬编码在这里——否则项目路径找不到
+   * audio task，进度落不盘还被静默吞掉（2026-11 审出的缺陷 1）。
+   */
+  async #writeAudioTaskProgress(root, runId, { progressInfo, label }) {
+    await this.#mutateAudioTask(root, runId, (task) => {
+      // 卡片要一眼看到「分段合成 3/5 · 54%」，执行记录要留下完整轨迹，一次落盘。
+      task.progressInfo = progressInfo
+      executionEvent(task, label, { actor: '媒体处理' })
+      return task
+    })
+  }
+
+  async #scitigerVoiceover(root, run, script, input, onProgress = (snapshot) => this.#writeAudioTaskProgress(root, run.id, snapshot)) {
+    // 拼错的模型名不拦住的话，桥接会静默回落到默认模型——用户听到的是
+    // 另一个音色，任务却照常 succeeded。按桥接报的模型列表提前拦下并给出可选项。
+    if (input.bridge?.model) {
+      try {
+        const info = await this.bridgeVoiceoverInfo()
+        if (info.available && Array.isArray(info.models) && info.models.length && !info.models.includes(input.bridge.model)) {
+          fail('SPOKEN_VIDEO_MEDIA_MODEL_UNSUPPORTED', `桥接不支持合成模型「${input.bridge.model}」。可用模型：${info.models.join('、')}。请在「配音设置」里改选列表中的模型后重试；如需新增模型，先在桥接配置中心配置。`)
+        }
+      } catch (error) {
+        // 桥接信息拿不到时不阻塞提交（桥接自己会处理未知模型），但拦截错误本身要原样抛出。
+        if (error instanceof SpokenVideoMediaError && error.code === 'SPOKEN_VIDEO_MEDIA_MODEL_UNSUPPORTED') throw error
+      }
+    }
     const reference = ['system', 'reference', 'upload'].includes(input.voiceSource) ? await this.#voiceReference(root, input) : null
     const submitted = this.#scitigerResponse(await this.#scitigerJson(run, '/api/v1/tts/jobs', {
       method: 'POST',
@@ -3171,6 +2791,8 @@ export class SpokenVideoMediaHost {
         voice_settings: { rate: input.rate, volume: input.volume, pitch: input.pitch },
         ...(input.bridge?.channel ? { tts_provider: input.bridge.channel } : {}),
         ...(input.bridge?.style ? { style: input.bridge.style } : {}),
+        ...(input.bridge?.model ? { mimo_model: input.bridge.model } : {}),
+        ...(input.bridge?.voiceDesign ? { voice_design: input.bridge.voiceDesign } : {}),
       }),
     }, 'SciTiger TTS 提交'), 'SciTiger TTS 提交')
     const taskId = stringAt(submitted, ['job_id'], ['task_id'], ['id'])
@@ -3179,11 +2801,9 @@ export class SpokenVideoMediaHost {
       const queued = !stage && Number.isFinite(queueAhead) && queueAhead > 0
       const stageText = queued ? `排队中（前面还有 ${queueAhead} 个任务）` : (stage || '处理中')
       const label = queued ? stageText : `配音进行中：${stageText}${progress == null ? '' : ` · ${progress}%`}`
-      await this.#mutateAudioTask(root, run.id, (task) => {
-        // 卡片要一眼看到「分段合成 3/5 · 54%」，执行记录要留下完整轨迹，一次落盘。
-        task.progressInfo = { stage: stageText, progress: queued || progress == null ? null : progress, updatedAt: new Date().toISOString() }
-        executionEvent(task, label, { actor: '媒体处理' })
-        return task
+      await onProgress({
+        label,
+        progressInfo: { stage: stageText, progress: queued || progress == null ? null : progress, updatedAt: new Date().toISOString() },
       })
     })
     const audioUrl = stringAt(completed, ['result', 'audio_url'], ['audio_url'], ['result', 'url'], ['url'])
@@ -3191,119 +2811,6 @@ export class SpokenVideoMediaHost {
     return { provider: 'scitiger', taskId, voiceId: input.voiceId || null, voiceName: reference?.name || input.voiceName || null, audio: await this.#downloadWithRetry(audioUrl, 'SciTiger 配音', this.#scitigerHeaders(run, false)) }
   }
 
-  async #bailianSubtitles(run, audioPath, language, referenceText) {
-    this.signal?.throwIfAborted()
-    const config = mediaServiceConfig(this.environment)
-    const apiKey = this.#apiKey(run, '百炼 BYOK')
-    const endpoint = new URL(config.bailianAsrWebSocketUrl)
-    endpoint.searchParams.set('model', config.bailianAsrModel)
-    const taskId = `asr_${randomUUID()}`
-    const sentences = []
-    const speech = new Map()
-    const socket = new WebSocket(endpoint, {
-      headers: { Authorization: `Bearer ${apiKey}`, 'User-Agent': 'spoken-video-media-host/1.0' },
-      handshakeTimeout: 30_000,
-      perMessageDeflate: false,
-    })
-    let readyResolve
-    let readyReject
-    let finishedResolve
-    let finishedReject
-    let socketFailureReject
-    let completed = false
-    let socketError = null
-    const ready = new Promise((resolvePromise, reject) => { readyResolve = resolvePromise; readyReject = reject })
-    const finished = new Promise((resolvePromise, reject) => { finishedResolve = resolvePromise; finishedReject = reject })
-    const socketFailed = new Promise((_, reject) => { socketFailureReject = reject })
-    // Attach observers immediately so an early handshake or API error cannot become an unhandled rejection.
-    void ready.catch(() => {})
-    void finished.catch(() => {})
-    void socketFailed.catch(() => {})
-    const failSocket = (error) => {
-      if (socketError) return socketError
-      const failure = error instanceof SpokenVideoMediaError
-        ? error
-        : new SpokenVideoMediaError('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', `百炼实时 ASR 失败：${error instanceof Error ? error.message : String(error)}`)
-      socketError = failure
-      readyReject(failure)
-      finishedReject(failure)
-      socketFailureReject(failure)
-      return failure
-    }
-    socket.once('error', failSocket)
-    const closedEarly = (code, reason) => {
-      if (completed) return
-      const detail = Buffer.isBuffer(reason) ? reason.toString('utf8').trim() : String(reason || '').trim()
-      failSocket(new SpokenVideoMediaError('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', `百炼实时 ASR 连接提前关闭（${code}${detail ? `：${detail}` : ''}）。`))
-    }
-    socket.once('close', closedEarly)
-    const abortSocket = () => { failSocket(this.signal.reason); socket.terminate() }
-    this.signal?.addEventListener('abort', abortSocket, { once: true })
-    socket.on('message', (raw, isBinary) => {
-      if (isBinary) return
-      let event
-      try { event = JSON.parse(String(raw)) } catch { return }
-      if (event?.type === 'error') {
-        failSocket(new SpokenVideoMediaError('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', `百炼实时 ASR 失败：${event?.error?.message || event?.error?.code || '未知原因'}`))
-      } else if (event?.type === 'session.updated') {
-        readyResolve()
-      } else if (event?.type === 'input_audio_buffer.speech_started' && typeof event.item_id === 'string') {
-        speech.set(event.item_id, { begin: Number(event.audio_start_ms), end: null })
-      } else if (event?.type === 'input_audio_buffer.speech_stopped' && typeof event.item_id === 'string') {
-        const entry = speech.get(event.item_id) || { begin: null, end: null }
-        entry.end = Number(event.audio_end_ms)
-        speech.set(event.item_id, entry)
-      } else if (event?.type === 'conversation.item.input_audio_transcription.completed') {
-        const entry = speech.get(event.item_id)
-        if (entry && typeof event.transcript === 'string' && event.transcript.trim() && Number.isFinite(entry.begin) && Number.isFinite(entry.end)) {
-          sentences.push({ begin: entry.begin, end: entry.end, text: event.transcript })
-        }
-      } else if (event?.type === 'conversation.item.input_audio_transcription.failed') {
-        failSocket(new SpokenVideoMediaError('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', `百炼实时 ASR 识别失败：${event?.error?.message || event?.error?.code || '未知原因'}`))
-      } else if (event?.type === 'session.finished') {
-        completed = true
-        finishedResolve()
-      }
-    })
-    try {
-      await new Promise((resolvePromise, reject) => {
-        socket.once('open', resolvePromise)
-        socket.once('error', reject)
-      })
-      await Promise.race([
-        sendSocket(socket, JSON.stringify({
-          type: 'session.update',
-          event_id: randomUUID(),
-          session: {
-            input_audio_format: 'pcm',
-            sample_rate: BAILIAN_ASR_SAMPLE_RATE,
-            input_audio_transcription: { language },
-            turn_detection: { type: 'server_vad', threshold: 0, silence_duration_ms: 400 },
-          },
-        })),
-        socketFailed,
-      ])
-      await awaitWithin(ready, 30_000, 'SPOKEN_VIDEO_MEDIA_SERVICE_TIMEOUT', '百炼实时 ASR 没有在 30 秒内启动。')
-      const conversion = spawn('ffmpeg', ['-v', 'error', '-i', audioPath, '-ac', '1', '-ar', String(BAILIAN_ASR_SAMPLE_RATE), '-f', 's16le', 'pipe:1'], { signal: this.signal, stdio: ['ignore', 'pipe', 'pipe'] })
-      const conversionDone = waitForChild(conversion, '百炼 ASR 音频转换')
-      void conversionDone.catch(() => {})
-      try {
-        await sendRealtimePcm(socket, conversion.stdout, socketFailed)
-        await conversionDone
-      } finally {
-        if (conversion.exitCode === null && conversion.signalCode === null) conversion.kill()
-        await conversionDone.catch(() => {})
-      }
-      await Promise.race([sendSocket(socket, JSON.stringify({ type: 'session.finish', event_id: randomUUID() })), socketFailed])
-      await awaitWithin(finished, MAX_POLL_MS, 'SPOKEN_VIDEO_MEDIA_SERVICE_TIMEOUT', '百炼实时 ASR 在限定时间内未完成。')
-      return { taskId, srt: srtFromSentences(alignSentencesToReference(sentences, referenceText)), referenceAligned: Boolean(String(referenceText || '').trim()) }
-    } finally {
-      this.signal?.removeEventListener('abort', abortSocket)
-      await closeSocket(socket)
-      socket.removeListener('error', failSocket)
-      socket.removeListener('close', closedEarly)
-    }
-  }
 
   async #scitigerUploadAudio(run, audio, audioPath, label = 'SciTiger 音频上传') {
     const extension = extname(audioPath).slice(1).toLowerCase() || 'wav'
@@ -3332,38 +2839,6 @@ export class SpokenVideoMediaHost {
     if (!taskId) fail('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', 'SciTiger 字幕没有返回任务标识。')
     const completed = await this.#scitigerPoll(run, `/api/v1/subtitle/jobs/${encodeURIComponent(taskId)}`, 'SciTiger 字幕')
     return { taskId, subtitle: subtitleResult(completed), assetId }
-  }
-
-  async #json(config, path, init) {
-    let response
-    try {
-      response = await this.fetch(`${config.baseUrl}${path}`, { ...init, headers: { ...serviceHeaders(config), ...(init?.headers || {}) } })
-    } catch (error) {
-      throw new SpokenVideoMediaError('SPOKEN_VIDEO_MEDIA_SERVICE_UNREACHABLE', `无法连接媒体服务：${error instanceof Error ? error.message : String(error)}`)
-    }
-    let body
-    try {
-      body = await response.json()
-    } catch {
-      throw new SpokenVideoMediaError('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', '媒体服务返回了无效 JSON。')
-    }
-    if (!response.ok) throw new SpokenVideoMediaError('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', `媒体服务请求失败（HTTP ${response.status}）。`)
-    return body
-  }
-
-  async #poll(config, path, label) {
-    const started = Date.now()
-    while (Date.now() - started < MAX_POLL_MS) {
-      const data = serviceData(await this.#json(config, path, { method: 'GET' }), `${label}状态查询`)
-      const state = taskState(data, label)
-      if (state === 'completed') return data
-      if (['failed', 'cancelled'].includes(state)) {
-        const reason = typeof data.error_message === 'string' ? `：${data.error_message}` : ''
-        fail('SPOKEN_VIDEO_MEDIA_SERVICE_FAILED', `${label}任务${state}${reason}`)
-      }
-      await delay(POLL_INTERVAL_MS)
-    }
-    fail('SPOKEN_VIDEO_MEDIA_SERVICE_TIMEOUT', `${label}任务在 ${MAX_POLL_MS / 60_000} 分钟内未完成。`)
   }
 
   async #videoBgm(root, descriptor) {
@@ -3465,34 +2940,17 @@ export class SpokenVideoMediaHost {
     const input = run.input
     let generated
     let outputFormat = input.outputFormat || 'wav'
-    if (input.provider === 'bailian') {
-      generated = await this.#bailianVoiceover(root, run, script, input)
-      outputFormat = 'wav'
-    } else if (input.provider === 'scitiger') {
-      generated = await this.#scitigerVoiceover(root, run, script, input)
-    } else {
-      const config = this.#legacyConfig()
-      outputFormat = input.outputFormat || config.outputFormat
-      const payload = {
-        text: script,
-        provider: config.provider,
-        output_format: outputFormat,
-        voice_settings: { rate: input.rate, volume: input.volume, pitch: input.pitch },
-        interval_silence: 200,
-        max_text_tokens_per_segment: 120,
-        ...(input.voiceId ? { voice_id: input.voiceId } : {}),
-      }
-      const submitted = serviceData(await this.#json(config, '/api/v1/tts/synthesize', { method: 'POST', body: JSON.stringify(payload) }), 'TTS 提交')
-      const taskId = taskIdFromService(submitted, 'TTS')
-      const completed = await this.#poll(config, `/api/v1/tts/tasks/${encodeURIComponent(taskId)}`, 'TTS')
-      generated = {
-        provider: 'legacy', taskId, voiceId: input.voiceId || null,
-        audio: await this.#download(`${config.baseUrl}/api/v1/tts/tasks/${encodeURIComponent(taskId)}/audio`, '兼容服务配音', serviceHeaders(config)),
-        durationSeconds: Number(completed.duration) || null,
-      }
-    }
+    generated = await this.#scitigerVoiceover(root, run, script, input, async ({ progressInfo, label }) => {
+      // 项目配音的进度落地器：run 存在 projects/<id>/media/runs.json，不是 audio task。
+      // 写错存储此前抛 NOT_FOUND 且被吞，项目卡不显示进度、执行记录为空。
+      await this.#mutateRun(root, run.id, (current) => {
+        current.progressInfo = progressInfo
+        executionEvent(current, label, { actor: '媒体处理' })
+        return { ...current }
+      })
+    })
     await this.#runEvent(root, run.id, '配音服务已返回，处理并检测音频', { provider: generated.provider, taskId: generated.taskId })
-    const written = await this.#writeVoiceoverAudio(root, run.id, generated.audio, outputFormat, input, generated.provider === 'bailian')
+    const written = await this.#writeVoiceoverAudio(root, run.id, generated.audio, outputFormat, input, false)
     const { relativePath, output } = written
     const probe = await this.#probe(output)
     await this.#mutateRun(root, run.id, (current) => ({ ...current, result: { audio: { file: relativePath, mediaType: mediaTypeForFormat(outputFormat), bytes: written.bytes, durationSeconds: probe.durationSeconds, sampleRate: probe.sampleRate }, taskId: generated.taskId } }))
@@ -3527,7 +2985,7 @@ export class SpokenVideoMediaHost {
     // 守卫的锚点修正只能在锚点间插值，句间仍有 1~3s 残差。拿不到时间轴
     // （旧配音 / 非桥接 provider / 原稿句数与时间轴对不上）才走 ASR+守卫。
     let viaTimeline = false
-    if (run.input.provider === 'scitiger') {
+    if (run.input.provider === 'scitiger' || run.input.provider === 'bridge') {
       try {
         const timelineSrt = await segmentTimelineSrt({ input: run.input, source: { text: script }, result: { taskId: detail.artifacts?.voiceover?.data?.taskId } }, this.environment, (url, label) => this.#externalJson(url, { signal: AbortSignal.timeout(8000) }, label), { audioPath })
         if (timelineSrt) {
@@ -3536,27 +2994,8 @@ export class SpokenVideoMediaHost {
         }
       } catch { /* 快路径失败不阻塞：落回 ASR 路径 */ }
     }
-    if (!viaTimeline && run.input.provider === 'bailian') {
-      const generated = await this.#bailianSubtitles(run, audioPath, run.input.language, script)
-      result = { taskId: generated.taskId, subtitle: subtitleResult({ subtitle_srt: generated.srt }), diagnostics: { provider: 'bailian-realtime-asr', alignment: generated.referenceAligned ? 'reference-text' : 'asr' } }
-    } else if (!viaTimeline && run.input.provider === 'scitiger') {
+    if (!viaTimeline) {
       result = await this.#scitigerSubtitles(run, audio, audioPath, script, run.input)
-    } else if (!viaTimeline) {
-      const config = this.#legacyConfig()
-      const submitted = serviceData(await this.#json(config, '/api/v1/subtitles/generate', {
-        method: 'POST',
-        body: JSON.stringify({
-          audio_base64: audio.toString('base64'),
-          audio_format: extname(audioPath).slice(1) || 'wav',
-          language: run.input.language,
-          reference_text: script,
-          return_diagnostics: true,
-          subtitle_options: { max_chars: 22, min_duration: 0.6, max_duration: 4, punctuation_policy: 'strip_trailing', ai_optimize: run.input.aiOptimize },
-        }),
-      }), '字幕对齐提交')
-      const taskId = taskIdFromService(submitted, '字幕对齐')
-      const completed = await this.#poll(config, `/api/v1/subtitles/tasks/${encodeURIComponent(taskId)}`, '字幕对齐')
-      result = { taskId, subtitle: subtitleResult(completed), diagnostics: completed.diagnostics || null }
     }
     const { taskId, subtitle } = result
     // 云端 ASR 的时间轴可能与真实音频脱节（实测滞后 4-6 秒且各段不均匀，文本却全对）。
@@ -3735,7 +3174,7 @@ export class SpokenVideoMediaHost {
     } catch { /* 缓存不可用则重压 */ }
     await mkdir(join(lineArtDir, '.thumbs'), { recursive: true, mode: 0o700 })
     const script = "import sys; from PIL import Image; im = Image.open(sys.argv[1]); im.thumbnail((320, 320)); im.convert('RGB').save(sys.argv[2], 'JPEG', quality=70)"
-    await execFilePromise(python, ['-c', script, source, target], { timeout: 30_000 })
+    await execFilePromise(python, ['-c', script, source, target], { timeout: 30_000, env: pythonEnv() })
     const thumb = await readFile(target)
     return `data:image/jpeg;base64,${thumb.toString('base64')}`
   }
@@ -3955,7 +3394,7 @@ export class SpokenVideoMediaHost {
     const probe = 'import cv2, numpy, PIL; print("WHITEBOARD_DEPS_OK")'
     for (const python of candidates) {
       try {
-        const { stdout } = await execFilePromise(python, ['-c', probe], { timeout: 30_000 })
+        const { stdout } = await execFilePromise(python, ['-c', probe], { timeout: 30_000, env: pythonEnv() })
         if (stdout.includes('WHITEBOARD_DEPS_OK')) return python
       } catch { /* 该解释器不可用，尝试下一个 */ }
     }
@@ -3968,6 +3407,7 @@ export class SpokenVideoMediaHost {
         cwd: engineRoot,
         maxBuffer: 16 * 1024 * 1024,
         timeout: 60 * 60 * 1000,
+        env: pythonEnv(),
       })
     } catch (error) {
       throw commandError(error, `白板引擎 ${script}`)

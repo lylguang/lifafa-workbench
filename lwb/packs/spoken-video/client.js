@@ -115,7 +115,9 @@ window.__ModuleLoader__.load({
     const DEFAULT_VIDEO_VISUAL_BRIEF = '由 AI 视觉导演根据稿件语义完成主题化 Remotion 画面。';
     const SOURCES = { baidu: '百度热榜', toutiao: '今日头条', 'douyin-hot': '抖音热榜', 'bilibili-popular': 'B站热门内容', 'zhihu-hot': '知乎热榜', 'weibo-hot': '微博热搜', 'huggingface-papers': 'AI 论文日报 · Hugging Face', '36kr': '36氪', infoq: 'InfoQ', ithome: 'IT之家', geekpark: '极客公园', ifanr: '爱范儿', sspai: '少数派', juejin: '掘金', 'github-trending': 'GitHub Trending', 'hacker-news': 'Hacker News', 'ai-daily-import': 'AI 内容日报' };
     const css = `
-      .sv-page { display:grid; gap:18px; max-width:1420px; margin:0 auto; } .sv-page * { box-sizing:border-box; } .sv-top { display:flex; flex-wrap:wrap; justify-content:space-between; gap:14px; padding-bottom:14px; border-bottom:1px solid var(--lwb-line); } .sv-top h1,.sv-section h3,.sv-form h3 { margin:0; font-size:var(--lwb-text-section,18px); } .sv-top p,.sv-meta,.sv-item p { margin:5px 0 0; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); line-height:1.6; } .sv-section { display:grid; gap:11px; } .sv-section-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:9px; } .sv-section-head span { color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); } .sv-layout { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(270px,.85fr); gap:20px; align-items:start; } .sv-list { display:grid; gap:8px; } .sv-item,.sv-form,.sv-source { display:grid; gap:9px; padding:14px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-surface); } .sv-item[data-active="true"] { border-color:#9fc2ec; background:var(--lwb-blue-soft); } .sv-item-head { display:flex; min-width:0; align-items:flex-start; justify-content:space-between; gap:9px; } .sv-item-title { overflow:hidden; font-size:var(--lwb-text-md,15px); font-weight:700; text-overflow:ellipsis; white-space:nowrap; } .sv-tag,.sv-stage { display:inline-flex; min-height:21px; flex:none; align-items:center; padding:0 7px; border-radius:5px; color:var(--lwb-blue); background:var(--lwb-blue-soft); font-size:var(--lwb-text-xs,12px); font-weight:700; white-space:nowrap; } .sv-stage { color:var(--lwb-green); background:var(--lwb-green-soft); } .sv-input,.sv-textarea,.sv-select { width:100%; border:1px solid var(--lwb-line); border-radius:6px; color:var(--lwb-ink); background:var(--lwb-surface); font:inherit; font-size:var(--lwb-text-base,14px); } .sv-input,.sv-select { height:36px; padding:0 10px; } .sv-textarea { min-height:114px; padding:9px; resize:vertical; line-height:1.6; } .sv-input:focus,.sv-textarea:focus,.sv-select:focus { border-color:var(--lwb-blue); outline:0; box-shadow:0 0 0 2px var(--lwb-blue-soft); } .sv-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; } .sv-error,.sv-note { margin:0; padding:10px 11px; border:1px solid #e6b5b5; border-radius:7px; color:#994646; background:#fff7f7; font-size:var(--lwb-text-sm,13px); line-height:1.55; } .sv-note { border-color:#bad5ed; color:#486277; background:#f7fbff; } .sv-empty { padding:34px 12px; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); text-align:center; } .sv-source-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; } .sv-source { min-height:155px; } .sv-source a,.sv-url { overflow:hidden; color:var(--lwb-blue); font-size:var(--lwb-text-sm,13px); text-overflow:ellipsis; white-space:nowrap; } .sv-checks { display:grid; gap:7px; } .sv-basis { display:grid; gap:7px; padding:11px; border:1px dashed var(--lwb-line); border-radius:8px; background:var(--lwb-surface); } .sv-basis .sv-item { padding:9px 11px; } .sv-basis-text { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); line-height:1.55; white-space:pre-wrap; word-break:break-word; } .sv-warn-list { display:grid; gap:4px; margin:0; padding:9px 11px 9px 24px; border:1px solid #ecd39b; border-radius:7px; color:#7a5b17; background:#fffaf0; font-size:var(--lwb-text-sm,13px); line-height:1.5; } .sv-form summary { cursor:pointer; color:var(--lwb-blue); font-size:var(--lwb-text-base,14px); } .sv-checks label,.sv-signal { display:flex; align-items:flex-start; gap:7px; color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); line-height:1.5; } .sv-signal { padding:9px; border-bottom:1px solid var(--lwb-line); cursor:pointer; } .sv-signal:last-child { border-bottom:0; } .sv-signal input { margin-top:3px; } .sv-signal small { display:block; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); } .sv-toolbar,.sv-stat-grid,.sv-filter-grid { display:flex; flex-wrap:wrap; gap:8px; align-items:center; } .sv-stat { min-width:112px; padding:10px 12px; border:1px solid var(--lwb-line); border-radius:8px; background:var(--lwb-surface); } .sv-stat strong { display:block; color:var(--lwb-ink); font-size:var(--lwb-text-section,18px); } .sv-stat span { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); } .sv-filter-grid > * { flex:1 1 145px; } .sv-source-detail { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); line-height:1.5; } .sv-status-error { color:#a94343; background:#fff1f1; } .sv-status-disabled { color:#6d7280; background:#f2f3f5; } .sv-status-manual { color:#8059aa; background:#f5effb; } .sv-status-ready { color:#1f7354; background:#eaf8f1; } .sv-inline-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; } .sv-inline-form .sv-wide { grid-column:1/-1; } .sv-run-list { max-height:360px; overflow:auto; } .sv-signal-shell { display:grid; gap:16px; } .sv-live-pill { display:inline-flex; flex:none; align-items:center; gap:8px; padding:6px 13px; border:1px solid rgba(62,207,142,.35); border-radius:999px; color:#8fe6bd; background:rgba(62,207,142,.12); font-size:var(--lwb-text-base,14px); } .sv-live-dot { width:8px; height:8px; border-radius:50%; background:#3ecf8e; animation:sv-pulse 1.8s ease-in-out infinite; } @keyframes sv-pulse { 0%,100% { opacity:1; } 50% { opacity:.3; } } body[data-ds-dark-theme] .sv-note { border-color:#2c5578; color:#a9c9e6; background:#16324a; } body[data-ds-dark-theme] .sv-error { border-color:#7a4444; color:#e8b9b9; background:#3a2323; } body[data-ds-dark-theme] .sv-warn-list { border-color:#7a6534; color:#e8d9a9; background:#332b1b; } .sv-pipeline { display:grid; gap:13px; padding:16px 20px 18px; border:1px solid var(--lwb-line); border-radius:12px; background:var(--lwb-surface); } .sv-pipeline-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; } .sv-pipeline-head h3 { margin:0; font-size:var(--lwb-text-md,15px); } .sv-pipeline-track { display:flex; align-items:flex-start; overflow-x:auto; padding-bottom:2px; } .sv-pipeline-node { display:flex; flex:none; flex-direction:column; align-items:center; gap:6px; } .sv-pipeline-dot { display:flex; width:26px; height:26px; align-items:center; justify-content:center; border-radius:50%; font-size:var(--lwb-text-base,14px); font-weight:700; } .sv-pipeline-dot[data-state="done"] { background:var(--lwb-blue); color:#fff; } .sv-pipeline-dot[data-state="current"] { background:var(--lwb-green); color:#fff; box-shadow:0 0 0 4px var(--lwb-green-soft); } .sv-pipeline-dot[data-state="todo"] { border:1px solid var(--lwb-line); background:var(--lwb-surface); color:var(--lwb-muted); } .sv-pipeline-bar { flex:1 0 14px; height:2px; margin-top:12px; background:var(--lwb-line); } .sv-pipeline-bar[data-done="true"] { background:var(--lwb-blue); } .sv-pipeline-label { color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); white-space:nowrap; } .sv-pipeline-node[data-state="done"] .sv-pipeline-label { color:var(--lwb-ink); } .sv-pipeline-node[data-state="current"] .sv-pipeline-label { color:var(--lwb-green); font-weight:700; } .sv-eyebrow { margin:0 0 7px; color:#477194; font-size:var(--lwb-text-xs,12px); font-weight:800; letter-spacing:.12em; } .sv-tabs { display:flex; gap:4px; border-bottom:1px solid var(--lwb-line); } .sv-tab { padding:9px 12px; border:0; border-bottom:2px solid transparent; color:var(--lwb-muted); background:transparent; cursor:pointer; font:inherit; font-size:var(--lwb-text-base,14px); font-weight:700; } .sv-tab[data-active="true"] { border-color:var(--lwb-blue); color:var(--lwb-blue); } .sv-dashboard { display:grid; grid-template-columns:minmax(0,1fr) 288px; gap:16px; align-items:start; } .sv-feed { display:grid; gap:10px; } .sv-feed-toolbar { display:grid; grid-template-columns:minmax(220px,1fr) 156px 135px; gap:8px; padding:12px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-surface); } .sv-signal-card { display:grid; gap:8px; padding:15px 16px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-surface); transition:border-color .15s ease,box-shadow .15s ease; } .sv-signal-card:hover { border-color:#a8c8e4; box-shadow:0 5px 18px rgba(36,87,127,.07); } .sv-signal-title { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-section,18px); line-height:1.45; } .sv-signal-summary { display:-webkit-box; overflow:hidden; margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); line-height:1.65; -webkit-box-orient:vertical; -webkit-line-clamp:2; } .sv-signal-foot { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; align-items:center; } .sv-kpi { display:flex; flex-wrap:wrap; gap:5px; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); } .sv-score { color:#3571a4; font-weight:800; } .sv-insight-panel { position:sticky; top:16px; display:grid; gap:12px; padding:15px; border:1px solid var(--lwb-line); border-radius:10px; background:var(--lwb-surface); } .sv-insight-panel h3 { margin:0; font-size:var(--lwb-text-md,15px); } .sv-family-list { display:grid; gap:5px; } .sv-family-row { display:flex; align-items:center; justify-content:space-between; width:100%; padding:7px 0; border:0; color:var(--lwb-ink); background:transparent; cursor:pointer; font:inherit; font-size:var(--lwb-text-sm,13px); text-align:left; } .sv-family-row[data-active="true"] { color:var(--lwb-blue); font-weight:800; } .sv-family-row small { color:var(--lwb-muted); } .sv-source-table { display:grid; gap:12px; } .sv-family-section { display:grid; gap:10px; padding:15px; border:1px solid var(--lwb-line); border-radius:10px; background:var(--lwb-surface); } .sv-source-compact-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(245px,1fr)); gap:8px; } .sv-source-compact { display:grid; gap:7px; padding:13px; border:1px solid var(--lwb-line); border-radius:8px; background:var(--lwb-surface); }  .sv-source-health { display:flex; flex-wrap:wrap; gap:5px; } .sv-drawer-backdrop { position:fixed; z-index:40; inset:0; border:0; background:rgba(24,39,52,.35); } .sv-drawer { position:fixed; z-index:41; top:0; right:0; bottom:0; width:min(560px,100vw); overflow:auto; padding:22px; border-left:1px solid var(--lwb-line); background:var(--lwb-surface); box-shadow:-16px 0 40px rgba(23,47,70,.18); } .sv-drawer-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:16px; } @media (max-width:900px) { .sv-dashboard { grid-template-columns:1fr; } .sv-insight-panel { position:static; } } @media (max-width:780px) {  } .sv-board { display:grid; gap:16px; } .sv-board-group { display:grid; gap:9px; } .sv-board-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:10px; } .sv-board-card { position:relative; display:grid; overflow:hidden; border:1px solid var(--lwb-line); border-radius:12px; background:var(--lwb-surface); transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease; } .sv-board-card:hover { transform:translateY(-3px); border-color:#9fc2ec; box-shadow:0 8px 22px rgba(24,60,104,.1); } .sv-board-card::before { content:''; height:3px; background:linear-gradient(90deg,var(--lwb-blue),var(--lwb-green)); opacity:.55; transition:opacity .18s ease; } .sv-board-card:hover::before { opacity:1; } .sv-board-card[data-health="error"]::before { background:#e2574d; opacity:1; } .sv-board-card[data-health="manual"]::before { background:linear-gradient(90deg,#8059aa,#b98ae0); } .sv-board-card-main { display:grid; gap:7px; width:100%; padding:14px; border:0; background:transparent; cursor:pointer; font:inherit; text-align:left; } .sv-board-card-main:hover { background:var(--lwb-blue-soft); } .sv-board-card-main strong { font-size:var(--lwb-text-md,15px); } .sv-board-today { margin:0; color:var(--lwb-blue); font-size:var(--lwb-text-sm,13px); font-weight:700; } .sv-board-meta { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); } .sv-board-preview { display:grid; gap:4px; margin:2px 0 0; padding:0; list-style:none; } .sv-board-preview li { overflow:hidden; color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); line-height:1.5; text-overflow:ellipsis; white-space:nowrap; } .sv-board-preview li small { color:var(--lwb-muted); } .sv-board-card-foot { display:flex; justify-content:flex-end; padding:0 10px 10px; } .sv-drawer-section { margin:14px 0 8px; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); font-weight:700; } .sv-drawer-list { display:grid; gap:8px; } .sv-split { display:grid; grid-template-columns:minmax(0,.95fr) minmax(0,1.05fr); gap:20px; align-items:start; } .sv-badge { display:inline-flex; min-height:22px; align-items:center; padding:0 8px; border-radius:99px; border:1px solid var(--lwb-line); background:var(--lwb-surface); color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); cursor:pointer; } .sv-badge[data-on="true"] { border-color:#9fc2ec; background:var(--lwb-blue-soft); color:var(--lwb-blue); } .sv-badge-row { display:flex; flex-wrap:wrap; gap:6px; } .sv-step { display:flex; gap:10px; align-items:flex-start; padding:7px 0; border-bottom:1px dashed var(--lwb-line); } .sv-step:last-child { border-bottom:0; } .sv-dot { width:10px; height:10px; border-radius:50%; flex:none; margin-top:5px; background:var(--lwb-line); } .sv-dot[data-state="running"] { background:#f5a623; } .sv-dot[data-state="done"] { background:#4caf50; } .sv-dot[data-state="error"] { background:#e5484d; } .sv-cand { border:1px solid var(--lwb-line); border-radius:8px; padding:11px 13px; cursor:pointer; background:var(--lwb-surface); } .sv-cand[data-sel="true"] { border:2px solid #9fc2ec; background:var(--lwb-blue-soft); } .sv-cand h4 { margin:0 0 4px; font-size:var(--lwb-text-md,15px); } .sv-cand p { margin:3px 0 0; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); line-height:1.5; } .sv-genhead { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; } .sv-chips { display:flex; flex-wrap:wrap; gap:6px; }
+      .sv-page { display:grid; gap:18px; max-width:1420px; margin:0 auto; } .sv-page * { box-sizing:border-box; } .sv-top { display:flex; flex-wrap:wrap; justify-content:space-between; gap:14px; padding-bottom:14px; border-bottom:1px solid var(--lwb-line); } .sv-top h1,.sv-section h3,.sv-form h3 { margin:0; font-size:var(--lwb-text-section,18px); } .sv-top p,.sv-meta,.sv-item p { margin:5px 0 0; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); line-height:1.6; } .sv-section { display:grid; gap:11px; } .sv-section-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:9px; } .sv-section-head span { color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); } .sv-layout { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(270px,.85fr); gap:20px; align-items:start; } .sv-list { display:grid; gap:8px; } .sv-item,.sv-form,.sv-source { display:grid; gap:9px; padding:14px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-surface); } .sv-item[data-active="true"] { border-color:#9fc2ec; background:var(--lwb-blue-soft); } .sv-item-head { display:flex; min-width:0; align-items:flex-start; justify-content:space-between; gap:9px; } .sv-item-title { overflow:hidden; font-size:var(--lwb-text-md,15px); font-weight:700; text-overflow:ellipsis; white-space:nowrap; } .sv-tag,.sv-stage { display:inline-flex; min-height:21px; flex:none; align-items:center; padding:0 7px; border-radius:5px; color:var(--lwb-blue); background:var(--lwb-blue-soft); font-size:var(--lwb-text-xs,12px); font-weight:700; white-space:nowrap; } .sv-stage { color:var(--lwb-green); background:var(--lwb-green-soft); } .sv-input,.sv-textarea,.sv-select { width:100%; border:1px solid var(--lwb-line); border-radius:6px; color:var(--lwb-ink); background:var(--lwb-surface); font:inherit; font-size:var(--lwb-text-base,14px); } .sv-input,.sv-select { height:36px; padding:0 10px; } .sv-textarea { min-height:114px; padding:9px; resize:vertical; line-height:1.6; } .sv-input:focus,.sv-textarea:focus,.sv-select:focus { border-color:var(--lwb-blue); outline:0; box-shadow:0 0 0 2px var(--lwb-blue-soft); } .sv-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; } .sv-error,.sv-note { margin:0; padding:10px 11px; border:1px solid #e6b5b5; border-radius:7px; color:#994646; background:#fff7f7; font-size:var(--lwb-text-sm,13px); line-height:1.55; } .sv-note { border-color:#bad5ed; color:#486277; background:#f7fbff; } .sv-empty { padding:34px 12px; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); text-align:center; } .sv-source-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px; } .sv-source { min-height:155px; } .sv-source a,.sv-url { overflow:hidden; color:var(--lwb-blue); font-size:var(--lwb-text-sm,13px); text-overflow:ellipsis; white-space:nowrap; } .sv-checks { display:grid; gap:7px; } .sv-basis { display:grid; gap:7px; padding:11px; border:1px dashed var(--lwb-line); border-radius:8px; background:var(--lwb-surface); } .sv-basis .sv-item { padding:9px 11px; } .sv-basis-text { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); line-height:1.55; white-space:pre-wrap; word-break:break-word; } .sv-warn-list { display:grid; gap:4px; margin:0; padding:9px 11px 9px 24px; border:1px solid #ecd39b; border-radius:7px; color:#7a5b17; background:#fffaf0; font-size:var(--lwb-text-sm,13px); line-height:1.5; } .sv-form summary { cursor:pointer; color:var(--lwb-blue); font-size:var(--lwb-text-base,14px); } .sv-checks label,.sv-signal { display:flex; align-items:flex-start; gap:7px; color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); line-height:1.5; } .sv-signal { padding:9px; border-bottom:1px solid var(--lwb-line); cursor:pointer; } .sv-signal:last-child { border-bottom:0; } .sv-signal input { margin-top:3px; } .sv-signal small { display:block; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); } .sv-toolbar,.sv-stat-grid,.sv-filter-grid { display:flex; flex-wrap:wrap; gap:8px; align-items:center; } .sv-stat { min-width:112px; padding:10px 12px; border:1px solid var(--lwb-line); border-radius:8px; background:var(--lwb-surface); } .sv-stat strong { display:block; color:var(--lwb-ink); font-size:var(--lwb-text-section,18px); } .sv-stat span { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); } .sv-filter-grid > * { flex:1 1 145px; } .sv-source-detail { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); line-height:1.5; } .sv-status-error { color:var(--lwb-danger); background:var(--lwb-danger-soft); } .sv-status-disabled { color:var(--lwb-muted); background:var(--lwb-line); } .sv-status-manual { color:#8059aa; background:#f5effb; } .sv-status-ready { color:var(--lwb-green); background:var(--lwb-green-soft); }
+      body[data-ds-dark-theme] .sv-status-error { color:#e8b9b9; background:#3a2323; } body[data-ds-dark-theme] .sv-status-manual { color:#cbb2f0; background:#3a2f4a; } .sv-inline-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; } .sv-inline-form .sv-wide { grid-column:1/-1; } .sv-run-list { max-height:360px; overflow:auto; } .sv-signal-shell { display:grid; gap:16px; } .sv-live-pill { display:inline-flex; flex:none; align-items:center; gap:8px; padding:6px 13px; border:1px solid rgba(62,207,142,.35); border-radius:999px; color:#8fe6bd; background:rgba(62,207,142,.12); font-size:var(--lwb-text-base,14px); } .sv-live-dot { width:8px; height:8px; border-radius:50%; background:#3ecf8e; animation:sv-pulse 1.8s ease-in-out infinite; } @keyframes sv-pulse { 0%,100% { opacity:1; } 50% { opacity:.3; } } body[data-ds-dark-theme] .sv-note { border-color:#2c5578; color:#a9c9e6; background:#16324a; } body[data-ds-dark-theme] .sv-error { border-color:#7a4444; color:#e8b9b9; background:#3a2323; } body[data-ds-dark-theme] .sv-warn-list { border-color:#7a6534; color:#e8d9a9; background:#332b1b; } .sv-pipeline { display:grid; gap:13px; padding:16px 20px 18px; border:1px solid var(--lwb-line); border-radius:12px; background:var(--lwb-surface); } .sv-pipeline-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; } .sv-pipeline-head h3 { margin:0; font-size:var(--lwb-text-md,15px); } .sv-pipeline-track { display:flex; align-items:flex-start; overflow-x:auto; padding-bottom:2px; } .sv-pipeline-node { display:flex; flex:none; flex-direction:column; align-items:center; gap:6px; } .sv-pipeline-dot { display:flex; width:26px; height:26px; align-items:center; justify-content:center; border-radius:50%; font-size:var(--lwb-text-base,14px); font-weight:700; } .sv-pipeline-dot[data-state="done"] { background:var(--lwb-blue); color:#fff; } .sv-pipeline-dot[data-state="current"] { background:var(--lwb-green); color:#fff; box-shadow:0 0 0 4px var(--lwb-green-soft); } .sv-pipeline-dot[data-state="todo"] { border:1px solid var(--lwb-line); background:var(--lwb-surface); color:var(--lwb-muted); } .sv-pipeline-bar { flex:1 0 14px; height:2px; margin-top:12px; background:var(--lwb-line); } .sv-pipeline-bar[data-done="true"] { background:var(--lwb-blue); } .sv-pipeline-label { color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); white-space:nowrap; } .sv-pipeline-node[data-state="done"] .sv-pipeline-label { color:var(--lwb-ink); } .sv-pipeline-node[data-state="current"] .sv-pipeline-label { color:var(--lwb-green); font-weight:700; } .sv-eyebrow { margin:0 0 7px; color:#477194; font-size:var(--lwb-text-xs,12px); font-weight:800; letter-spacing:.12em; } .sv-tabs { display:flex; gap:4px; border-bottom:1px solid var(--lwb-line); } .sv-tab { padding:9px 12px; border:0; border-bottom:2px solid transparent; color:var(--lwb-muted); background:transparent; cursor:pointer; font:inherit; font-size:var(--lwb-text-base,14px); font-weight:700; } .sv-tab[data-active="true"] { border-color:var(--lwb-blue); color:var(--lwb-blue); } .sv-dashboard { display:grid; grid-template-columns:minmax(0,1fr) 288px; gap:16px; align-items:start; } .sv-feed { display:grid; gap:10px; } .sv-feed-toolbar { display:grid; grid-template-columns:minmax(220px,1fr) 156px 135px; gap:8px; padding:12px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-surface); } .sv-signal-card { display:grid; gap:8px; padding:15px 16px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-surface); transition:border-color .15s ease,box-shadow .15s ease; } .sv-signal-card:hover { border-color:#a8c8e4; box-shadow:0 5px 18px rgba(36,87,127,.07); } .sv-signal-title { margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-section,18px); line-height:1.45; } .sv-signal-summary { display:-webkit-box; overflow:hidden; margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); line-height:1.65; -webkit-box-orient:vertical; -webkit-line-clamp:2; } .sv-signal-foot { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; align-items:center; } .sv-kpi { display:flex; flex-wrap:wrap; gap:5px; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); } .sv-score { color:#3571a4; font-weight:800; } .sv-insight-panel { position:sticky; top:16px; display:grid; gap:12px; padding:15px; border:1px solid var(--lwb-line); border-radius:10px; background:var(--lwb-surface); } .sv-insight-panel h3 { margin:0; font-size:var(--lwb-text-md,15px); } .sv-family-list { display:grid; gap:5px; } .sv-family-row { display:flex; align-items:center; justify-content:space-between; width:100%; padding:7px 0; border:0; color:var(--lwb-ink); background:transparent; cursor:pointer; font:inherit; font-size:var(--lwb-text-sm,13px); text-align:left; } .sv-family-row[data-active="true"] { color:var(--lwb-blue); font-weight:800; } .sv-family-row small { color:var(--lwb-muted); } .sv-source-table { display:grid; gap:12px; } .sv-family-section { display:grid; gap:10px; padding:15px; border:1px solid var(--lwb-line); border-radius:10px; background:var(--lwb-surface); } .sv-source-compact-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(245px,1fr)); gap:8px; } .sv-source-compact { display:grid; gap:7px; padding:13px; border:1px solid var(--lwb-line); border-radius:8px; background:var(--lwb-surface); }  .sv-source-health { display:flex; flex-wrap:wrap; gap:5px; } .sv-drawer-backdrop { position:fixed; z-index:40; inset:0; border:0; background:rgba(24,39,52,.35); } .sv-drawer { position:fixed; z-index:41; top:0; right:0; bottom:0; width:min(560px,100vw); overflow:auto; padding:22px; border-left:1px solid var(--lwb-line); background:var(--lwb-surface); box-shadow:-16px 0 40px rgba(23,47,70,.18); } .sv-drawer-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:16px; } @media (max-width:900px) { .sv-dashboard { grid-template-columns:1fr; } .sv-insight-panel { position:static; } } @media (max-width:780px) {  }
+ .sv-board { display:grid; gap:16px; } .sv-board-group { display:grid; gap:9px; } .sv-board-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:10px; } .sv-board-card { position:relative; display:grid; overflow:hidden; border:1px solid var(--lwb-line); border-radius:12px; background:var(--lwb-surface); transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease; } .sv-board-card:hover { transform:translateY(-3px); border-color:#9fc2ec; box-shadow:0 8px 22px rgba(24,60,104,.1); } .sv-board-card::before { content:''; height:3px; background:linear-gradient(90deg,var(--lwb-blue),var(--lwb-green)); opacity:.55; transition:opacity .18s ease; } .sv-board-card:hover::before { opacity:1; } .sv-board-card[data-health="error"]::before { background:#e2574d; opacity:1; } .sv-board-card[data-health="manual"]::before { background:linear-gradient(90deg,#8059aa,#b98ae0); } .sv-board-card-main { display:grid; gap:7px; width:100%; padding:14px; border:0; background:transparent; cursor:pointer; font:inherit; text-align:left; } .sv-board-card-main:hover { background:var(--lwb-blue-soft); } .sv-board-card-main strong { font-size:var(--lwb-text-md,15px); } .sv-board-today { margin:0; color:var(--lwb-blue); font-size:var(--lwb-text-sm,13px); font-weight:700; } .sv-board-meta { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); } .sv-board-preview { display:grid; gap:4px; margin:2px 0 0; padding:0; list-style:none; } .sv-board-preview li { overflow:hidden; color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); line-height:1.5; text-overflow:ellipsis; white-space:nowrap; } .sv-board-preview li small { color:var(--lwb-muted); } .sv-board-card-foot { display:flex; justify-content:flex-end; padding:0 10px 10px; } .sv-drawer-section { margin:14px 0 8px; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); font-weight:700; } .sv-drawer-list { display:grid; gap:8px; } .sv-split { display:grid; grid-template-columns:minmax(0,.95fr) minmax(0,1.05fr); gap:20px; align-items:start; } .sv-badge { display:inline-flex; min-height:22px; align-items:center; padding:0 8px; border-radius:99px; border:1px solid var(--lwb-line); background:var(--lwb-surface); color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); cursor:pointer; } .sv-badge[data-on="true"] { border-color:#9fc2ec; background:var(--lwb-blue-soft); color:var(--lwb-blue); } .sv-badge-row { display:flex; flex-wrap:wrap; gap:6px; } .sv-step { display:flex; gap:10px; align-items:flex-start; padding:7px 0; border-bottom:1px dashed var(--lwb-line); } .sv-step:last-child { border-bottom:0; } .sv-dot { width:10px; height:10px; border-radius:50%; flex:none; margin-top:5px; background:var(--lwb-line); } .sv-dot[data-state="running"] { background:#f5a623; } .sv-dot[data-state="done"] { background:#4caf50; } .sv-dot[data-state="error"] { background:#e5484d; } .sv-cand { border:1px solid var(--lwb-line); border-radius:8px; padding:11px 13px; cursor:pointer; background:var(--lwb-surface); } .sv-cand[data-sel="true"] { border:2px solid #9fc2ec; background:var(--lwb-blue-soft); } .sv-cand h4 { margin:0 0 4px; font-size:var(--lwb-text-md,15px); } .sv-cand p { margin:3px 0 0; color:var(--lwb-muted); font-size:var(--lwb-text-base,14px); line-height:1.5; } .sv-genhead { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; } .sv-chips { display:flex; flex-wrap:wrap; gap:6px; }
     `;
     const productCss = `${css}
       /* Task execution inspector: quiet chrome, readable documents, bounded tools. */
@@ -305,7 +307,10 @@ window.__ModuleLoader__.load({
       .sv-heromini-cell + .sv-heromini-cell { border-left:1px solid var(--lwb-line); }
       .sv-heromini-cell span { color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); }
       .sv-heromini-cell strong { overflow:hidden; font-size:var(--lwb-text-title,24px); font-weight:800; line-height:1.2; letter-spacing:-.01em; color:var(--lwb-ink); text-overflow:ellipsis; white-space:nowrap; }
-      .sv-heromini-cell strong[data-tone="green"] { color:var(--sv-green); } .sv-heromini-cell strong[data-tone="red"] { color:#dc2626; } .sv-heromini-cell strong[data-tone="brand"] { color:var(--sv-brand); } .sv-heromini-cell strong[data-tone="orange"] { color:#c2410c; }
+      /* 统计卡配色只表示层级，不表示好坏：success/warning/danger 留给结果类状态。
+         原来「可发布 50」用红色，看着像出了错，实际是有 50 条可以发布。 */
+      .sv-heromini-cell strong[data-tone="green"] { color:var(--sv-green); } .sv-heromini-cell strong[data-tone="brand"] { color:var(--sv-brand); } .sv-heromini-cell strong[data-tone="orange"] { color:#c2410c; } .sv-heromini-cell strong[data-tone="violet"] { color:var(--sv-violet); } .sv-heromini-cell strong[data-tone="pink"] { color:var(--sv-pink); } .sv-heromini-cell strong[data-tone="red"] { color:var(--lwb-danger); }
+      body[data-ds-dark-theme] .sv-heromini-cell strong[data-tone="orange"] { color:#fdba74; } body[data-ds-dark-theme] .sv-heromini-cell strong[data-tone="violet"] { color:#c4b5fd; } body[data-ds-dark-theme] .sv-heromini-cell strong[data-tone="pink"] { color:#f9a8d4; }
       @media (max-width:780px) { .sv-heromini-cell:nth-child(even) { border-left:0; } }
       body[data-ds-dark-theme] .sv-item[data-active="true"] { border-color:#4f6cd8; background:var(--sv-brand-soft); }
       /* v2.1 模块页延展：色、进度、空态 */
@@ -383,6 +388,9 @@ window.__ModuleLoader__.load({
       .sv-fail-cat { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); font-weight:800; letter-spacing:.06em; }
       .sv-fail-sig { overflow:hidden; margin:0; color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); text-overflow:ellipsis; white-space:nowrap; }
       .sv-fail-remedy { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); line-height:1.55; }
+      .sv-fail-next { display:flex; gap:7px; align-items:flex-start; margin:0; padding:7px 9px; border-radius:7px; background:var(--lwb-blue-soft); color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); line-height:1.55; overflow-wrap:anywhere; }
+      .sv-fail-next > span:first-child { flex:none; color:var(--lwb-blue); font-weight:800; }
+      body[data-ds-dark-theme] .sv-fail-next { background:#1d344a; color:var(--lwb-ink); }
       .sv-fail-recent { display:grid; gap:6px; }
       /* 页面内弹窗：与提示音同源同人不在电脑前时的兜底。 */
       .sv-toast-stack { position:fixed; z-index:60; right:18px; bottom:18px; display:grid; gap:9px; width:min(380px,calc(100vw - 36px)); }
@@ -460,6 +468,24 @@ window.__ModuleLoader__.load({
       /* 音色卡里那条信息行：名称/时长在左，操作在右，卡变窄也不会挤成一团。 */
       .sv-voice-head { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; }
       .sv-voice-audio { width:100%; max-width:340px; height:34px; margin-top:4px; }
+      /* 声音方案：一张卡 = 一份完整配方（来源 + 模型 + 音色 + 语气 + 语速 + 音量）。 */
+      .sv-recipes { display:grid; gap:9px; }
+      .sv-recipe-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(196px,1fr)); gap:8px; }
+      .sv-recipe { display:grid; gap:6px; padding:10px 11px; border:1px solid var(--lwb-line); border-radius:10px; background:var(--lwb-surface); transition:border-color .15s ease,box-shadow .15s ease; }
+      .sv-recipe[data-on="true"] { border-color:var(--sv-accent); background:var(--sv-accent-soft); box-shadow:0 0 0 2px var(--sv-accent-soft); }
+      .sv-recipe-main { display:grid; gap:3px; padding:0; border:0; background:transparent; font:inherit; text-align:left; cursor:pointer; }
+      .sv-recipe-main strong { color:var(--lwb-ink); font-size:var(--lwb-text-md,15px); }
+      .sv-recipe-main span { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); }
+      .sv-recipe-foot { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+      .sv-recipe-voice { overflow:hidden; min-width:0; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); text-overflow:ellipsis; white-space:nowrap; }
+      .sv-recipe-preview { flex:none; min-height:24px; padding:0 8px; border:1px solid var(--lwb-line); border-radius:6px; color:var(--lwb-ink); background:var(--lwb-surface); font:inherit; font-size:var(--lwb-text-xs,12px); font-weight:700; cursor:pointer; }
+      .sv-recipe-preview:hover { border-color:var(--sv-accent); color:var(--sv-accent-ink); }
+      .sv-recipe-preview:disabled { opacity:.55; cursor:default; }
+      body[data-ds-dark-theme] .sv-recipe { background:var(--lwb-surface); }
+      /* 高级设置：把「模型 / 来源 / 描述 / 语气 / 语速」收进折叠区，默认不打扰。 */
+      .sv-advanced { display:grid; gap:10px; padding:10px 12px; border:1px dashed var(--lwb-line); border-radius:9px; }
+      .sv-advanced > summary { cursor:pointer; color:var(--sv-accent-ink); font-size:var(--lwb-text-sm,13px); font-weight:700; }
+      .sv-advanced > *:not(summary) { margin-top:9px; }
       .sv-bridge-fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:11px; }
       .sv-bridge-test { display:grid; gap:5px; padding:10px 12px; border:1px dashed var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
       body[data-ds-dark-theme] .sv-voice-row,
@@ -644,7 +670,7 @@ window.__ModuleLoader__.load({
       .sv-filter-chip[data-on="true"] { background:var(--sv-brand); color:#fff; }
       .sv-drawer-search { min-width:150px; flex:1; height:28px; border:1px solid #d7e0e9; border-radius:7px; padding:0 10px; color:var(--lwb-ink); background:var(--lwb-surface); font:inherit; font-size:var(--lwb-text-sm,13px); }
       .sv-drawer-search:focus { border-color:var(--sv-brand); outline:0; }
-      .sv-drawer-scroll { min-height:0; flex:1; overflow:auto; }
+      .sv-drawer-scroll { min-height:0; flex:1; overflow:auto; }.sv-setup-drawer { display:grid; grid-template-columns:1fr; gap:14px; }
       /* 直挂修复：候选/账号抽屉把 sv-drawer-list 直接放在 sv-drawer（flex 列 + overflow:hidden）下，
          无滚动容器会被裁切。子选择器只命中直接子级——信号/写稿抽屉的 list 在 sv-drawer-scroll 内（孙级），不受影响。 */
       .sv-drawer > .sv-drawer-list { min-height:0; flex:1; overflow:auto; }
@@ -1211,6 +1237,18 @@ window.__ModuleLoader__.load({
       .sv-lineart-text { margin:0; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); line-height:1.5; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
       body[data-ds-dark-theme] .sv-lineart-panel { border-color:var(--lwb-line); }
       body[data-ds-dark-theme] .sv-lineart-thumb { background:#2a2a24; }
+      /* ≤390px：先保证不横向溢出，再谈好看。 */
+      @media (max-width:390px) {
+        .sv-page { gap:var(--lwb-space-3); }
+        .sv-layout,.sv-split,.sv-dashboard { grid-template-columns:1fr; }
+        .sv-item,.sv-form,.sv-source,.sv-signal-card,.sv-family-section,.sv-feed-toolbar,.sv-insight-panel,.sv-board-card,.sv-pipeline,.sv-heromini-cell { padding-left:var(--lwb-space-3); padding-right:var(--lwb-space-3); }
+        .sv-heromini { grid-template-columns:repeat(2,minmax(0,1fr)); }
+        .sv-heromini-cell:nth-child(even) { border-left:0; }
+        .sv-source-grid,.sv-source-compact-grid,.sv-board-grid,.sv-recipe-grid { grid-template-columns:1fr; }
+        .sv-feed-toolbar,.sv-inline-form { grid-template-columns:1fr; }
+        .sv-drawer { width:100vw; padding:16px 14px; }
+        .sv-item-title,.sv-board-preview li,.sv-fail-sig,.sv-recipe-voice { white-space:normal; overflow:visible; }
+      }
     `;
     function installStyle() {
       const existing = document.getElementById('lwb-spoken-video-style');
@@ -1328,6 +1366,59 @@ window.__ModuleLoader__.load({
      * 只列元信息并给出试听地址。删除交给桥接执行——只有它知道一个音色对应哪几个
      * 文件（音频 + 转写文本 + 参数 json），工作台只发一个 id。
      */
+    /**
+     * 声音方案选择器（配音页与自动化任务页共用）。
+     *
+     * 一张卡 = 一份完整配方：来源 + MiMo 模型 + 音色 / 音色描述 + 语气 + 语速 +
+     * 音量。选完就能合成，用户不需要先弄懂三个模型的参数形态。
+     *
+     * 试听直接复用 bridgeVoiceTest（真去云端合一段），不新增后端协议。
+     */
+    function VoiceRecipePicker({ state, onPick, onPreview, previewKey, previewBusyKey, previewAudio, disabled, advanced }) {
+      const [open, setOpen] = React.useState(false);
+      const current = voiceRecipeIdOf(state, state.designPresets);
+      const recipes = SV_VOICE_RECIPES;
+      // 选了「自定义」就自动展开高级设置：参考音频的上传入口在折叠区里，
+      // 不展开的话点完卡片什么也不会发生。
+      React.useEffect(() => {
+        if (state.voiceSource === 'upload' || state.voiceSource === 'library') setOpen(true);
+      }, [state.voiceSource]);
+      const previewOf = (recipe) => {
+        if (recipe.kind === 'design') return { model: recipe.model, voiceDesign: svDesignText(recipe, state.designPresets) };
+        if (recipe.kind === 'builtin') return { model: recipe.model, voice: recipe.voice, style: recipe.style };
+        // 复刻的声音来自参考音频，试听接口拿不到参考音频，所以自定义方案没有试听。
+        return null;
+      };
+      const panel = h('div', { className: 'sv-recipes' },
+        h('div', { className: 'sv-recipe-grid' }, recipes.map((recipe) => {
+          const key = `recipe:${recipe.id}`;
+          // 只有正在试听的那张卡才挂播放器：同一个 previewAudio 传给所有卡，
+          // 挂到每张卡上会出现「每张卡都能听同一段音频」的错觉。
+          const audio = previewKey === key ? previewAudio?.audioUrl : null;
+          const busy = previewBusyKey === key;
+          return h('div', { key: recipe.id, className: 'sv-recipe', 'data-on': current === recipe.id ? 'true' : 'false' },
+            h('button', {
+              type: 'button', className: 'sv-recipe-main', disabled,
+              'aria-pressed': current === recipe.id,
+              onClick: () => onPick(recipe),
+            }, h('strong', null, recipe.label), h('span', null, recipe.hint)),
+            h('div', { className: 'sv-recipe-foot' },
+              h('span', { className: 'sv-recipe-voice' }, recipe.summary),
+              previewOf(recipe) ? h('button', {
+                type: 'button', className: 'sv-recipe-preview', disabled: disabled || busy,
+                title: `试听「${recipe.label}」`,
+                onClick: () => onPreview(key, previewOf(recipe)),
+              }, busy ? '合成中…' : '▶ 试听') : null),
+            audio ? h('audio', { className: 'sv-voice-audio', controls: true, preload: 'none', src: audio }) : null,
+            previewKey === key && previewAudio?.ok === false
+              ? h('p', { className: 'sv-meta' }, previewAudio.reason || '试听失败')
+              : null);
+        })),
+        h('details', { className: 'sv-advanced', open: open, onToggle: (event) => setOpen(event.target.open) },
+          h('summary', null, '高级设置（手动指定模型、音色与语气）'),
+          advanced));
+      return panel;
+    }
     function VoiceLibraryPanel() {
       const [state, setState] = React.useState(null);
       const [busy, setBusy] = React.useState(null);
@@ -1475,6 +1566,10 @@ window.__ModuleLoader__.load({
       const [expanded, setExpanded] = React.useState(() => {
         try { return window.localStorage?.getItem('lwb-sv-bridge-config-open') === '1' } catch { return false }
       });
+      // 试听：每个音色/预设单独合成一段并就地播放。
+      // 结果按 key 存起来，key 用「voice:xxx」「design:xxx」区分来源。
+      const [previews, setPreviews] = React.useState({});
+      const [previewKey, setPreviewKey] = React.useState(null);
       const toggleExpanded = () => setExpanded((current) => {
         const next = !current;
         try { window.localStorage?.setItem('lwb-sv-bridge-config-open', next ? '1' : '0') } catch { /* 隐私模式，忽略 */ }
@@ -1488,8 +1583,10 @@ window.__ModuleLoader__.load({
           if (next?.available) {
             setForm((current) => current || {
               ttsProvider: next.ttsProvider,
+              mimoModel: next.mimo?.model || 'mimo-v2.5-tts',
               mimoVoice: next.mimo?.voice || '',
               mimoStyle: next.mimo?.style || '',
+              mimoVoiceDesign: next.mimo?.voiceDesign || '',
               defaultVoice: next.defaultVoice || '',
               chineseNumbers: next.chineseNumbers !== false,
             });
@@ -1505,7 +1602,7 @@ window.__ModuleLoader__.load({
         try {
           const next = await remoteStatic('bridgeConfigUpdate', {
             ttsProvider: form.ttsProvider,
-            mimo: { voice: form.mimoVoice, style: form.mimoStyle },
+            mimo: { model: form.mimoModel, voice: form.mimoVoice, style: form.mimoStyle, voiceDesign: form.mimoVoiceDesign },
             defaultVoice: form.defaultVoice,
             chineseNumbers: form.chineseNumbers,
           });
@@ -1518,10 +1615,25 @@ window.__ModuleLoader__.load({
       const tryVoice = async () => {
         setBusy('test'); setError(null); setTest(null);
         try {
-          const result = await remoteStatic('bridgeVoiceTest', { voice: form.mimoVoice, style: form.mimoStyle });
+          const result = await remoteStatic('bridgeVoiceTest', {
+            model: form.mimoModel,
+            voice: form.mimoVoice,
+            style: form.mimoStyle,
+            voiceDesign: form.mimoVoiceDesign,
+          });
           setTest(result);
         } catch (cause) { setError(cause.message); }
         finally { setBusy(null); }
+      };
+
+      /** 试听某个音色/音色描述：合一段并就地播放，不改当前配置。 */
+      const previewVoice = async (key, payload) => {
+        setPreviewKey(key); setError(null);
+        try {
+          const result = await remoteStatic('bridgeVoiceTest', payload);
+          setPreviews((current) => ({ ...current, [key]: result }));
+        } catch (cause) { setError(cause.message); }
+        finally { setPreviewKey(null); }
       };
 
       if (!config) return null;
@@ -1536,6 +1648,17 @@ window.__ModuleLoader__.load({
         ...(Array.isArray(config.mimo?.builtinVoices) && config.mimo.builtinVoices.length ? config.mimo.builtinVoices : SV_MIMO_BUILTIN_VOICES),
         form.mimoVoice,
       ].filter((value) => typeof value === 'string' && value.trim()))).filter(Boolean);
+      // 模型列表以桥接实测为准，回落到前端兜底表；当前值不在表里也要保留，
+      // 否则 select 会把已保存的模型显示成第一项，看着像配好了其实存的是别的。
+      const modelOptions = Array.from(new Set([
+        ...(Array.isArray(config.mimo?.models) && config.mimo.models.length ? config.mimo.models : SV_MIMO_MODELS.map((model) => model.id)),
+        form.mimoModel,
+      ].filter((value) => typeof value === 'string' && value.trim())))
+        .map((id) => SV_MIMO_MODELS.find((model) => model.id === id) || { id, label: id, hint: '桥接新增的模型' });
+      // 音色设计预设：桥接返回的优先（可由配置中心扩充），否则用前端兜底表。
+      const designPresets = Array.isArray(config.mimo?.voiceDesignPresets) && config.mimo.voiceDesignPresets.length
+        ? config.mimo.voiceDesignPresets
+        : SV_MIMO_DESIGN_PRESETS;
       // 默认音色指向的是本机音色库（参考音频），所以选项来自音色库而不是内置音色。
       const libraryOptions = Array.from(new Set([
         ...(Array.isArray(config.voices) ? config.voices.map((voice) => voice.id) : []),
@@ -1558,8 +1681,10 @@ window.__ModuleLoader__.load({
             ? h('span', { className: 'sv-meta' }, '保存在本机桥接的 config.json，不进版本库')
             : h('span', { className: 'sv-meta' },
               `${isCloud ? '云端' : '本地'}合成`
-              + `${form.mimoVoice ? ` · ${form.mimoVoice}` : ''}`
-              + `${form.mimoStyle ? ` · ${form.mimoStyle.replace(/[，。]$/u, '')}` : ''}`
+              + `${form.mimoModel ? ` · ${(SV_MIMO_MODELS.find((model) => model.id === form.mimoModel) || {}).label || form.mimoModel}` : ''}`
+              + `${form.mimoModel === 'mimo-v2.5-tts' && form.mimoVoice ? ` · ${form.mimoVoice}` : ''}`
+              + `${form.mimoModel === 'mimo-v2.5-tts-voicedesign' && form.mimoVoiceDesign ? ` · ${form.mimoVoiceDesign.slice(0, 12)}…` : ''}`
+              + `${form.mimoModel === 'mimo-v2.5-tts' && form.mimoStyle ? ` · ${form.mimoStyle.replace(/[，。]$/u, '')}` : ''}`
               + `${form.defaultVoice ? ` · 默认音色 ${form.defaultVoice}` : ''}`)),
         !expanded
           ? h('p', { className: 'sv-meta' }, '这组配置一般很少改动，收起了。点标题展开。')
@@ -1580,28 +1705,105 @@ window.__ModuleLoader__.load({
           ? h('div', { className: 'sv-setup-subsection' },
             h('p', { className: 'sv-subsection-title' }, '云端合成 · 小米 MiMo'),
             h('div', { className: 'sv-bridge-fields' },
-              h('label', { className: 'sv-media-field' }, h('span', null, '小米音色'),
-                h('select', { className: 'sv-select', value: form.mimoVoice, onChange: (e) => setField({ mimoVoice: e.target.value }) },
-                  h('option', { value: '' }, '未指定（跟随平台默认）'),
-                  voiceOptions.map((voice) => h('option', { key: voice, value: voice },
-                    SV_MIMO_VOICE_HINTS[voice] ? `${voice} — ${SV_MIMO_VOICE_HINTS[voice]}` : voice))))),
-            SV_MIMO_VOICE_HINTS[form.mimoVoice]
+              // 模型决定参数形态：预置音色填音色名，音色设计填描述，声音复刻靠参考音频。
+              // 三者的字段互不通用，分开展示而不是把不适用的置灰。
+              h('label', { className: 'sv-media-field' }, h('span', null, '合成模型'),
+                h('select', { className: 'sv-select', value: form.mimoModel, onChange: (e) => setField({ mimoModel: e.target.value }) },
+                  modelOptions.map((model) => h('option', { key: model.id, value: model.id }, `${model.label} — ${model.hint}`))))),
+              modelOptions.some((model) => model.id === form.mimoModel)
+                ? h('p', { className: 'sv-note' }, modelOptions.find((model) => model.id === form.mimoModel).hint)
+                : null,
+              form.mimoModel === 'mimo-v2.5-tts'
+                ? h('label', { className: 'sv-media-field' }, h('span', null, '小米音色'),
+                    h('div', null,
+                      h('select', { className: 'sv-select', value: form.mimoVoice, onChange: (e) => setField({ mimoVoice: e.target.value }) },
+                        h('option', { value: '' }, '未指定（跟随平台默认）'),
+                        voiceOptions.map((voice) => h('option', { key: voice, value: voice },
+                          SV_MIMO_VOICE_HINTS[voice] ? `${voice} — ${SV_MIMO_VOICE_HINTS[voice]}` : voice))),
+                      // 每个预置音色都能单独试听，不用先改配置再点总的「试听一句」。
+                      h('div', { className: 'sv-style-presets', style: { marginTop: '6px' } },
+                        voiceOptions.map((voice) => {
+                          const key = `voice:${voice}`;
+                          const state = previews[key];
+                          return h('span', { key, style: { display: 'inline-flex', alignItems: 'center', gap: '5px' } },
+                            h('button', {
+                              type: 'button', className: 'sv-filter-chip',
+                              'data-on': form.mimoVoice === voice ? 'true' : 'false',
+                              disabled: previewKey === key,
+                              onClick: () => setField({ mimoVoice: voice }),
+                            }, voice),
+                            h('button', {
+                              type: 'button', className: 'sv-filter-chip',
+                              disabled: previewKey === key,
+                              title: `试听「${voice}」`,
+                              onClick: () => { void previewVoice(key, { model: 'mimo-v2.5-tts', voice }); },
+                            }, previewKey === key ? '合成中…' : '▶'));
+                        })),
+                      previews[`voice:${form.mimoVoice}`]?.audioUrl
+                        ? h('audio', { className: 'sv-voice-audio', controls: true, src: previews[`voice:${form.mimoVoice}`].audioUrl })
+                        : null))
+                : null,
+            form.mimoModel === 'mimo-v2.5-tts' && SV_MIMO_VOICE_HINTS[form.mimoVoice]
               ? h('p', { className: 'sv-note' }, `当前音色「${form.mimoVoice}」：${SV_MIMO_VOICE_HINTS[form.mimoVoice]}`)
               : null,
-            h('label', { className: 'sv-media-field' }, h('span', null, '语气 / 节奏（可留空）'),
-              h('input', {
-                className: 'sv-input', value: form.mimoStyle, maxLength: 200,
-                placeholder: '留空则用平台默认语气；也可点下方胶囊一键填入',
-                onChange: (e) => setField({ mimoStyle: e.target.value }),
-              })),
-            SV_VOICE_STYLE_PRESETS.length
-              ? h('div', { className: 'sv-style-presets' },
-                h('span', { className: 'sv-meta' }, '常用语气'),
-                SV_VOICE_STYLE_PRESETS.map((style) => h('button', {
-                  key: style, type: 'button', className: 'sv-filter-chip',
-                  'data-on': form.mimoStyle === style ? 'true' : 'false',
-                  onClick: () => setField({ mimoStyle: form.mimoStyle === style ? '' : style }),
-                }, style.replace(/[，。]$/u, ''))))
+            form.mimoModel === 'mimo-v2.5-tts-voicedesign'
+              ? h('div', null,
+                  h('label', { className: 'sv-media-field' }, h('span', null, '音色设计描述'),
+                    h('textarea', {
+                      className: 'sv-textarea', style: { minHeight: '72px' },
+                      value: form.mimoVoiceDesign, maxLength: 500,
+                      placeholder: '用 1~4 句描述想要的声音：性别年龄、音色质感、情绪语气、语速节奏',
+                      onChange: (e) => setField({ mimoVoiceDesign: e.target.value }),
+                    })),
+                  h('p', { className: 'sv-note' }, '官方建议覆盖性别年龄、音色质感、情绪语气、语速节奏；描述越具体越贴近预期。音色设计下「语气」不生效（user 消息位已被描述占用）。'),
+                  designPresets.length
+                    ? h('div', { className: 'sv-style-presets' },
+                      h('span', { className: 'sv-meta' }, '常用音色预设'),
+                      designPresets.map((preset) => {
+                        const key = `design:${preset.id}`;
+                        const state = previews[key];
+                        return h('span', { key, style: { display: 'inline-flex', alignItems: 'center', gap: '5px' } },
+                          h('button', {
+                            type: 'button', className: 'sv-filter-chip',
+                            'data-on': form.mimoVoiceDesign === preset.text ? 'true' : 'false',
+                            title: preset.text,
+                            onClick: () => setField({ mimoVoiceDesign: form.mimoVoiceDesign === preset.text ? '' : preset.text }),
+                          }, preset.label),
+                          h('button', {
+                            type: 'button', className: 'sv-filter-chip',
+                            disabled: previewKey === key,
+                            title: `试听「${preset.label}」`,
+                            onClick: () => { void previewVoice(key, { model: 'mimo-v2.5-tts-voicedesign', voiceDesign: preset.text }); },
+                          }, previewKey === key ? '合成中…' : '▶'),
+                          state?.audioUrl
+                            ? h('audio', { className: 'sv-voice-audio', controls: true, preload: 'none', src: state.audioUrl })
+                            : null,
+                          state && !state.ok
+                            ? h('span', { className: 'sv-meta' }, `试听失败：${state.reason || '未知原因'}`)
+                            : null);
+                      }))
+                    : null)
+              : null,
+            form.mimoModel === 'mimo-v2.5-tts-voiceclone'
+              ? h('p', { className: 'sv-note' }, '声音复刻由参考音频决定声音，配音时选择「上传参考音频」或「桥接音色库」即可，无需在此设置。')
+              : null,
+            form.mimoModel === 'mimo-v2.5-tts'
+              ? h(React.Fragment, null,
+                  h('label', { className: 'sv-media-field' }, h('span', null, '语气 / 节奏（可留空）'),
+                    h('input', {
+                      className: 'sv-input', value: form.mimoStyle, maxLength: 200,
+                      placeholder: '留空则用平台默认语气；也可点下方胶囊一键填入',
+                      onChange: (e) => setField({ mimoStyle: e.target.value }),
+                    })),
+                  SV_VOICE_STYLE_PRESETS.length
+                    ? h('div', { className: 'sv-style-presets' },
+                      h('span', { className: 'sv-meta' }, '常用语气'),
+                      SV_VOICE_STYLE_PRESETS.map((style) => h('button', {
+                        key: style, type: 'button', className: 'sv-filter-chip',
+                        'data-on': form.mimoStyle === style ? 'true' : 'false',
+                        onClick: () => setField({ mimoStyle: form.mimoStyle === style ? '' : style }),
+                      }, style.replace(/[，。]$/u, ''))))
+                    : null)
               : null)
           : h('div', { className: 'sv-setup-subsection' },
             h('p', { className: 'sv-subsection-title' }, '本地合成 · LongCat'),
@@ -1826,6 +2028,21 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 环境类根因的下一步：服务端的 remedy 覆盖凭据与队列，装机器的事得在界面上
+     * 说清命令与配置位置——FFmpeg 和渲染浏览器是用户唯一能自己修的两项。
+     */
+    function environmentNextStep(text) {
+      const value = String(text || '');
+      if (/(?:ffmpeg|ffprobe)/iu.test(value)) {
+        return '安装 FFmpeg 并确认它在 PATH 里：新开一个终端跑 `ffmpeg -version`，能出版本号后重启工作台再重试。';
+      }
+      if (/(?:chrome|edge|puppeteer|playwright|remotion|渲染浏览器)/iu.test(value)) {
+        return '安装 Chrome 或 Edge，或在启动环境里设 `LWB_PUBLISHER_CHROME` 指向它的可执行文件，重启工作台后重试。';
+      }
+      return null;
+    }
+
+    /**
      * 故障聚类面板：按根因折叠，直接回答「最近为什么失败、该改什么」。
      *
      * 24 条失败逐条读是读不完的；同一根因折叠成一行、带上该做什么，才是真的
@@ -1847,7 +2064,12 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sv-fail-body' },
             h('p', { className: 'sv-fail-cat' }, cluster.categoryLabel),
             h('p', { className: 'sv-fail-sig' }, cluster.sample),
-            h('p', { className: 'sv-fail-remedy' }, cluster.remedy)))),
+            h('p', { className: 'sv-fail-remedy' }, cluster.remedy),
+            // 根因是「本机缺东西」时补一条可执行的下一步，和 remedy 分开列，
+            // 免得一句话里塞两件事，读的人还是不知道该干什么。
+            environmentNextStep(`${cluster.categoryLabel} ${cluster.sample} ${cluster.remedy}`)
+              ? h('p', { className: 'sv-fail-next' }, h('span', null, '下一步'), h('span', null, environmentNextStep(`${cluster.categoryLabel} ${cluster.sample} ${cluster.remedy}`)))
+              : null))),
         expanded && (failures.recent || []).some((row) => row.runId) ? h('div', { className: 'sv-fail-recent' },
           h('p', { className: 'sv-fail-cat' }, '可续跑的轮次'),
           (failures.recent || [])
@@ -2675,14 +2897,14 @@ window.__ModuleLoader__.load({
             ),
             completionNote && h('p', { className: 'sv-note' }, completionNote),
             h('label', { className: 'sv-meta' }, '账号名称 *'),
-            h('input', { className: 'sv-input', value: form.name, maxLength: 80, required: true, placeholder: '例如：AI 工具解读号', disabled: saving, onChange: (event) => setForm({ ...form, name: event.target.value }) }),
+            h('input', { className: 'sv-input', value: form.name, maxLength: 80, required: true, placeholder: '例如：GitHub 今日热榜推荐', disabled: saving, onChange: (event) => setForm({ ...form, name: event.target.value }) }),
             accountExecutionId ? h(ExecutionButton, { kind: 'account', id: accountExecutionId }) : null,
             h('label', { className: 'sv-meta' }, '账号定位'),
-            h('textarea', { className: 'sv-textarea', style: { minHeight: '70px' }, value: form.positioning, maxLength: 600, placeholder: '例如：面向普通创作者的 AI 工具解读', disabled: saving, onChange: (event) => setForm({ ...form, positioning: event.target.value }) }),
+            h('textarea', { className: 'sv-textarea', style: { minHeight: '70px' }, value: form.positioning, maxLength: 600, placeholder: '例如：每天推荐 GitHub 上的优质开源项目', disabled: saving, onChange: (event) => setForm({ ...form, positioning: event.target.value }) }),
             h('label', { className: 'sv-meta' }, '目标受众'),
-            h('input', { className: 'sv-input', value: form.audience, maxLength: 300, placeholder: '例如：想提升效率的职场创作者', disabled: saving, onChange: (event) => setForm({ ...form, audience: event.target.value }) }),
+            h('input', { className: 'sv-input', value: form.audience, maxLength: 300, placeholder: '例如：想找好用工具的开发者与技术爱好者', disabled: saving, onChange: (event) => setForm({ ...form, audience: event.target.value }) }),
             h('label', { className: 'sv-meta' }, '内容方向（用顿号或逗号分隔）'),
-            h('input', { className: 'sv-input', value: form.pillars, maxLength: 480, placeholder: '工具拆解、行业观察', disabled: saving, onChange: (event) => setForm({ ...form, pillars: event.target.value }) }),
+             h('input', { className: 'sv-input', value: form.pillars, maxLength: 480, placeholder: '热榜推荐、项目解读、开源工具', disabled: saving, onChange: (event) => setForm({ ...form, pillars: event.target.value }) }),
             h('label', { className: 'sv-meta' }, '内容边界'),
             h('textarea', { className: 'sv-textarea', style: { minHeight: '70px' }, value: form.boundary, maxLength: 600, placeholder: '允许和禁止的内容，例如：不做医疗与投资建议', disabled: saving, onChange: (event) => setForm({ ...form, boundary: event.target.value }) }),
             h('div', { className: 'sv-actions' },
@@ -3780,7 +4002,25 @@ window.__ModuleLoader__.load({
     const AS_STEPS = { topic: '选题', script: '写稿', approve: '确认稿件', voiceover: '配音', subtitles: '字幕', video: '成片质检', packaging: '发布资料', publish: '投递到平台' };
     const AS_TIERS = [{ id: 'short', label: '短（300-999 字）' }, { id: 'medium', label: '中（1000-2499 字）' }, { id: 'long', label: '长（2500 字以上）' }];
     // 桥接（小米 MiMo 云端）的内置音色表；与桥接 /api/v1/tts/voiceover-info 的 builtin_voices 同源。
-    const SV_MIMO_BUILTIN_VOICES = ['冰糖', '茉莉', '苏打', '白桦', 'mimo_default'];
+    const SV_MIMO_BUILTIN_VOICES = ['mimo_default', '冰糖', '茉莉', '苏打', '白桦', 'Mia', 'Chloe', 'Milo', 'Dean'];
+    /** 官方三个 TTS 模型。形态不同：预置音色用 voice 名，音色设计用描述，声音复刻靠参考音频。 */
+    const SV_MIMO_MODELS = [
+      { id: 'mimo-v2.5-tts', label: '预置音色', hint: '官方内置音色表，稳定可用' },
+      { id: 'mimo-v2.5-tts-voicedesign', label: '音色设计', hint: '用文字描述生成新音色，无需参考音频' },
+      { id: 'mimo-v2.5-tts-voiceclone', label: '声音复刻', hint: '上传参考音频复刻该声音' },
+    ];
+    /**
+     * 音色设计预设。官方建议描述覆盖性别年龄、音色质感、情绪语气、语速节奏，
+     * 1~4 句即可——写成一段设定反而容易抓不住重点。
+     */
+    const SV_MIMO_DESIGN_PRESETS = [
+      { id: 'narrator-male', label: '沉稳男声 · 评书旁白', text: '一位年迈的老先生，嗓音略带沙哑和沧桑感，语速缓慢而沉稳，像在讲一段很久以前的故事，语气从容，带岁月的智慧。' },
+      { id: 'knowledge-female', label: '知性女声 · 知识讲解', text: '一位三十岁左右的女性，声音清晰沉稳，语速适中，吐字干净利落，适合知识讲解与资讯播报，语气亲切但不轻浮。' },
+      { id: 'energetic-youth', label: '元气少年 · 快节奏口播', text: '一位年轻的男性，声音清亮活泼，语速偏快，节奏明快，带着一点兴奋感，像在跟朋友分享刚发现的新鲜事。' },
+      { id: 'warm-healer', label: '温柔女声 · 情感共鸣', text: '一位三十岁左右的女性，声音温柔细腻，语速舒缓，尾音轻柔，带着一点温柔的疲惫感，像在深夜轻声安慰一位朋友。' },
+      { id: 'business-male', label: '干练男声 · 商业解读', text: '一位四十岁左右的男性，中低音，浑厚有力，语速偏快但吐字清晰，语气果断利落，像在做一场有说服力的商业分析。' },
+      { id: 'documentary', label: '纪录片旁白 · 中性', text: '一位中性偏男性的旁白，声音低沉醇厚，语速平缓克制，语调平稳没有起伏，像在自然纪录片的镜头前做客观陈述。' },
+    ];
     /**
      * 内置音色的性格说明。
      *
@@ -3793,11 +4033,15 @@ window.__ModuleLoader__.load({
      * 挡在门外。
      */
     const SV_MIMO_VOICE_HINTS = {
-      '冰糖': '偏甜的年轻女声，适合生活方式、好物与轻松话题',
-      '茉莉': '中性偏稳的女声，知识讲解与资讯播报都比较稳',
-      '苏打': '清亮活泼，适合快节奏口播与开场引入',
-      '白桦': '沉稳男声，适合观点表达、深度解读与结论段',
-      'mimo_default': '平台默认音色；不确定选哪个时用它',
+      'mimo_default': '平台默认音色（随集群变化）；不确定选哪个时用它',
+      '冰糖': '中文女声，偏甜，适合生活方式、好物与轻松话题',
+      '茉莉': '中文女声，中性偏稳，知识讲解与资讯播报都比较稳',
+      '苏打': '中文男声，清亮活泼，适合快节奏口播与开场引入',
+      '白桦': '中文男声，沉稳，适合观点表达、深度解读与结论段',
+      'Mia': '英文女声，英文集群默认音色',
+      'Chloe': '英文女声，清亮亲和',
+      'Milo': '英文男声，中性平稳',
+      'Dean': '英文男声，低沉厚重',
     };
     // 常用且专业的语气提示词。桥接把它作为 user 角色指令传给小米 TTS 控制语气/节奏，
     // 不进合成文本，所以可以放心写风格描述；也允许在输入框里自己改。
@@ -3811,12 +4055,91 @@ window.__ModuleLoader__.load({
       '娓娓道来，适合故事讲述。',
       '热情推荐，适合好物种草。',
     ];
+    /**
+     * 声音方案（Voice Recipe）。
+     *
+     * 之前把「音色来源 / 合成方式 / 合成模型 / 内置音色 / 音色描述 / 语气 /
+     * 语速 / 音量」八件事平铺给用户，可这三个 MiMo 模型的参数形态互不相同
+     * （预置音色要音色名、音色设计要描述、声音复刻要参考音频），用户得先理解
+     * 模型差异才敢填表。
+     *
+     * 方案把这八件事打包成一份配方：选一个就得到「来源 + 模型 + 音色 + 语气 +
+     * 语速 + 音量」的完整设定；确实要改细节时再展开「高级设置」手动覆盖。
+     */
+    const SV_VOICE_RECIPES = [
+      { id: 'natural', label: '自然讲解', hint: '知识讲解 · 资讯播报', summary: '茉莉 · 清晰沉稳', kind: 'builtin', model: 'mimo-v2.5-tts', voice: '茉莉', design: '', style: '清晰沉稳，适合知识讲解。', rate: 1, volume: 1 },
+      { id: 'energetic', label: '活力口播', hint: '快节奏开场 · 好物种草', summary: '苏打 · 轻快活泼', kind: 'builtin', model: 'mimo-v2.5-tts', voice: '苏打', design: '', style: '轻快活泼，节奏明快。', rate: 1.05, volume: 1 },
+      { id: 'warm', label: '温柔旁白', hint: '情感共鸣 · 故事讲述', summary: '冰糖 · 温柔舒缓', kind: 'builtin', model: 'mimo-v2.5-tts', voice: '冰糖', design: '', style: '温柔舒缓，适合情感共鸣。', rate: 0.95, volume: 1 },
+      { id: 'business', label: '商业解读', hint: '观点表达 · 深度分析', summary: '白桦 · 干练利落', kind: 'builtin', model: 'mimo-v2.5-tts', voice: '白桦', design: '', style: '干练利落，适合资讯播报。', rate: 1.05, volume: 1 },
+      { id: 'narrator', label: '评书旁白', hint: '人物纪实 · 故事', summary: '音色设计 · 评书旁白', kind: 'design', model: 'mimo-v2.5-tts-voicedesign', voice: '', designPreset: 'narrator-male', design: '', style: '', rate: 0.95, volume: 1 },
+      { id: 'youth', label: '元气少年', hint: '快节奏分享 · 轻松话题', summary: '音色设计 · 元气少年', kind: 'design', model: 'mimo-v2.5-tts-voicedesign', voice: '', designPreset: 'energetic-youth', design: '', style: '', rate: 1.05, volume: 1 },
+      { id: 'documentary', label: '纪录片旁白', hint: '中性客观 · 深度记录', summary: '音色设计 · 纪录片旁白', kind: 'design', model: 'mimo-v2.5-tts-voicedesign', voice: '', designPreset: 'documentary', design: '', style: '', rate: 0.95, volume: 1 },
+      { id: 'custom', label: '自定义', hint: '上传参考音频 · 手动指定', summary: '上传参考音频 / 手动指定', kind: 'custom', model: '', voice: '', design: '', style: '', rate: 1, volume: 1 },
+    ];
+    /**
+     * 音色设计描述文本。优先用桥接返回的预设（配置中心可扩充），回落到前端兜底表。
+     */
+    function svDesignText(recipe, designPresets) {
+      if (!recipe?.designPreset) return recipe?.voiceDesign || '';
+      const preset = (designPresets || SV_MIMO_DESIGN_PRESETS).find((item) => item.id === recipe.designPreset);
+      return preset?.text || recipe.voiceDesign || '';
+    }
+    /** 方案 → 表单补丁：一次写全来源 / 模型 / 音色 / 描述 / 语气 / 语速 / 音量。 */
+    function voiceRecipePatch(recipe, designPresets) {
+      if (!recipe) return {};
+      // 音色设计不需要参考音频：走「系统音色 + 指定模型 + 描述」，
+      // 桥接会按显式模型跳过参考音频解析。
+      // 自定义落回「上传参考音频」：那是唯一还能换声的入口，模型自动切到复刻。
+      const source = recipe.kind === 'builtin' ? 'builtin' : (recipe.kind === 'custom' ? 'upload' : 'system');
+      return {
+        voiceSource: source,
+        bridgeModel: recipe.model || (recipe.kind === 'custom' ? 'mimo-v2.5-tts-voiceclone' : ''),
+        bridgeVoice: recipe.voice || 'mimo_default',
+        bridgeVoiceDesign: recipe.kind === 'design' ? svDesignText(recipe, designPresets) : '',
+        bridgeStyle: recipe.style || '',
+        // 预置音色与音色设计只有云端 MiMo 有；本地 LongCat 不认这两个模型。
+        bridgeChannel: recipe.kind === 'builtin' || recipe.kind === 'design' ? 'cloud' : '',
+        rate: String(recipe.rate ?? 1),
+        volume: String(recipe.volume ?? 1),
+      };
+    }
+    /**
+     * 音色来源决定模型形态：预置音色填音色名，描述走音色设计，参考音频走复刻。
+     * 用户不需要手动挑模型——改了来源，模型自动跟上。
+     */
+    function voiceModelForSource(source) {
+      if (source === 'builtin') return 'mimo-v2.5-tts';
+      if (source === 'upload' || source === 'library') return 'mimo-v2.5-tts-voiceclone';
+      return '';
+    }
+    /** 当前状态属于哪个方案（用来回显选中卡片）；对不上就是自定义。 */
+    function voiceRecipeIdOf(state, designPresets) {
+      const design = state.bridgeModel === 'mimo-v2.5-tts-voicedesign';
+      const kind = design ? 'design' : (state.voiceSource === 'builtin' ? 'builtin' : (state.voiceSource === 'upload' || state.voiceSource === 'library' ? 'upload' : 'system'));
+      const found = SV_VOICE_RECIPES.find((recipe) => recipe.id !== 'custom'
+        && recipe.kind === kind
+        && (recipe.model || '') === (state.bridgeModel || '')
+        // 音色设计由描述决定声音，音色名不参与比对。
+        && (recipe.kind === 'design' || (recipe.voice || '') === (state.bridgeVoice || ''))
+        && (recipe.kind !== 'design' || svDesignText(recipe, designPresets) === (state.bridgeVoiceDesign || ''))
+        && (recipe.style || '') === (state.bridgeStyle || '')
+        && String(recipe.rate ?? 1) === String(state.rate ?? 1)
+        && String(recipe.volume ?? 1) === String(state.volume ?? 1));
+      return found ? found.id : 'custom';
+    }
     // interrupted/blocked 是断点续跑、开工前体检与依赖自愈引入的终态，界面上必须能认出来。
     // interrupted 的下一步是「等它自动续跑」，blocked 有两种含义：
     //   · blockedBy 有值 → 外部依赖不可用，正在等它恢复并自动续跑（不是失败）
     //   · blockedBy 为空 → 开工前体检没通过，没开跑（下一步是改配置）
     // 这两种混成同一个词会让「等得起」看起来像「完了」，所以按 blockedBy 分开显示。
-    const IMAGE_PROVIDER_SHORT = { bailian: '百炼', scitiger: 'SciTiger', custom: '自定义' };
+    const IMAGE_PROVIDER_SHORT = { scitiger: 'SciTiger', custom: '自定义' };
+    // 存量封面产物里 imageProvider.provider 可能还是 'bailian'/'legacy'（百炼直连已随
+    // 「百炼不留」下线）。历史渠道不再可生成，但展示时必须给得体文案，不能显示空白
+    // 或原始 token：当前渠道（scitiger/custom）走 IMAGE_PROVIDER_SHORT。
+    function imageProviderLabel(provider) {
+      if (provider === 'bailian' || provider === 'legacy') return '历史渠道（已下线）'
+      return IMAGE_PROVIDER_SHORT[provider] || provider
+    }
     const AS_RUN_STATUS = { running: '执行中', completed: '已完成', partial: '部分完成', failed: '失败', missed: '已错过', cancelled: '已停止', interrupted: '已中断·待续跑', blocked: '体检未过·未启动' };
     const AS_RUN_STATUS_WAITING = '等待服务恢复·将自动续跑';
     /** blocked 有两种语义，靠 blockedBy 区分：等待依赖 vs 体检拦截。 */
@@ -3835,7 +4158,9 @@ window.__ModuleLoader__.load({
     const AS_ITEM_STATUS = { running: '进行中', completed: '已完成', failed: '失败', cancelled: '已停止' };
     const AS_STAGE_TONE = { done: 'sv-stage', failed: 'sv-status-error', running: '', skipped: 'sv-status-disabled' };
     function emptyScheduleForm() {
-      return { name: '', days: new Set([1, 2, 3, 4, 5]), time: '21:00', angle: '', offSources: new Set(), offPlatforms: new Set(), excluded: new Set(), depth: 'packaging', perRunLimit: 1, orientation: 'landscape', scriptTier: 'medium', subtitleEnabled: true, visualBrief: '', voiceSource: 'system', voiceReference: null, voiceRate: '1', voiceVolume: '1', bridgeVoice: '冰糖', libraryVoice: '', bridgeChannel: '', bridgeStyle: '', publishAccountId: '', publishSubmitMode: 'confirm' };
+      // 声音默认落在「自然讲解」方案上：新建任务一上来就有能用的声音，
+      // 不必先理解三个 MiMo 模型的差别再填表。
+      return { name: '', days: new Set([1, 2, 3, 4, 5]), time: '21:00', angle: '', offSources: new Set(), offPlatforms: new Set(), excluded: new Set(), depth: 'packaging', perRunLimit: 1, orientation: 'landscape', scriptTier: 'medium', subtitleEnabled: true, visualBrief: '', voiceSource: 'builtin', voiceReference: null, voiceRate: '1', voiceVolume: '1', bridgeVoice: '茉莉', libraryVoice: '', bridgeChannel: 'cloud', bridgeStyle: '清晰沉稳，适合知识讲解。', bridgeModel: 'mimo-v2.5-tts', bridgeVoiceDesign: '', publishAccountId: '', publishSubmitMode: 'confirm' };
     }
     /** Rehydrate a per-tab form from a stored task so editing reuses the create form. */
     function scheduleFormOf(schedule, board) {
@@ -3863,10 +4188,12 @@ window.__ModuleLoader__.load({
         voiceReference: voice?.voiceSource === 'upload' && voice.referenceAudio ? voice.referenceAudio : null,
         voiceRate: String(voice?.rate ?? 1),
         voiceVolume: String(voice?.volume ?? 1),
-        bridgeVoice: presetIsBuiltin ? voice.voiceId : '冰糖',
+        bridgeVoice: presetIsBuiltin ? voice.voiceId : 'mimo_default',
         libraryVoice: voice?.voiceSource === 'preset' && !presetIsBuiltin ? voice.voiceId : '',
         bridgeChannel: voice?.bridge?.channel || '',
         bridgeStyle: voice?.bridge?.style || '',
+        bridgeModel: voice?.bridge?.model || '',
+        bridgeVoiceDesign: voice?.bridge?.voiceDesign || '',
         // A stored task keeps its first target selected; the rest stay in the
         // saved list and are reachable by editing the task again.
         publishAccountId: schedule.publish?.accountIds?.[0] || '',
@@ -3992,8 +4319,8 @@ window.__ModuleLoader__.load({
       { id: 'script-pending', label: '待写稿', page: 'scripts', tone: 'orange', action: '去写稿' },
       { id: 'script-review', label: '待确认稿件', page: 'scripts', tone: 'violet', action: '去确认稿件' },
       { id: 'voiceover', label: '待配音 / 字幕', page: 'audio-captions', tone: 'pink', action: '去配音' },
-      { id: 'video', label: '待视频制作', page: 'video-preview', tone: 'green', action: '去制作视频' },
-      { id: 'publish', label: '可发布', page: 'publish', tone: 'red', action: '去发布' },
+      { id: 'video', label: '待视频制作', page: 'video-preview', tone: 'brand', action: '去制作视频' },
+      { id: 'publish', label: '可发布', page: 'publish', tone: 'green', action: '去发布' },
     ];
     // 看板没有 topic 组——未确认选题的项目仍在选题页管理，不进流水线视角。
     function PipelineBoardPage({ packId, openConversation, openPackMenu }) {
@@ -4082,14 +4409,20 @@ window.__ModuleLoader__.load({
         h('button', { type: 'button', className: 'lwb-plain-button sv-pl-item-go', onClick: () => goNext(item) }, PIPELINE_STAGES.find((entry) => entry.id === item.stage)?.action || '查看', ' →'),
       );
 
-      return h(PackFrame, { packId, openConversation, title: '制作流水线', accent: 'sky', copy: '按阶段分选项卡查看：一张卡片就是一个项目，卡片上的按钮直达它下一步该去的工作页并自动选中它。各工作页的入口不变；本页只回答两件事——项目现在在哪、下一步去哪。', hero: h(HeroMini, { cells: PIPELINE_STAGES.map((stage) => ({ label: stage.label, value: String((byStage.get(stage.id) || []).length), tone: (byStage.get(stage.id) || []).length ? stage.tone : '' })) }) },
+      return h(PackFrame, { packId, openConversation, title: '制作流水线', accent: 'sky', copy: '一张卡片就是一个项目：上面的数字说它现在在哪，卡片上的按钮直接送它去下一步。', hero: h(HeroMini, { cells: PIPELINE_STAGES.map((stage) => ({ label: stage.label, value: String((byStage.get(stage.id) || []).length), tone: (byStage.get(stage.id) || []).length ? stage.tone : '' })) }) },
         // 读不到数据时把原因和重试入口摆出来，别让页面无声无息地空着（与执行记录页同一模式）。
         // 连接断了的话「重试读取」没用——RPC 根本发不出去，所以额外给一个刷新页面的出口。
         error ? h('div', { className: 'sv-error', role: 'alert' }, error,
           h('div', { className: 'sv-actions' },
             h('button', { type: 'button', className: 'lwb-plain-button', disabled: busy, onClick: () => { setAttempt((value) => value + 1); void load(); } }, busy ? '正在重试…' : '重试读取'),
             h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => location.reload() }, '刷新页面'))) : null,
-        total === 0 && !error && items ? h('div', { className: 'sv-empty' }, '还没有项目。到「选题」页生成候选并加入待写稿，或用「内容安排」让定时任务自动产出；流水线一有项目就会在这里出现。') : null,
+        total === 0 && !error && items ? h('div', { className: 'sv-empty' },
+          h('p', { className: 'lwb-empty-title' }, '流水线还是空的'),
+          h('p', null, '先有选题并加入待写稿，项目才会出现在这里。两个入口：去「选题」页自己挑，或者让「内容安排」定时自动产出。'),
+          h('div', { className: 'lwb-empty-actions' },
+            openPackMenu ? h('button', { type: 'button', className: 'lwb-primary-button', onClick: () => openPackMenu('topics') }, '去选题页') : null,
+            openPackMenu ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => openPackMenu('content-schedule') }, '去内容安排') : null,
+          )) : null,
         total > 0 || error ? h('div', { className: 'sv-tp-tabs', role: 'tablist', 'aria-label': '按制作阶段筛选项目' }, PIPELINE_STAGES.map((stage) => {
           const count = (byStage.get(stage.id) || []).length;
           return h('button', { key: stage.id, type: 'button', role: 'tab', className: 'sv-tp-tab', 'data-active': activeStage === stage.id ? 'true' : 'false', 'aria-selected': activeStage === stage.id, onClick: () => setActiveStage(stage.id) },
@@ -4125,6 +4458,10 @@ window.__ModuleLoader__.load({
       const [confirmNode, ask] = useSvConfirm();
       const [voiceUploading, setVoiceUploading] = React.useState(false);
       const [bridgeInfo, setBridgeInfo] = React.useState(null);
+      // 方案试听：按 key 存结果，key 用「recipe:xxx」区分方案。
+      const [scheduleRecipePreviews, setScheduleRecipePreviews] = React.useState({});
+      const [scheduleRecipePreviewKey, setScheduleRecipePreviewKey] = React.useState(null);
+      const [scheduleRecipeBusyKey, setScheduleRecipeBusyKey] = React.useState(null);
       const scheduleVoiceFileInputRef = React.useRef(null);
       const fail = React.useCallback((message) => { setError(message); }, [setError]);
 
@@ -4527,6 +4864,14 @@ window.__ModuleLoader__.load({
       const voiceReferenceMeta = form.voiceReference ? [form.voiceReference.bytes != null ? formatMediaBytes(form.voiceReference.bytes) : null, form.voiceReference.durationSeconds != null ? formatMediaDuration(form.voiceReference.durationSeconds) : null].filter(Boolean).join(' · ') : null;
       const builtinVoiceOptions = Array.from(new Set([...(bridgeInfo?.available && Array.isArray(bridgeInfo.builtinVoices) && bridgeInfo.builtinVoices.length ? bridgeInfo.builtinVoices : SV_MIMO_BUILTIN_VOICES), form.bridgeVoice]));
       const libraryVoiceOptions = bridgeInfo?.available && Array.isArray(bridgeInfo.voices) ? bridgeInfo.voices : [];
+      const scheduleModelOptions = Array.from(new Set([
+        ...(bridgeInfo?.available && Array.isArray(bridgeInfo.models) && bridgeInfo.models.length ? bridgeInfo.models : SV_MIMO_MODELS.map((model) => model.id)),
+        form.bridgeModel,
+      ].filter((value) => typeof value === 'string' && value.trim())))
+        .map((id) => SV_MIMO_MODELS.find((model) => model.id === id) || { id, label: id, hint: '桥接新增的模型' });
+      const scheduleDesignPresets = bridgeInfo?.available && Array.isArray(bridgeInfo.voiceDesignPresets) && bridgeInfo.voiceDesignPresets.length
+        ? bridgeInfo.voiceDesignPresets
+        : SV_MIMO_DESIGN_PRESETS;
       const voicePayloadOf = () => {
         const numeric = (value, fallback) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : fallback; };
         const rate = numeric(form.voiceRate, 1);
@@ -4534,6 +4879,8 @@ window.__ModuleLoader__.load({
         const bridge = {};
         if (form.bridgeChannel) bridge.channel = form.bridgeChannel;
         if (form.bridgeStyle.trim()) bridge.style = form.bridgeStyle.trim();
+        if (form.bridgeModel) bridge.model = form.bridgeModel;
+        if (form.bridgeVoiceDesign.trim()) bridge.voiceDesign = form.bridgeVoiceDesign.trim();
         const bridgeFields = Object.keys(bridge).length ? { bridge } : {};
         if (form.voiceSource === 'upload') {
           return form.voiceReference
@@ -4631,36 +4978,83 @@ window.__ModuleLoader__.load({
             h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '稿件篇幅'), h('select', { className: 'sv-select', value: form.scriptTier, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, scriptTier: event.target.value })) }, AS_TIERS.map((item) => h('option', { key: item.id, value: item.id }, item.label)))),
             h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '字幕'), h('select', { className: 'sv-select', value: form.subtitleEnabled ? 'on' : 'off', disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, subtitleEnabled: event.target.value === 'on' })) }, h('option', { value: 'on' }, '生成字幕'), h('option', { value: 'off' }, '不要字幕'))),
           ),
-          h('div', { className: 'sv-as-grid2' },
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '语速'), h('input', { className: 'sv-input', type: 'number', min: '0.5', max: '2', step: '0.05', value: form.voiceRate, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceRate: event.target.value })) })),
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音量'), h('input', { className: 'sv-input', type: 'number', min: '0', max: '2', step: '0.05', value: form.voiceVolume, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceVolume: event.target.value })) })),
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音色'), h('select', { className: 'sv-select', value: form.voiceSource, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceSource: event.target.value })) },
-              h('option', { value: 'system' }, 'Tiffy - 自信（系统默认）'),
-              h('option', { value: 'upload' }, '上传参考音频'),
-              h('option', { value: 'builtin' }, '桥接内置音色（云端 · 小米 MiMo）'),
-              h('option', { value: 'library' }, '桥接音色库（本机参考音频）'),
-            )),
-          ),
-          form.voiceSource === 'upload' ? h('div', { className: 'sv-voice-upload' },
-            h('input', { ref: scheduleVoiceFileInputRef, type: 'file', accept: 'audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/ogg,.mp3,.wav,.m4a,.ogg', tabIndex: -1, style: { display: 'none' }, onChange: (event) => { void uploadScheduleVoiceReference(event); } }),
-            h('div', { className: 'sv-voice-upload-row' },
-              h('p', { className: 'sv-voice-upload-file' }, form.voiceReference ? h(React.Fragment, null, form.voiceReference.name, voiceReferenceMeta ? h('span', null, ` · ${voiceReferenceMeta}`) : null) : '尚未选择参考音频'),
-              h('button', { type: 'button', className: 'lwb-plain-button', disabled: voiceUploading || Boolean(busy), onClick: () => scheduleVoiceFileInputRef.current?.click?.() }, voiceUploading ? '正在上传…' : form.voiceReference ? '更换音频' : '选择音频'),
-              form.voiceReference ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: voiceUploading || Boolean(busy), onClick: () => patchForm((current) => ({ ...current, voiceReference: null })) }, '移除') : null,
-            ),
-            h('p', { className: 'sv-note' }, '支持 MP3、WAV、M4A 和 OGG，最大 20 MiB。请上传只包含目标人声的清晰音频。'),
-          ) : null,
-          form.voiceSource === 'builtin' ? h('div', { className: 'sv-as-grid2' },
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '内置音色'), h('select', { className: 'sv-select', value: form.bridgeVoice, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, bridgeVoice: event.target.value })) }, builtinVoiceOptions.map((voice) => h('option', { key: voice, value: voice }, voice)))),
-          ) : null,
-          form.voiceSource === 'library' ? h('div', { className: 'sv-as-grid2' },
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音色库音色'), libraryVoiceOptions.length
-              ? h('select', { className: 'sv-select', value: form.libraryVoice, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, libraryVoice: event.target.value })) }, h('option', { value: '' }, '选择音色'), libraryVoiceOptions.map((voice) => h('option', { key: voice.id, value: voice.id }, `${voice.id}${voice.hasTxt ? '' : '（首次使用自动转写）'}`)))
-              : h('select', { className: 'sv-select', value: '', disabled: true }, h('option', { value: '' }, bridgeInfo?.available ? '音色库为空：到桥接配置中心上传音色' : '桥接未响应，无法读取音色库'))),
-          ) : null,
-          h('div', { className: 'sv-as-grid2' },
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '桥接配音方式（按任务覆盖）'), h('select', { className: 'sv-select', value: form.bridgeChannel, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, bridgeChannel: event.target.value })) }, h('option', { value: '' }, '跟随桥接配置'), h('option', { value: 'cloud' }, '云端（小米 MiMo）'), h('option', { value: 'local' }, '本地（LongCat）'))),
-            h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '桥接预期风格（选填）'), h('input', { className: 'sv-input', value: form.bridgeStyle, maxLength: 200, disabled: Boolean(busy), placeholder: '留空则跟随桥接配置；仅云端合成时生效', onChange: (event) => patchForm((current) => ({ ...current, bridgeStyle: event.target.value })) })),
+          h('div', { className: 'sv-as-field' },
+            h('span', { className: 'sv-as-label' }, '声音方案'),
+            h(VoiceRecipePicker, {
+              state: { voiceSource: form.voiceSource, bridgeModel: form.bridgeModel, bridgeVoice: form.bridgeVoice, bridgeVoiceDesign: form.bridgeVoiceDesign, bridgeStyle: form.bridgeStyle, rate: form.voiceRate, volume: form.voiceVolume, designPresets: scheduleDesignPresets },
+              disabled: Boolean(busy) || voiceUploading,
+              previewKey: scheduleRecipePreviewKey,
+              previewBusyKey: scheduleRecipeBusyKey,
+              previewAudio: scheduleRecipePreviewKey ? scheduleRecipePreviews[scheduleRecipePreviewKey] : null,
+              onPick: (recipe) => {
+                const patch = voiceRecipePatch(recipe, scheduleDesignPresets);
+                patchForm((current) => ({
+                  ...current,
+                  voiceSource: patch.voiceSource,
+                  bridgeModel: patch.bridgeModel,
+                  bridgeVoice: patch.bridgeVoice,
+                  bridgeVoiceDesign: patch.bridgeVoiceDesign,
+                  bridgeStyle: patch.bridgeStyle,
+                  bridgeChannel: patch.bridgeChannel,
+                  voiceRate: patch.rate,
+                  voiceVolume: patch.volume,
+                }));
+              },
+              onPreview: async (key, payload) => {
+                setScheduleRecipePreviewKey(key);
+                setScheduleRecipeBusyKey(key);
+                try {
+                  const result = await remoteStatic('bridgeVoiceTest', payload);
+                  setScheduleRecipePreviews((current) => ({ ...current, [key]: result }));
+                } catch (cause) { setError(cause.message); }
+                finally { setScheduleRecipeBusyKey(null); }
+              },
+              advanced: h(React.Fragment, null,
+                h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音色来源'), h('select', { className: 'sv-select', value: form.voiceSource, disabled: Boolean(busy), onChange: (event) => {
+                  const source = event.target.value;
+                  // 来源决定模型形态：参考音频走复刻，预置音色走预置模型。
+                  patchForm((current) => ({ ...current, voiceSource: source, bridgeModel: voiceModelForSource(source) }));
+                } },
+                  h('option', { value: 'system' }, '系统默认音色（Tiffy）'),
+                  h('option', { value: 'upload' }, '上传参考音频'),
+                  h('option', { value: 'builtin' }, '桥接内置音色（云端 · 小米 MiMo）'),
+                  h('option', { value: 'library' }, '桥接音色库（本机参考音频）'),
+                )),
+                h('div', { className: 'sv-as-grid2' },
+                  h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '语速'), h('input', { className: 'sv-input', type: 'number', min: '0.5', max: '2', step: '0.05', value: form.voiceRate, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceRate: event.target.value })) })),
+                  h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音量'), h('input', { className: 'sv-input', type: 'number', min: '0', max: '2', step: '0.05', value: form.voiceVolume, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, voiceVolume: event.target.value })) })),
+                ),
+                form.voiceSource === 'upload' ? h('div', { className: 'sv-voice-upload' },
+                  h('input', { ref: scheduleVoiceFileInputRef, type: 'file', accept: 'audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/ogg,.mp3,.wav,.m4a,.ogg', tabIndex: -1, style: { display: 'none' }, onChange: (event) => { void uploadScheduleVoiceReference(event); } }),
+                  h('div', { className: 'sv-voice-upload-row' },
+                    h('p', { className: 'sv-voice-upload-file' }, form.voiceReference ? h(React.Fragment, null, form.voiceReference.name, voiceReferenceMeta ? h('span', null, ` · ${voiceReferenceMeta}`) : null) : '尚未选择参考音频'),
+                    h('button', { type: 'button', className: 'lwb-plain-button', disabled: voiceUploading || Boolean(busy), onClick: () => scheduleVoiceFileInputRef.current?.click?.() }, voiceUploading ? '正在上传…' : form.voiceReference ? '更换音频' : '选择音频'),
+                    form.voiceReference ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: voiceUploading || Boolean(busy), onClick: () => patchForm((current) => ({ ...current, voiceReference: null })) }, '移除') : null,
+                  ),
+                  h('p', { className: 'sv-note' }, '支持 MP3、WAV、M4A 和 OGG，最大 20 MiB。请上传只包含目标人声的清晰音频。'),
+                ) : null,
+                form.voiceSource === 'builtin' ? h('div', { className: 'sv-as-grid2' },
+                  h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '内置音色'), h('select', { className: 'sv-select', value: form.bridgeVoice, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, bridgeVoice: event.target.value })) }, builtinVoiceOptions.map((voice) => h('option', { key: voice, value: voice }, voice)))),
+                ) : null,
+                form.voiceSource === 'library' ? h('div', { className: 'sv-as-grid2' },
+                  h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '音色库音色'), libraryVoiceOptions.length
+                    ? h('select', { className: 'sv-select', value: form.libraryVoice, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, libraryVoice: event.target.value })) }, h('option', { value: '' }, '选择音色'), libraryVoiceOptions.map((voice) => h('option', { key: voice.id, value: voice.id }, `${voice.id}${voice.hasTxt ? '' : '（首次使用自动转写）'}`)))
+                    : h('select', { className: 'sv-select', value: '', disabled: true }, h('option', { value: '' }, bridgeInfo?.available ? '音色库为空：到桥接配置中心上传音色' : '桥接未响应，无法读取音色库'))),
+                ) : null,
+                h('div', { className: 'sv-as-grid2' },
+                  h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '桥接配音方式（按任务覆盖）'), h('select', { className: 'sv-select', value: form.bridgeChannel, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, bridgeChannel: event.target.value })) }, h('option', { value: '' }, '跟随桥接配置'), h('option', { value: 'cloud' }, '云端（小米 MiMo）'), h('option', { value: 'local' }, '本地（LongCat）'))),
+                  h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '桥接预期风格（选填）'), h('input', { className: 'sv-input', value: form.bridgeStyle, maxLength: 200, disabled: Boolean(busy), placeholder: '留空则跟随桥接配置；仅云端合成时生效', onChange: (event) => patchForm((current) => ({ ...current, bridgeStyle: event.target.value })) })),
+                ),
+                h('div', { className: 'sv-as-grid2' },
+                  h('label', { className: 'sv-as-field' }, h('span', { className: 'sv-as-label' }, '桥接合成模型（按任务覆盖）'), h('select', { className: 'sv-select', value: form.bridgeModel, disabled: Boolean(busy), onChange: (event) => patchForm((current) => ({ ...current, bridgeModel: event.target.value })) }, h('option', { value: '' }, '跟随桥接配置'), scheduleModelOptions.map((model) => h('option', { key: model.id, value: model.id }, `${model.label} — ${model.hint}`)))),
+                ),
+                form.bridgeModel === 'mimo-v2.5-tts-voicedesign' ? h('div', { className: 'sv-as-field' },
+                  h('span', { className: 'sv-as-label' }, '音色设计描述'),
+                  h('textarea', { className: 'sv-textarea', style: { minHeight: '68px' }, value: form.bridgeVoiceDesign, maxLength: 500, disabled: Boolean(busy), placeholder: '用 1~4 句描述想要的声音：性别年龄、音色质感、情绪语气、语速节奏', onChange: (event) => patchForm((current) => ({ ...current, bridgeVoiceDesign: event.target.value })) }),
+                  scheduleDesignPresets.length ? h('div', { className: 'sv-as-chips', style: { marginTop: '6px' } }, scheduleDesignPresets.map((preset) => h('button', { key: preset.id, type: 'button', className: 'sv-as-chip', title: preset.text, 'data-on': form.bridgeVoiceDesign === preset.text ? 'true' : 'false', disabled: Boolean(busy), onClick: () => patchForm((current) => ({ ...current, bridgeVoiceDesign: current.bridgeVoiceDesign === preset.text ? '' : preset.text })) }, preset.label))) : null,
+                ) : null,
+              ),
+            }),
           ),
           bridgeInfo?.available ? h('p', { className: 'sv-as-task-note' }, `桥接当前：${bridgeInfo.ttsProvider === 'local' ? '本地合成（LongCat）' : '云端合成（小米 MiMo）'}${bridgeInfo.mimoKeyConfigured ? '' : ' · 未配置小米 API Key'}${bridgeInfo.mimoVoice ? ` · 内置音色「${bridgeInfo.mimoVoice}」` : ''}${bridgeInfo.mimoStyle ? ` · 风格「${bridgeInfo.mimoStyle}」` : ''}${bridgeInfo.defaultVoice ? ` · 默认音色映射「${bridgeInfo.defaultVoice}」` : ' · 未设置默认音色映射'}。系统默认音色经桥接时会自动替换为映射的音色库音色；桥接设置只在使用桥接渠道时生效。`) : null,
           h('label', { className: 'sv-as-field' },
@@ -4774,8 +5168,15 @@ window.__ModuleLoader__.load({
     function mediaStatusLabel(status) { return ({ queued: '等待执行', running: '执行中', succeeded: '已完成', failed: '失败' })[status] || status; }
     function mediaErrorText(error) {
       const value = String(error || '').replace(/^Error \[[A-Z0-9_]+\]\s*/u, '');
+      // 环境类失败要说「装什么、配哪里、跑完做什么」——只把 ENOENT 抛给用户等于没说。
+      if (/(?:ffmpeg|ffprobe)/iu.test(value) && /(?:enoent|not found|不存在|无法找到|找不到|no such file)/iu.test(value)) {
+        return '本机缺少 FFmpeg，或它不在 PATH 里（配音变速、字幕烧录、封面大字都靠它）。下一步：安装 FFmpeg，在新开的终端里跑 `ffmpeg -version` 能出版本号后，重启工作台再重试。';
+      }
+      if (/(?:chrome|edge|puppeteer|playwright|browser|浏览器)/iu.test(value) && /(?:enoent|not found|不存在|无法找到|找不到|launch|failed to launch|no such file)/iu.test(value)) {
+        return '渲染浏览器没就绪（Remotion 需要 Chrome/Edge 打开画布）。下一步：安装 Chrome 或 Edge；已经装了就在启动环境里设 `LWB_PUBLISHER_CHROME` 指向它的可执行文件，重启工作台后重试。';
+      }
       return /(?:insufficient[ _-]*points|积分不足|余额不足)/iu.test(value)
-        ? 'SciTiger 账户积分不足，请充值后重试，或切换到百炼 BYOK。'
+        ? 'SciTiger 账户积分不足，请充值后重试；或在桥接配置中心把配音切到本地合成（不消耗云端积分）。'
         : value;
     }
     function videoPhaseLabel(phase) { return ({ preparing: '正在准备制作空间', directing: 'AI 视觉导演创作中', preflight: '正在检查 Remotion 工程', rendering: '正在渲染成片', 'technical-qc': '正在执行技术质检', 'editorial-review': '独立审片中', 'editorial-repair': '正在按审片意见修复', committing: '正在提交成片', completed: '已完成', failed: '失败' })[phase] || null; }
@@ -5042,15 +5443,19 @@ window.__ModuleLoader__.load({
       if (subtitle.status !== 'running') return null;
       const duration = Number(task?.result?.audio?.durationSeconds);
       const startedAt = Date.parse(subtitle.startedAt || '');
-      if (subtitle.input?.provider !== 'bailian' || !Number.isFinite(duration) || duration <= 0 || !Number.isFinite(startedAt)) {
+      // 实时 ASR 通路已下线，字幕现在统一走 scitiger/bridge 轮询，渠道只会是这两者
+      // 之一。原先按已下线渠道判断的那句条件因此恒为真，让估算进度永远出不来——
+      // 是死守卫，已移除。
+      // 这里只保留真正有意义的守卫（拿不到时长/开始时间就无法估算），并把文案从
+      // 误导性的「实时」说法改成按音频时长推算的「预计」进度，不再暗示增量出字。
+      if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(startedAt)) {
         return { label: '字幕服务正在处理音频…', button: '字幕生成中…', percent: null };
       }
       const elapsed = Math.max(0, (now - startedAt) / 1000);
       const processed = Math.min(duration, elapsed);
-      const percent = Math.min(99, Math.max(1, Math.floor(processed / duration * 100)));
       const remaining = Math.max(0, duration - elapsed);
       return remaining > 0
-        ? { label: `实时识别 ${formatMediaClock(processed)} / ${formatMediaClock(duration)} · 约剩 ${formatMediaClock(Math.ceil(remaining))}`, button: `实时识别 ${percent}%`, percent }
+        ? { label: `字幕处理中 ${formatMediaClock(processed)} / ${formatMediaClock(duration)}（预计）`, button: '字幕生成中…', percent: null }
         : { label: '音频已发送，正在整理识别结果…', button: '正在整理字幕…', percent: 99 };
     }
     function formatMediaBytes(value) {
@@ -5150,10 +5555,10 @@ window.__ModuleLoader__.load({
       if (!packId) return h(NeedPack, { openConversation });
 
       const scriptBody = stageData(detail, 'script')?.body || '';
-      const providerId = provider || media.service?.connection?.provider || 'bailian';
+      const providerId = provider || media.service?.connection?.provider || 'scitiger';
       const selectedProvider = media.service?.providers?.[providerId];
       const providerCredential = selectedProvider?.credential;
-      const providerLabel = providerId === 'bailian' ? '百炼 BYOK' : '远端 · SciTiger';
+      const providerLabel = providerId === 'scitiger' ? '本机桥接（小米 MiMo）' : '远端 · SciTiger';
       const referenceVoiceReady = selectedProvider?.referenceVoiceConfigured;
       const credentialStatus = !selectedProvider?.configured ? '服务不可用' : !referenceVoiceReady ? '默认音色未配置' : providerCredential?.configured ? '连接已保存' : '需要 API Key';
       const canGenerate = Boolean(selectedProvider?.configured && referenceVoiceReady && providerCredential?.configured);
@@ -5222,6 +5627,20 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', className: 'sv-media-config-trigger', title: '连接设置', 'aria-label': '打开连接设置', onClick: () => setConfigOpen(true) }, h('span', { 'aria-hidden': 'true' }, '⚙'), h('span', null, '连接设置')),
         ),
       );
+      // 配音凭据没配好时，页面首屏就要说清「缺什么 + 下一步点什么」，
+      // 而不是让人点一遍「生成配音」撞到禁用按钮再自己找设置。
+      const credentialCallout = !canGenerate ? h('div', { className: 'lwb-callout', 'data-tone': !selectedProvider?.configured ? 'danger' : 'warning', role: 'alert' },
+        h('p', { className: 'lwb-callout-title' }, !selectedProvider?.configured ? '配音服务当前不可用' : (!referenceVoiceReady ? '默认音色还没配置' : '还差一步：保存 API Key')),
+        h('p', null, !selectedProvider?.configured
+          ? '当前生成方式没有可用的配音服务，配好之前无法提交配音任务。'
+          : (!referenceVoiceReady ? '系统默认参考音色还没提交到配音服务，第一次生成时会自动提交；提交失败就需要重试。' : `密钥尚未保存到 ${providerLabel}，保存后即可生成配音。`)),
+        h('ul', { className: 'lwb-callout-next' },
+          !selectedProvider?.configured ? h('li', null, '点上方「连接设置」换一个生成方式，或先在媒体配置里启用当前服务。') : null,
+          !referenceVoiceReady && selectedProvider?.configured ? h('li', null, '先点一次「生成配音」触发参考音色提交；反复失败就换一个生成方式。') : null,
+          providerCredential?.configured ? null : h('li', null, h('button', { type: 'button', className: 'lwb-plain-button lwb-button-sm', onClick: () => setConfigOpen(true) }, '打开连接设置保存 API Key')),
+        ),
+      ) : null;
+
       const providerConfigDrawer = configOpen && h(React.Fragment, null,
         h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭连接设置', onClick: () => setConfigOpen(false) }),
         h('aside', { className: 'sv-drawer sv-media-config-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '连接设置' },
@@ -5232,14 +5651,13 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sv-media-drawer-body' },
             h('section', { className: 'sv-media-settings-section', style: { paddingTop: 0, borderTop: 0 } },
               h('h4', null, '生成方式'),
-              h('div', { className: 'sv-media-provider-picker', role: 'tablist', 'aria-label': '生成方式' },
-                h('button', { type: 'button', className: 'sv-media-provider-choice', role: 'tab', 'aria-selected': providerId === 'bailian' ? 'true' : 'false', 'data-active': providerId === 'bailian' ? 'true' : 'false', disabled: Boolean(connectionBusy), onClick: () => { setProvider('bailian'); setApiKey(''); } }, '百炼 BYOK'),
-                h('button', { type: 'button', className: 'sv-media-provider-choice', role: 'tab', 'aria-selected': providerId === 'scitiger' ? 'true' : 'false', 'data-active': providerId === 'scitiger' ? 'true' : 'false', disabled: Boolean(connectionBusy), onClick: () => { setProvider('scitiger'); setApiKey(''); } }, '远端 · SciTiger'),
-              ),
+              // 配音渠道已被宿主折叠成本机桥接，现在只剩一个渠道。
+              // 不再留一个孤零零的 tab，直接用一行说明讲清当前用哪个渠道、Key 在哪配。
+              h('p', { className: 'sv-note' }, `当前使用：${providerLabel}。API Key 保存在 DSH 私有凭据库，重启后仍然有效。`),
             ),
             h('section', { className: 'sv-media-settings-section' },
               h('h4', null, '访问凭据'),
-              h('label', { className: 'sv-media-field' }, h('span', null, providerId === 'bailian' ? '百炼 API Key' : 'SciTiger API Key'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: providerCredential?.configured ? '已保存，输入新值可更新' : '输入后保存到私有凭据库', disabled: Boolean(connectionBusy), onChange: (event) => setApiKey(event.target.value) })),
+              h('label', { className: 'sv-media-field' }, h('span', null, '配音服务 API Key'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: providerCredential?.configured ? '已保存，输入新值可更新' : '输入后保存到私有凭据库', disabled: Boolean(connectionBusy), onChange: (event) => setApiKey(event.target.value) })),
               h('p', { className: 'sv-note' }, providerCredential?.configured ? (providerCredential.writable ? '密钥已保存。输入新值后可更新，密钥不会回显。' : '密钥由启动环境管理，当前页面不能修改或清除。') : '尚未保存密钥。保存后，后续启动无需重复输入。'),
             ),
           ),
@@ -5262,8 +5680,11 @@ window.__ModuleLoader__.load({
           h('label', { className: 'sv-media-field' }, h('span', null, '语速'), h('input', { className: 'sv-input', type: 'number', min: '0.5', max: '2', step: '0.05', value: rate, onChange: (event) => setRate(event.target.value) })),
           h('label', { className: 'sv-media-field' }, h('span', null, '音量'), h('input', { className: 'sv-input', type: 'number', min: '0', max: '2', step: '0.05', value: volume, onChange: (event) => setVolume(event.target.value) })),
         ),
-        h('div', { className: 'sv-audio-connect-note' }, h('span', null, credentialStatus), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setConfigOpen(true) }, '连接设置')),
-        h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-primary-button', disabled: media.busy || !detail || !canGenerate, onClick: () => { void startVoiceover(); } }, media.busy === 'voiceover' ? '正在提交…' : '生成配音')),
+        // 状态与按钮不再挤在一行：能不能开工由上面的 callout 说，这里只留主操作。
+        h('div', { className: 'sv-actions' },
+          canGenerate ? null : h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setConfigOpen(true) }, '连接设置'),
+          h('button', { type: 'button', className: 'lwb-primary-button', disabled: media.busy || !detail || !canGenerate, onClick: () => { void startVoiceover(); } }, media.busy === 'voiceover' ? '正在提交…' : '生成配音'),
+        ),
         voiceReady ? h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: subtitleReady ? 'lwb-plain-button' : 'lwb-primary-button', disabled: media.busy || !canGenerate, onClick: () => { void startSubtitles(); } }, media.busy === 'subtitles' ? '正在对齐…' : subtitleReady ? '重新生成字幕' : '从真实音频生成字幕')) : null,
         h('details', { className: 'sv-form', open: false },
           h('summary', null, '人工记录与字幕校对'),
@@ -5282,16 +5703,17 @@ window.__ModuleLoader__.load({
         const isVoice = task.type === 'voiceover';
         const audio = task.result?.audio || null;
         const taskMeta = [
-          mediaRunLabel(task.type), formatTime(task.createdAt), task.input?.provider === 'bailian' ? '百炼 BYOK' : task.input?.provider === 'scitiger' ? '远端 · SciTiger' : null,
+          mediaRunLabel(task.type), formatTime(task.createdAt), task.input?.provider === 'scitiger' ? (service?.providers?.scitiger?.loopback ? '本机桥接（小米 MiMo）' : '远端 · SciTiger') : null,
           task.input?.voiceId ? `音色 ${task.input.voiceId}` : task.input?.voiceName || null,
-          task.input?.rate ? `语速 ${task.input.rate}` : null,
+          (task.input?.rate && Number(task.input.rate) !== 1) ? `语速 ${task.input.rate}` : null,
+          (task.input?.volume && Number(task.input.volume) !== 1) ? `音量 ${task.input.volume}` : null,
         ].filter(Boolean).join(' · ');
         return h('article', { key: task.id, className: 'sv-audio-task', 'data-status': task.status, 'data-active': task.projectId === selectedId ? 'true' : 'false' },
           h('div', { className: 'sv-audio-task-head' },
             h('div', null, h('p', { className: 'sv-audio-task-title' }, task.projectTitle || '未命名项目'), h('p', { className: 'sv-audio-task-meta' }, taskMeta)),
             h('span', { className: `sv-tag ${task.status === 'failed' ? 'sv-status-error' : task.status === 'succeeded' ? 'sv-stage' : 'sv-status-manual'}` }, mediaStatusLabel(task.status)),
           ),
-          isVoice && audio ? h('div', { className: 'sv-audio-task-detail' }, h('span', null, `时长 ${formatMediaDuration(audio.durationSeconds)}`), h('span', null, audio.sampleRate ? `${audio.sampleRate} Hz` : '采样率待确认'), h('span', null, formatMediaBytes(audio.bytes))) : null,
+          isVoice && audio ? h('div', { className: 'sv-audio-task-detail' }, h('span', null, `时长 ${formatMediaDuration(audio.durationSeconds)}`), h('span', null, formatMediaBytes(audio.bytes))) : null,
           !isVoice && task.result?.cueCount != null ? h('div', { className: 'sv-audio-task-detail' }, h('span', null, `已对齐 ${task.result.cueCount} 条字幕`), task.result?.warnings?.length ? h('span', null, `${task.result.warnings.length} 条提示`) : null) : null,
           task.error ? h('p', { className: 'sv-error' }, mediaErrorText(task.error)) : null,
           h('div', { className: 'sv-actions' },
@@ -5329,6 +5751,7 @@ window.__ModuleLoader__.load({
       return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: voiceCopy, hero: voiceHero },
         h(Notice, { error: error || detailError }),
         providerConfigStrip,
+        credentialCallout,
         h('section', { className: 'sv-split sv-audio-workbench' }, configPanel, taskPanel),
         providerConfigDrawer,
         subtitlesDrawer,
@@ -5340,23 +5763,32 @@ window.__ModuleLoader__.load({
       const [provider, setProvider] = React.useState(null);
       const [text, setText] = React.useState('');
       const [source, setSource] = React.useState(null);
-      const [voiceSource, setVoiceSource] = React.useState('system');
+      // 默认声音方案是「自然讲解」：茉莉 + 清晰沉稳。直接选方案，不用先理解
+      // 预置音色 / 音色设计 / 声音复刻三种模型形态。
+      const [voiceSource, setVoiceSource] = React.useState('builtin');
       const [voiceReference, setVoiceReference] = React.useState(null);
       const [voiceUploading, setVoiceUploading] = React.useState(false);
       const [bridgeInfo, setBridgeInfo] = React.useState(null);
-      const [bridgeVoice, setBridgeVoice] = React.useState('冰糖');
+      const [bridgeVoice, setBridgeVoice] = React.useState('茉莉');
       const [libraryVoice, setLibraryVoice] = React.useState('');
+      // 合成模型：'' = 跟随桥接全局配置。音色设计需要描述，预置音色需要音色名。
+      const [bridgeModel, setBridgeModel] = React.useState('mimo-v2.5-tts');
+      const [bridgeVoiceDesign, setBridgeVoiceDesign] = React.useState('');
       // 配音方式：'' = 跟随桥接全局配置；cloud/local 按任务覆盖。仅桥接渠道生效。
-      const [bridgeChannel, setBridgeChannel] = React.useState('');
-      const [bridgeStyle, setBridgeStyle] = React.useState('');
+      const [bridgeChannel, setBridgeChannel] = React.useState('cloud');
+      const [bridgeStyle, setBridgeStyle] = React.useState('清晰沉稳，适合知识讲解。');
       const [rate, setRate] = React.useState(1);
       const [volume, setVolume] = React.useState(1);
+      // 方案试听：按 key 存结果，key 用「recipe:xxx」区分方案。
+      const [recipePreviews, setRecipePreviews] = React.useState({});
+      const [recipePreviewKey, setRecipePreviewKey] = React.useState(null);
+      const [recipeBusyKey, setRecipeBusyKey] = React.useState(null);
       const [subtitleEnabled, setSubtitleEnabled] = React.useState(true);
       const [submitting, setSubmitting] = React.useState(null);
       // 删除等无错误但需要回话的操作：用一句 sv-note 告知结果，成功与失败都看得见。
       const [notice, setNotice] = React.useState('');
-      const [connectionOpen, setConnectionOpen] = React.useState(false);
-      const [connectionProvider, setConnectionProvider] = React.useState('bailian');
+      const [setupOpen, setSetupOpen] = React.useState(false);      const [connectionOpen, setConnectionOpen] = React.useState(false);
+      const [connectionProvider, setConnectionProvider] = React.useState('custom');
       const [apiKey, setApiKey] = React.useState('');
       const [connectionBusy, setConnectionBusy] = React.useState(null);
       const [pickerOpen, setPickerOpen] = React.useState(false);
@@ -5395,8 +5827,11 @@ window.__ModuleLoader__.load({
         if (!packId) return;
         void remote(packId, 'bridgeVoiceoverInfo').then((next) => {
           setBridgeInfo(next);
-          if (next?.available && next.mimoVoice) setBridgeVoice((current) => current === '冰糖' ? next.mimoVoice : current);
+          // 音色不跟随桥接全局配置：声音方案已经把音色定死了（默认「自然讲解」= 茉莉），
+          // 这里再改会让已选中的方案变成「自定义」。桥接的全局音色只在「系统默认音色」
+          // 那条路径上生效，由桥接自己映射。
           if (next?.available && next.mimoStyle) setBridgeStyle((current) => current || next.mimoStyle);
+          if (next?.available && next.mimoVoiceDesign) setBridgeVoiceDesign((current) => current || next.mimoVoiceDesign);
         }).catch(() => setBridgeInfo(null));
       }, [packId]);
       React.useEffect(() => {
@@ -5413,11 +5848,10 @@ window.__ModuleLoader__.load({
         if (!node) return;
         node.style.height = 'auto'; node.style.height = `${Math.max(node.scrollHeight, 136)}px`;
       }, [text]);
-      const providerEntries = ['bailian', 'scitiger'].filter((id) => service?.providers?.[id]?.configured && service.providers[id].credential?.configured);
+      const providerEntries = ['scitiger'].filter((id) => service?.providers?.[id]?.configured && service.providers[id].credential?.configured);
       React.useEffect(() => {
         if (!providerEntries.length) { setProvider(null); return; }
-        // 默认选本机桥接（scitiger + loopback）：它不依赖外部 Key、永远本机可达；
-        // 百炼 Key 过期时用户没动过渠道选择就会撞 "Invalid API-key"（2026-10-02 实测）。
+        // 默认选本机桥接（scitiger + loopback）：它不依赖外部 Key、永远本机可达。
         setProvider((current) => providerEntries.includes(current) ? current : (providerEntries.includes('scitiger') && service?.providers?.scitiger?.loopback ? 'scitiger' : providerEntries[0]));
       }, [providerEntries.join('|')]);
       React.useEffect(() => {
@@ -5448,15 +5882,29 @@ window.__ModuleLoader__.load({
 
       const providerId = provider || null;
       const selectedProvider = providerId ? service?.providers?.[providerId] : null;
-      const providerName = providerId === 'bailian' ? '百炼' : providerId === 'scitiger' ? (selectedProvider?.loopback ? '本机桥接' : '远端 · SciTiger') : '尚未配置';
+      const providerName = providerId === 'scitiger' ? (selectedProvider?.loopback ? '本机桥接（小米 MiMo）' : '远端 · SciTiger') : '尚未配置';
       // 桥接专属控件只在渠道真的打到桥接时才有意义；其他渠道原样忽略。
       const bridgeActive = providerId === 'scitiger';
       const builtinVoiceOptions = Array.from(new Set([...(bridgeInfo?.available && Array.isArray(bridgeInfo.builtinVoices) && bridgeInfo.builtinVoices.length ? bridgeInfo.builtinVoices : SV_MIMO_BUILTIN_VOICES), bridgeVoice]));
       const libraryVoiceOptions = bridgeInfo?.available && Array.isArray(bridgeInfo.voices) ? bridgeInfo.voices : [];
+      const bridgeModelOptions = Array.from(new Set([
+        ...(bridgeInfo?.available && Array.isArray(bridgeInfo.models) && bridgeInfo.models.length ? bridgeInfo.models : SV_MIMO_MODELS.map((model) => model.id)),
+        bridgeModel,
+      ].filter((value) => typeof value === 'string' && value.trim())))
+        .map((id) => SV_MIMO_MODELS.find((model) => model.id === id) || { id, label: id, hint: '桥接新增的模型' });
+      const bridgeDesignPresets = bridgeInfo?.available && Array.isArray(bridgeInfo.voiceDesignPresets) && bridgeInfo.voiceDesignPresets.length
+        ? bridgeInfo.voiceDesignPresets
+        : SV_MIMO_DESIGN_PRESETS;
       const bridgeVoiceReady = voiceSource !== 'builtin' || Boolean(bridgeVoice)
         ? voiceSource !== 'library' || Boolean(libraryVoice)
         : false;
-      const referenceVoiceReady = voiceSource === 'upload' ? Boolean(voiceReference) : selectedProvider?.referenceVoiceConfigured;
+      // 预置音色与音色设计不碰参考音频：它们的声音来自小米云端，
+      // 所以不要求本机默认音色文件存在，只有「上传参考音频」才需要。
+      const referenceVoiceReady = voiceSource === 'upload'
+        ? Boolean(voiceReference)
+        : (voiceSource === 'builtin' || bridgeModel === 'mimo-v2.5-tts-voicedesign'
+          ? true
+          : selectedProvider?.referenceVoiceConfigured);
       const canGenerate = Boolean(providerId && selectedProvider?.credential?.configured && selectedProvider?.configured && referenceVoiceReady && bridgeVoiceReady);
       // 桥接内置音色由小米云端模型合成，本地 LongCat 分支没有这张表，提前拦住。
       const bridgeConflict = bridgeActive && voiceSource === 'builtin' && bridgeChannel === 'local';
@@ -5481,6 +5929,8 @@ window.__ModuleLoader__.load({
         const bridge = {};
         if (bridgeChannel) bridge.channel = bridgeChannel;
         if (bridgeStyle.trim()) bridge.style = bridgeStyle.trim();
+        if (bridgeModel) bridge.model = bridgeModel;
+        if (bridgeVoiceDesign.trim()) bridge.voiceDesign = bridgeVoiceDesign.trim();
         return Object.keys(bridge).length ? { bridge } : {};
       };
       /** Voice payload shared by create and retry, so both stay in step. */
@@ -5556,6 +6006,15 @@ window.__ModuleLoader__.load({
         } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
       };
       const openSubtitles = (task) => setSubtitleDrawer({ task, cues: subtitleCues(task.subtitle?.srt), saving: false });
+      // 在资源管理器里定位这条任务的音频文件。工作台跑在本机，弹出的窗口就是本机文件夹；
+      // 通过外网隧道访问时打开的也是服务器那台机器的文件夹。
+      const openAudioFolder = async (task) => {
+        setSubmitting(`reveal:${task.id}`);
+        try {
+          await remote(packId, 'openAudioTaskFolder', { taskId: task.id });
+          setNotice('已打开音频所在的文件夹。'); setError(null);
+        } catch (cause) { setError(cause.message); } finally { setSubmitting(null); }
+      };
       const syncAudioResult = async (task, targetProjectId = null) => {
         setSubmitting(`sync:${task.id}`);
         try {
@@ -5606,13 +6065,18 @@ window.__ModuleLoader__.load({
         { label: '音频任务', value: String(taskFeed.counts?.all || 0), tone: 'pink' },
         { label: '生成状态', value: taskFeed.anyRunning ? '进行中' : '空闲', tone: taskFeed.anyRunning ? 'orange' : 'green' },
       ] });
+      // providerEntries 只会是 ['scitiger']（宿主持久把配音渠道折叠成本机桥接），
+      // 所以这里只可能有「一个渠道」和「没渠道」两种状态：一个渠道时用一行说明
+      // 讲清当前用哪个、Key 在哪配，不再摆一组只剩一个的 tab。
       const providerControl = !service
         ? h('p', { className: 'sv-note' }, '正在读取连接状态…')
-        : providerEntries.length === 2
-          ? h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '配音服务' }, providerEntries.map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': providerId === id ? 'true' : 'false', onClick: () => setProvider(id) }, id === 'bailian' ? '百炼' : service?.providers?.scitiger?.loopback ? '本机桥接' : '远端 · SciTiger')))
-          : providerEntries.length === 1
-            ? h('p', { className: 'sv-note' }, `当前使用：${providerName}。仅此服务已完成 API Key 配置。`)
-            : h('p', { className: 'sv-error' }, '尚未配置百炼或远端 API Key。请在右上角「连接配置」中完成设置。');
+        : providerEntries.length >= 1
+          ? h('p', { className: 'sv-note' }, `当前使用：${providerName}。仅此服务已完成 API Key 配置。`)
+          : h('div', { className: 'lwb-callout', 'data-tone': 'warning', role: 'alert' },
+                h('p', { className: 'lwb-callout-title' }, '配音凭据还没配置'),
+                h('p', null, '没有可用的配音服务，提交按钮是禁用的。配好 API Key 后立即可用；密钥只保存在本机凭据库，不写进稿件。'),
+                h('ul', { className: 'lwb-callout-next' }, h('li', null, h('button', { type: 'button', className: 'lwb-plain-button lwb-button-sm', onClick: () => setConnectionOpen(true) }, '打开「连接配置」保存 API Key'))),
+              );
       // 渠道指向哪里必须看得见：本机桥接与远端云端用的是完全不同的 Key。
       const providerEndpointNote = !service ? null : providerId === 'scitiger' && service.providers?.scitiger?.endpoint
         ? h('p', { className: service.providers.scitiger.loopback ? 'sv-note' : 'sv-warn' }, service.providers.scitiger.loopback
@@ -5654,8 +6118,8 @@ window.__ModuleLoader__.load({
         h('aside', { className: 'sv-drawer sv-media-config-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '连接配置' },
           h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { className: 'sv-media-drawer-title' }, '连接配置'), h('p', { className: 'sv-media-drawer-copy' }, 'API Key 保存到 DSH 私有凭据库，不会写入稿件、任务或浏览器存储。')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setConnectionOpen(false) }, '关闭')),
           h('div', { className: 'sv-media-drawer-body' },
-            h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '连接提供方' }, ['bailian', 'scitiger'].map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': connectionProvider === id ? 'true' : 'false', disabled: Boolean(connectionBusy), onClick: () => { setConnectionProvider(id); setApiKey(''); } }, id === 'bailian' ? '百炼' : '远端 · SciTiger'))),
-            h('label', { className: 'sv-media-field' }, h('span', null, connectionProvider === 'bailian' ? '百炼 API Key' : 'SciTiger API Key'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: connectionCredential?.configured ? '已保存；输入新值可更新' : '输入 API Key', onChange: (event) => setApiKey(event.target.value) })),
+            h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '连接提供方' }, ['scitiger'].map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': connectionProvider === id ? 'true' : 'false', disabled: Boolean(connectionBusy), onClick: () => { setConnectionProvider(id); setApiKey(''); } }, '本机桥接（小米 MiMo）'))),
+            h('label', { className: 'sv-media-field' }, h('span', null, '本机桥接 API Key'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: connectionCredential?.configured ? '已保存；输入新值可更新' : '输入 API Key', onChange: (event) => setApiKey(event.target.value) })),
             h('p', { className: 'sv-note' }, connectionCredential?.configured ? '已保存连接；密钥不会回显。' : '保存后，可在新建任务中使用该服务。'),
           ),
           h('div', { className: 'sv-media-drawer-foot' }, h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(connectionBusy) || !connectionCredential?.configured || !connectionCredential?.writable, onClick: () => { void clearConnection(); } }, connectionBusy === 'clear' ? '正在清除…' : '清除密钥'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(connectionBusy) || !apiKey.trim(), onClick: () => { void saveConnection(); } }, connectionBusy === 'save' ? '正在保存…' : '保存连接')),
@@ -5672,13 +6136,47 @@ window.__ModuleLoader__.load({
           h('small', { className: 'sv-meta' }, '选中后，配音（含字幕）生成成功会自动挂到该项目名下，视频页立即可见，无需再手动同步。')) : null,
         h('label', { className: 'sv-media-field' }, h('span', null, '配音服务'), providerControl),
         providerEndpointNote,
-        h('label', { className: 'sv-media-field' }, h('span', null, '音色'), h('select', { className: 'sv-select', value: voiceSource, onChange: (event) => setVoiceSource(event.target.value) },
-          h('option', { value: 'system' }, 'Tiffy - 自信（系统默认）'),
-          h('option', { value: 'upload' }, '上传自己的参考音频'),
-          bridgeActive ? h('option', { value: 'builtin' }, '桥接内置音色（云端 · 小米 MiMo）') : null,
-          bridgeActive ? h('option', { value: 'library' }, '桥接音色库（本机参考音频）') : null,
-        )),
-        voiceSource === 'upload' ? h('div', { className: 'sv-voice-upload' },
+        h('div', { className: 'sv-media-field' }, h('span', null, '声音方案'),
+          h(VoiceRecipePicker, {
+            state: { voiceSource, bridgeModel, bridgeVoice, bridgeVoiceDesign, bridgeStyle, rate, volume, designPresets: bridgeDesignPresets },
+            disabled: Boolean(submitting) || voiceUploading,
+            previewKey: recipePreviewKey,
+              previewBusyKey: recipeBusyKey,
+            previewAudio: recipePreviewKey ? recipePreviews[recipePreviewKey] : null,
+            onPick: (recipe) => {
+              const patch = voiceRecipePatch(recipe, bridgeDesignPresets);
+              setVoiceSource(patch.voiceSource);
+              setBridgeModel(patch.bridgeModel);
+              setBridgeVoice(patch.bridgeVoice);
+              setBridgeVoiceDesign(patch.bridgeVoiceDesign);
+              setBridgeStyle(patch.bridgeStyle);
+              setBridgeChannel(patch.bridgeChannel);
+              setRate(patch.rate);
+              setVolume(patch.volume);
+            },
+            onPreview: async (key, payload) => {
+              setRecipePreviewKey(key);
+                setRecipeBusyKey(key);
+              try {
+                const result = await remoteStatic('bridgeVoiceTest', payload);
+                setRecipePreviews((current) => ({ ...current, [key]: result }));
+                if (result?.ok !== true) setError(result?.reason || '试听失败');
+              } catch (cause) { setError(cause.message); }
+                finally { setRecipeBusyKey(null); }
+            },
+            advanced: h(React.Fragment, null,
+              h('label', { className: 'sv-media-field' }, h('span', null, '音色来源'), h('select', { className: 'sv-select', value: voiceSource, onChange: (event) => {
+                const source = event.target.value;
+                setVoiceSource(source);
+                // 来源决定模型形态：参考音频走复刻，预置音色走预置模型。
+                setBridgeModel(voiceModelForSource(source));
+              } },
+                h('option', { value: 'system' }, '系统默认音色（Tiffy）'),
+                h('option', { value: 'upload' }, '上传自己的参考音频'),
+                bridgeActive ? h('option', { value: 'builtin' }, '桥接内置音色（云端 · 小米 MiMo）') : null,
+                bridgeActive ? h('option', { value: 'library' }, '桥接音色库（本机参考音频）') : null,
+              )),
+              voiceSource === 'upload' ? h('div', { className: 'sv-voice-upload' },
           h('input', { ref: voiceFileInputRef, type: 'file', accept: 'audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/ogg,.mp3,.wav,.m4a,.ogg', tabIndex: -1, style: { display: 'none' }, onChange: (event) => { void uploadVoiceReference(event); } }),
           h('div', { className: 'sv-voice-upload-row' },
             h('p', { className: 'sv-voice-upload-file' }, voiceReference ? h(React.Fragment, null, voiceReference.name, h('span', null, ` · ${formatMediaBytes(voiceReference.bytes)} · ${formatMediaDuration(voiceReference.durationSeconds)}`)) : '尚未选择参考音频'),
@@ -5686,22 +6184,30 @@ window.__ModuleLoader__.load({
             voiceReference ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: voiceUploading || Boolean(submitting), onClick: () => setVoiceReference(null) }, '移除') : null,
           ),
           h('p', { className: 'sv-note' }, '支持 MP3、WAV、M4A 和 OGG，最大 20 MiB。请上传只包含目标人声的清晰音频。'),
-        ) : null,
-        bridgeActive && voiceSource === 'builtin' ? h('label', { className: 'sv-media-field' }, h('span', null, '内置音色'), h('select', { className: 'sv-select', value: bridgeVoice, onChange: (event) => setBridgeVoice(event.target.value) }, builtinVoiceOptions.map((voice) => h('option', { key: voice, value: voice }, voice)))) : null,
-        bridgeActive && voiceSource === 'library' ? h('label', { className: 'sv-media-field' }, h('span', null, '音色库音色'), libraryVoiceOptions.length
-          ? h('select', { className: 'sv-select', value: libraryVoice, onChange: (event) => setLibraryVoice(event.target.value) }, h('option', { value: '' }, '选择音色'), libraryVoiceOptions.map((voice) => h('option', { key: voice.id, value: voice.id }, `${voice.id}${voice.hasTxt ? '' : '（首次使用自动转写）'}`)))
-          : h('select', { className: 'sv-select', value: '', disabled: true }, h('option', { value: '' }, bridgeInfo?.available ? '音色库为空：到桥接配置中心上传音色' : '桥接未响应，无法读取音色库'))) : null,
-        bridgeActive ? h('div', { className: 'sv-audio-parameters' },
-          h('label', { className: 'sv-media-field' }, h('span', null, '合成方式'), h('select', { className: 'sv-select', value: bridgeChannel, onChange: (event) => setBridgeChannel(event.target.value) },
-            h('option', { value: '' }, '跟随桥接配置'),
-            h('option', { value: 'cloud' }, '云端（小米 MiMo）'),
-            h('option', { value: 'local' }, '本地（LongCat）'),
-          )),
-        ) : null,
-        bridgeActive ? h('label', { className: 'sv-media-field' }, h('span', null, '语气风格（选填）'), h('input', { className: 'sv-input', value: bridgeStyle, maxLength: 200, list: 'sv-voice-style-presets', placeholder: '留空则跟随桥接配置；仅云端合成时生效', onChange: (event) => setBridgeStyle(event.target.value) }), h('datalist', { id: 'sv-voice-style-presets' }, SV_VOICE_STYLE_PRESETS.map((style) => h('option', { key: style, value: style })))) : null,
-        bridgeActive && SV_VOICE_STYLE_PRESETS.length ? h('div', { className: 'sv-style-presets' }, h('span', { className: 'sv-meta' }, '常用语气'), SV_VOICE_STYLE_PRESETS.map((style) => h('button', { key: style, type: 'button', className: 'sv-filter-chip', 'data-on': bridgeStyle === style ? 'true' : 'false', onClick: () => setBridgeStyle((current) => current === style ? '' : style) }, style.replace(/[，。]$/u, '')))) : null,
+              ) : null,
+              bridgeActive && voiceSource === 'builtin' ? h('label', { className: 'sv-media-field' }, h('span', null, '内置音色'), h('select', { className: 'sv-select', value: bridgeVoice, onChange: (event) => setBridgeVoice(event.target.value) }, builtinVoiceOptions.map((voice) => h('option', { key: voice, value: voice }, voice)))) : null,
+              bridgeActive && voiceSource === 'library' ? h('label', { className: 'sv-media-field' }, h('span', null, '音色库音色'), libraryVoiceOptions.length
+                ? h('select', { className: 'sv-select', value: libraryVoice, onChange: (event) => setLibraryVoice(event.target.value) }, h('option', { value: '' }, '选择音色'), libraryVoiceOptions.map((voice) => h('option', { key: voice.id, value: voice.id }, `${voice.id}${voice.hasTxt ? '' : '（首次使用自动转写）'}`)))
+                : h('select', { className: 'sv-select', value: '', disabled: true }, h('option', { value: '' }, bridgeInfo?.available ? '音色库为空：到桥接配置中心上传音色' : '桥接未响应，无法读取音色库'))) : null,
+              bridgeActive ? h('div', { className: 'sv-audio-parameters' },
+                h('label', { className: 'sv-media-field' }, h('span', null, '合成方式'), h('select', { className: 'sv-select', value: bridgeChannel, onChange: (event) => setBridgeChannel(event.target.value) },
+                  h('option', { value: '' }, '跟随桥接配置'),
+                  h('option', { value: 'cloud' }, '云端（小米 MiMo）'),
+                  h('option', { value: 'local' }, '本地（LongCat）'),
+                )),
+                h('label', { className: 'sv-media-field' }, h('span', null, '合成模型'), h('select', { className: 'sv-select', value: bridgeModel, onChange: (event) => setBridgeModel(event.target.value) },
+                  h('option', { value: '' }, '跟随桥接配置'),
+                  bridgeModelOptions.map((model) => h('option', { key: model.id, value: model.id }, `${model.label} — ${model.hint}`)),
+                )),
+              ) : null,
+              bridgeActive && bridgeModel === 'mimo-v2.5-tts-voicedesign' ? h('label', { className: 'sv-media-field' }, h('span', null, '音色设计描述'), h('textarea', { className: 'sv-textarea', style: { minHeight: '68px' }, value: bridgeVoiceDesign, maxLength: 500, placeholder: '用 1~4 句描述想要的声音：性别年龄、音色质感、情绪语气、语速节奏', onChange: (event) => setBridgeVoiceDesign(event.target.value) })) : null,
+              bridgeActive && bridgeModel === 'mimo-v2.5-tts-voicedesign' && bridgeDesignPresets.length ? h('div', { className: 'sv-style-presets' }, h('span', { className: 'sv-meta' }, '常用音色预设'), bridgeDesignPresets.map((preset) => h('button', { key: preset.id, type: 'button', className: 'sv-filter-chip', title: preset.text, 'data-on': bridgeVoiceDesign === preset.text ? 'true' : 'false', onClick: () => setBridgeVoiceDesign((current) => current === preset.text ? '' : preset.text) }, preset.label))) : null,
+              bridgeActive && bridgeModel !== 'mimo-v2.5-tts-voicedesign' ? h('label', { className: 'sv-media-field' }, h('span', null, '语气风格（选填）'), h('input', { className: 'sv-input', value: bridgeStyle, maxLength: 200, list: 'sv-voice-style-presets', placeholder: '留空则跟随桥接配置；仅云端合成时生效', onChange: (event) => setBridgeStyle(event.target.value) }), h('datalist', { id: 'sv-voice-style-presets' }, SV_VOICE_STYLE_PRESETS.map((style) => h('option', { key: style, value: style })))) : null,
+              bridgeActive && bridgeModel !== 'mimo-v2.5-tts-voicedesign' && SV_VOICE_STYLE_PRESETS.length ? h('div', { className: 'sv-style-presets' }, h('span', { className: 'sv-meta' }, '常用语气'), SV_VOICE_STYLE_PRESETS.map((style) => h('button', { key: style, type: 'button', className: 'sv-filter-chip', 'data-on': bridgeStyle === style ? 'true' : 'false', onClick: () => setBridgeStyle((current) => current === style ? '' : style) }, style.replace(/[，。]$/u, '')))) : null,
+              h('div', { className: 'sv-audio-parameters' }, h('label', { className: 'sv-media-field' }, h('span', null, '语速'), h('input', { className: 'sv-input', type: 'number', min: '0.5', max: '2', step: '0.05', value: rate, onChange: (event) => setRate(event.target.value) })), h('label', { className: 'sv-media-field' }, h('span', null, '音量'), h('input', { className: 'sv-input', type: 'number', min: '0', max: '2', step: '0.05', value: volume, onChange: (event) => setVolume(event.target.value) }))),
+            ),
+          })),
         bridgeActive && bridgeInfo?.available ? h('p', { className: 'sv-note' }, `桥接当前：${bridgeInfo.ttsProvider === 'local' ? '本地合成（LongCat）' : '云端合成（小米 MiMo）'}${bridgeInfo.mimoKeyConfigured ? '' : ' · 未配置小米 API Key'}${bridgeInfo.mimoVoice ? ` · 内置音色「${bridgeInfo.mimoVoice}」` : ''}${bridgeInfo.mimoStyle ? ` · 风格「${bridgeInfo.mimoStyle}」` : ''}${bridgeInfo.defaultVoice ? ` · 默认音色映射「${bridgeInfo.defaultVoice}」` : ' · 未设置默认音色映射'}。系统默认音色经桥接时会自动替换为映射的音色库音色。`) : null,
-        h('div', { className: 'sv-audio-parameters' }, h('label', { className: 'sv-media-field' }, h('span', null, '语速'), h('input', { className: 'sv-input', type: 'number', min: '0.5', max: '2', step: '0.05', value: rate, onChange: (event) => setRate(event.target.value) })), h('label', { className: 'sv-media-field' }, h('span', null, '音量'), h('input', { className: 'sv-input', type: 'number', min: '0', max: '2', step: '0.05', value: volume, onChange: (event) => setVolume(event.target.value) }))),
         h('label', { className: 'sv-audio-subtitle-option' }, h('input', { type: 'checkbox', checked: subtitleEnabled, onChange: (event) => setSubtitleEnabled(event.target.checked) }), h('span', null, h('strong', null, '同时生成字幕'), h('small', null, '配音完成后自动对齐字幕；字幕失败不影响音频，可单独重试。'))),
         h('div', { className: 'sv-actions' },
           h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(submitting) || voiceUploading || !canGenerate || !text.trim() || bridgeConflict, onClick: () => ask({ title: '生成配音', copy: `将使用${providerName}和${voiceSource === 'upload' ? `参考音频「${voiceReference?.name || ''}」` : voiceSource === 'builtin' ? `桥接内置音色「${bridgeVoice}」` : voiceSource === 'library' ? `桥接音色库「${libraryVoice}」` : '系统默认音色'}为「${source?.title || '手动输入文稿'}」创建新的配音任务${subtitleEnabled ? '，并在配音完成后自动生成字幕' : ''}，提交后会调用${bridgeActive ? '本机桥接' : '远端服务'}。`, confirm: '确认生成', onConfirm: () => { void createAudioTask(); } }) }, submitting === 'voiceover' ? '正在提交…' : subtitleEnabled ? '生成配音和字幕' : '生成配音'),
@@ -5721,7 +6227,7 @@ window.__ModuleLoader__.load({
           ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: true }, subtitleProgress?.button || '字幕生成中…')
           : h('button', { type: 'button', className: subtitle.status === 'succeeded' ? 'lwb-plain-button' : 'lwb-primary-button', disabled: !canGenerate || Boolean(submitting), onClick: () => ask({ title: subtitle.status === 'succeeded' ? '重新生成字幕' : '生成字幕', copy: subtitle.status === 'succeeded' ? '将基于这条音频重新生成字幕，现有字幕版本会保留为历史结果。' : '将基于这条音频的真实时间轴生成字幕。', confirm: subtitle.status === 'succeeded' ? '重新生成' : '生成字幕', onConfirm: () => { void startSubtitles(task); } }) }, submitting === `subtitle:${task.id}` ? '正在提交…' : subtitle.status === 'succeeded' ? '重新生成字幕' : '生成字幕');
         return h('article', { key: task.id, className: 'sv-audio-task', 'data-status': task.status },
-          h('div', { className: 'sv-audio-task-head' }, h('div', null, h('p', { className: 'sv-audio-task-title' }, task.source?.title || '手动输入文稿'), h('p', { className: 'sv-audio-task-meta' }, [formatTime(task.createdAt), task.input?.provider === 'bailian' ? '百炼' : task.input?.provider === 'scitiger' ? (service?.providers?.scitiger?.loopback ? '本机桥接' : '远端 · SciTiger') : task.input?.provider, task.input?.bridge?.channel === 'cloud' ? '云端合成' : task.input?.bridge?.channel === 'local' ? '本地合成' : null, liveProgress, task.source?.kind === 'manual-text' ? '手动文稿' : task.source?.kind === 'edited-script-copy' ? '已保存稿件副本' : task.source?.kind === 'adopted-by-project' ? '已采纳进项目' : '已保存稿件'].filter(Boolean).join(' · '))), h('span', { className: `sv-tag ${task.status === 'failed' ? 'sv-status-error' : task.status === 'succeeded' ? 'sv-stage' : 'sv-status-manual'}` }, mediaStatusLabel(task.status))),
+          h('div', { className: 'sv-audio-task-head' }, h('div', null, h('p', { className: 'sv-audio-task-title' }, task.source?.title || '手动输入文稿'), h('p', { className: 'sv-audio-task-meta' }, [formatTime(task.createdAt), task.input?.provider === 'scitiger' ? (service?.providers?.scitiger?.loopback ? '本机桥接' : '远端 · SciTiger') : task.providerLabel || null, task.input?.bridge?.channel === 'cloud' ? '云端合成' : task.input?.bridge?.channel === 'local' ? '本地合成' : null, liveProgress, task.source?.kind === 'manual-text' ? '手动文稿' : task.source?.kind === 'edited-script-copy' ? '已保存稿件副本' : task.source?.kind === 'adopted-by-project' ? '已采纳进项目' : '已保存稿件'].filter(Boolean).join(' · '))), h('span', { className: `sv-tag ${task.status === 'failed' ? 'sv-status-error' : task.status === 'succeeded' ? 'sv-stage' : 'sv-status-manual'}` }, mediaStatusLabel(task.status))),
           task.source?.text && task.source?.kind !== 'saved-script' ? h('p', { className: 'sv-audio-task-excerpt' }, [...task.source.text.replace(/\s+/gu, ' ').trim()].slice(0, 42).join('') + ([...task.source.text.replace(/\s+/gu, '').trim()].length > 42 ? '…' : '')) : null,
           audio ? h('div', { className: 'sv-audio-task-detail' }, h('span', null, `时长 ${formatMediaDuration(audio.durationSeconds)}`), h('span', null, formatMediaBytes(audio.bytes)), h('span', null, subtitle.status === 'succeeded' ? `字幕 ${subtitle.cueCount || 0} 条` : subtitle.status === 'failed' ? '字幕失败 · 配音可用' : activeSubtitle ? '字幕实时处理中' : '未生成字幕')) : null,
           subtitleProgress ? h('div', { className: 'sv-audio-subtitle-progress', role: 'status', 'aria-live': 'polite' },
@@ -5739,7 +6245,7 @@ window.__ModuleLoader__.load({
             h('p', { className: task.projectSyncError ? 'sv-error' : 'sv-note', role: 'status' }, task.projectSyncError || (task.projectSync ? `配音已放进「${task.source?.projectTitle || '项目'}」，可在「视频 / 预览」中制作视频。` : '这条音频要做成视频，需要先放进一个项目（视频按项目组织）。点击后选择目标项目即可，音频就是本条，无需再挑。')),
             task.projectSync ? null : h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(submitting) || activeSubtitle, onClick: () => { void syncTargetProject(task); } }, submitting === `sync:${task.id}` ? '正在打开…' : '放进项目做视频…'), h('span', { className: 'sv-meta' }, '音频就是本条，弹层里选的是目标项目。')),
           ) : null,
-          h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSourceDrawer(task) }, '查看稿件'), task.status === 'failed' && task.source?.text ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: !canGenerate || Boolean(submitting), onClick: () => ask({ title: '重试配音', copy: `将按原任务的文稿、音色和语速重新生成配音${task.source?.projectId ? `，并覆盖「${task.source?.title || '当前项目'}」的配音版本` : ''}。原失败记录会保留。`, confirm: '确认重试', onConfirm: () => { void retryAudioTask(task); } }) }, submitting === `retry:${task.id}` ? '正在提交…' : '重试配音') : null, h(ExecutionButton, { kind: 'audio', id: task.id }), subtitleButton, subtitle.status === 'succeeded' ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => openSubtitles(task) }, '查看字幕') : null, ['succeeded', 'failed'].includes(task.status) ? h('button', { type: 'button', className: 'lwb-danger-button', disabled: Boolean(submitting), onClick: () => ask({ title: '删除这条配音任务？', copy: `将删除「${task.source?.title || '手动输入文稿'}」这条${task.status === 'failed' ? '失败' : '已完成'}的配音任务记录，以及磁盘上的音频与字幕文件。删除后无法恢复；如果只是想再生成一次，用「重试配音」更合适。`, confirm: '确认删除', danger: true, onConfirm: () => { void deleteAudioTasks(task); } }) }, submitting === `delete:${task.id}` ? '正在删除…' : '删除') : null),
+          h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSourceDrawer(task) }, '查看稿件'), task.status === 'failed' && task.source?.text ? h('button', { type: 'button', className: 'lwb-primary-button', disabled: !canGenerate || Boolean(submitting), onClick: () => ask({ title: '重试配音', copy: `将按原任务的文稿、音色和语速重新生成配音${task.source?.projectId ? `，并覆盖「${task.source?.title || '当前项目'}」的配音版本` : ''}。原失败记录会保留。`, confirm: '确认重试', onConfirm: () => { void retryAudioTask(task); } }) }, submitting === `retry:${task.id}` ? '正在提交…' : '重试配音') : null, h(ExecutionButton, { kind: 'audio', id: task.id }), subtitleButton, subtitle.status === 'succeeded' ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => openSubtitles(task) }, '查看字幕') : null, task.result?.audio?.file ? h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(submitting), title: '在资源管理器中打开音频文件所在的文件夹', onClick: () => { void openAudioFolder(task); } }, submitting === `reveal:${task.id}` ? '正在打开…' : '查看音频文件') : null, ['succeeded', 'failed'].includes(task.status) ? h('button', { type: 'button', className: 'lwb-danger-button', disabled: Boolean(submitting), onClick: () => ask({ title: '删除这条配音任务？', copy: `将删除「${task.source?.title || '手动输入文稿'}」这条${task.status === 'failed' ? '失败' : '已完成'}的配音任务记录，以及磁盘上的音频与字幕文件。删除后无法恢复；如果只是想再生成一次，用「重试配音」更合适。`, confirm: '确认删除', danger: true, onConfirm: () => { void deleteAudioTasks(task); } }) }, submitting === `delete:${task.id}` ? '正在删除…' : '删除') : null),
         );
       };
       const taskPanel = h('section', { className: 'sv-section' },
@@ -5751,7 +6257,31 @@ window.__ModuleLoader__.load({
       const sourceDrawerNode = sourceDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭稿件内容', onClick: () => setSourceDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '稿件内容' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, sourceDrawer.source?.title || '稿件内容'), h('p', { className: 'sv-meta' }, sourceDrawer.source?.kind === 'manual-text' ? '手动输入文稿快照' : '任务创建时冻结的稿件快照')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSourceDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll' }, h('article', { className: 'sv-sc-manuscript' }, sourceDrawer.source?.text || ''))));
       const subtitleDrawerNode = subtitleDrawer && h(React.Fragment, null, h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭字幕内容', onClick: () => setSubtitleDrawer(null) }), h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '编辑字幕' }, h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, `字幕 · ${subtitleDrawer.task.source?.title || '手动文稿'}`), h('p', { className: 'sv-meta' }, `${subtitleDrawer.cues.length} 条字幕，可直接校对错别字并保存。`)), h('button', { type: 'button', className: 'lwb-plain-button', disabled: subtitleDrawer.saving, onClick: () => setSubtitleDrawer(null) }, '关闭')), h('div', { className: 'sv-drawer-scroll sv-audio-subtitle-editor' }, h('div', { className: 'sv-subtitle-cues' }, subtitleDrawer.cues.map((cue, index) => h('article', { key: cue.id, className: 'sv-subtitle-cue' }, h('time', null, cue.time), h('textarea', { className: 'sv-textarea sv-subtitle-text', value: cue.text, maxLength: 30000, 'aria-label': `第 ${index + 1} 条字幕文本`, onChange: (event) => setSubtitleDrawer((current) => ({ ...current, cues: current.cues.map((currentCue, currentIndex) => currentIndex === index ? { ...currentCue, text: event.target.value } : currentCue) })) }))))), h('div', { className: 'sv-media-drawer-foot' }, h('span', { className: 'sv-meta' }, '时间码来自音频对齐结果，保存将更新字幕文本。'), h('button', { type: 'button', className: 'lwb-primary-button', disabled: subtitleDrawer.saving || !subtitleDrawer.cues.length || subtitleDrawer.cues.some((cue) => !cue.text.trim()), onClick: () => ask({ title: '保存字幕', copy: `将保存这 ${subtitleDrawer.cues.length} 条字幕的文本修改，时间码保持不变。`, confirm: '确认保存', onConfirm: () => { void saveSubtitles(); } }) }, subtitleDrawer.saving ? '正在保存…' : '保存字幕'))));
       const accountTabs = h(AccountTabs, { accountLibrary, activeTab, onChange: setActiveTab, label: '按账号查看配音任务' });
-      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '连接配置', h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))) }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null, h('div', { className: 'sv-setup-grid' }, h(LocalEnginePanel, { packId }), h(BridgeConfigPanel), h(VoiceLibraryPanel)), accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
+      const setupDrawer = setupOpen && h(React.Fragment, null,
+        h('button', { type: 'button', className: 'sv-drawer-backdrop', 'aria-label': '关闭设置', onClick: () => setSetupOpen(false) }),
+        h('aside', { className: 'sv-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '配音设置' },
+          h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { style: { margin: 0, fontSize: 'var(--lwb-text-section,18px)' } }, '配音设置'), h('p', { className: 'sv-meta' }, '引擎、桥接与参考音色库')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSetupOpen(false) }, '关闭')),
+          h('div', { className: 'sv-drawer-scroll sv-setup-drawer' }, h(LocalEnginePanel, { packId }), h(BridgeConfigPanel), h(VoiceLibraryPanel)),
+        ),
+      );
+      const setupStrip = h('section', { className: 'sv-media-config-strip' },
+        h('div', { className: 'sv-media-config-summary' }, h('span', { className: 'sv-media-config-mark', 'aria-hidden': 'true' }, '♪'), h('div', { className: 'sv-media-config-copy' }, h('strong', null, '配音设置'), h('span', null, service && !providerEntries.length ? '待配置连接' : '已就绪'))),
+        h('div', { className: 'sv-media-config-meta' }, h('button', { type: 'button', className: 'sv-media-config-trigger', onClick: () => setSetupOpen(true) }, h('span', { 'aria-hidden': 'true' }, '⚙'), h('span', null, '设置')), h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !providerEntries.length ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), h('span', { className: 'sv-config-state' }, !service ? '读取中' : providerEntries.length ? '已连接' : '待配置'))),
+      );
+      return h(PackFrame, { packId, openConversation, title: '配音 / 字幕', accent: 'pink', copy: '按账号选择稿件并生成配音；默认同时生成字幕，也可取消；字幕失败不影响已完成的配音。每条任务保留执行记录并同步项目产物。', hero, introActions: null }, h(Notice, { error }), notice ? h('p', { className: 'sv-note', role: 'status' }, notice) : null,
+        // 配音凭据 / 参考音色没就绪时，首屏就说清缺什么、点哪里配，
+        // 而不是让人点一遍「生成配音」撞到禁用按钮再自己找设置。
+        service && !canGenerate ? h('div', { className: 'lwb-callout', 'data-tone': providerEntries.length ? 'warning' : 'danger', role: 'alert' },
+          h('p', { className: 'lwb-callout-title' }, !providerEntries.length ? '配音服务尚未配置' : '还差一步才能生成'),
+          h('p', null, !providerEntries.length
+            ? '当前没有已完成 API Key 配置的配音服务，配好之前无法提交配音任务。'
+            : (!referenceVoiceReady ? '「上传自己的参考音频」需要先选一段音频；系统默认音色与内置音色不受影响。' : '请把声音方案选完整：当前选择还缺必填项。')),
+          h('ul', { className: 'lwb-callout-next' },
+            !providerEntries.length ? h('li', null, h('button', { type: 'button', className: 'lwb-plain-button lwb-button-sm', onClick: () => setConnectionOpen(true) }, '打开「连接配置」保存 API Key')) : null,
+            !referenceVoiceReady ? h('li', null, '在下方「声音方案」选「自定义」，展开高级设置上传一段只含目标人声的音频。') : null,
+          ),
+        ) : null,
+        setupStrip, accountTabs, h('section', { className: 'sv-split sv-audio-workbench' }, newTaskPanel, taskPanel), setupDrawer, scriptPickerDrawer, connectionDrawer, syncPickerDrawer, sourceDrawerNode, subtitleDrawerNode, confirmNode);
     }
     /**
      * 视频制作任务的实时进度：步骤条 + 当前阶段用时 + 总耗时 + 阶段明细。
@@ -6170,8 +6700,8 @@ window.__ModuleLoader__.load({
       const [items, setItems] = React.useState([]);
       const [page, setPage] = React.useState(0);
       const [busy, setBusy] = React.useState(false);
-      const [connectionOpen, setConnectionOpen] = React.useState(false);
-      const [connectionProvider, setConnectionProvider] = React.useState('bailian');
+      const [setupOpen, setSetupOpen] = React.useState(false);      const [connectionOpen, setConnectionOpen] = React.useState(false);
+      const [connectionProvider, setConnectionProvider] = React.useState('custom');
       const [connectionModel, setConnectionModel] = React.useState('');
       const [apiKey, setApiKey] = React.useState('');
       // 自定义云端生图的表单。默认值由后端给（可被环境变量覆盖），这样打开抽屉
@@ -6298,7 +6828,7 @@ window.__ModuleLoader__.load({
       // Reflect the saved image-generation config into the drawer form.
       React.useEffect(() => {
         if (!service) return;
-        setConnectionProvider(['bailian', 'scitiger'].includes(service.provider) ? service.provider : 'bailian');
+        setConnectionProvider(['scitiger','bridge'].includes(service.provider) ? service.provider : 'scitiger');
         setConnectionModel(typeof service.model === 'string' ? service.model : '');
       }, [service?.provider, service?.model]);
 
@@ -6634,7 +7164,7 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
                   h('textarea', { className: 'sv-textarea', style: { minHeight: '52px' }, value: prompts.negative, maxLength: 1000, disabled: busy || running, onChange: (event) => setPrompts((prev) => ({ ...prev, negative: event.target.value })) }),
                 ),
               ),
-              openTask ? h('section', { className: 'sv-pb-section sv-pb-generation' }, h('div', { className: 'sv-sc-view-head' }, h('h4', null, '最近一次生成'), h('p', null, `${openTask.status === 'succeeded' ? '已完成' : openTask.status === 'failed' ? '失败' : '进行中'} · ${formatTime(openTask.createdAt)}${openTask.imageProvider ? ` · 封面 ${IMAGE_PROVIDER_SHORT[openTask.imageProvider.provider] || openTask.imageProvider.provider}` : ' · 未配置生图服务'}`)), openTask.status === 'failed' ? h('p', { className: 'sv-error' }, openTask.error || '生成失败。') : null, h(ExecutionButton, { kind: 'publish', id: openTask.id, projectId: openTask.projectId }), h(ExecutionHistory, { kind: 'publish', projectId: openTask.projectId, refreshKey: openTask.status })) : null,
+              openTask ? h('section', { className: 'sv-pb-section sv-pb-generation' }, h('div', { className: 'sv-sc-view-head' }, h('h4', null, '最近一次生成'), h('p', null, `${openTask.status === 'succeeded' ? '已完成' : openTask.status === 'failed' ? '失败' : '进行中'} · ${formatTime(openTask.createdAt)}${openTask.imageProvider ? ` · 封面 ${imageProviderLabel(openTask.imageProvider.provider)}` : ' · 未配置生图服务'}`)), openTask.status === 'failed' ? h('p', { className: 'sv-error' }, openTask.error || '生成失败。') : null, h(ExecutionButton, { kind: 'publish', id: openTask.id, projectId: openTask.projectId }), h(ExecutionHistory, { kind: 'publish', projectId: openTask.projectId, refreshKey: openTask.status })) : null,
             ),
       );
       const drawerFoot = detail && h('div', { className: 'sv-tp-drawer-foot' },
@@ -6672,7 +7202,7 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
         h('aside', { className: 'sv-drawer sv-media-config-drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '封面生图配置' },
           h('div', { className: 'sv-drawer-head' }, h('div', null, h('h3', { className: 'sv-media-drawer-title' }, '封面生图配置'), h('p', { className: 'sv-media-drawer-copy' }, 'API Key 保存到 DSH 私有凭据库，不会写入发布资料或浏览器存储。保存当前渠道的 API Key 后，生成发布信息时会自动生成封面。')), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setConnectionOpen(false) }, '关闭')),
           h('div', { className: 'sv-media-drawer-body' },
-            h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '生图渠道' }, ['bailian', 'scitiger', 'custom'].map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': connectionProvider === id ? 'true' : 'false', disabled: Boolean(connectionBusy), onClick: () => { setConnectionProvider(id); setApiKey(''); } }, service?.providers?.[id]?.label || (id === 'bailian' ? '百炼 BYOK' : id === 'scitiger' ? 'SciTiger 云端' : '自定义 API')))),
+            h('div', { className: 'sv-media-provider-picker', role: 'group', 'aria-label': '生图渠道' }, ['custom'].map((id) => h('button', { key: id, type: 'button', className: 'sv-media-provider-choice', 'data-active': connectionProvider === id ? 'true' : 'false', disabled: Boolean(connectionBusy), onClick: () => { setConnectionProvider(id); setApiKey(''); } }, service?.providers?.[id]?.label || '自定义 API'))),
             // 自定义渠道的四个字段。刻意不给「一键测试」：一次测试要真的生一张图，
             // 既花钱又慢，而配置正误在下一张封面上立刻可见。
             connectionProvider === 'custom' ? h('div', { className: 'sv-custom-image' },
@@ -6682,7 +7212,7 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
               h('label', { className: 'sv-media-field' }, h('span', null, '认证方式'), h('select', { className: 'sv-select', value: customAuthHeader, onChange: (event) => setCustomAuthHeader(event.target.value) }, h('option', { value: 'bearer' }, 'Bearer（Authorization: Bearer <key>）'), h('option', { value: 'raw' }, '原始值（Authorization: <key>）'))),
               h('label', { className: 'sv-media-field' }, h('span', null, 'API Key（服务不校验时可留空）'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: connectionCredential?.configured ? '已保存；输入新值可更新' : '可留空', onChange: (event) => setApiKey(event.target.value) })),
               h('p', { className: 'sv-note' }, (service?.customPreset?.note || '自建服务、第三方中转与各类聚合服务都走这条路。') + ' 地址请填到路径之前，不要带查询串或账号密码。')
-            ) : h('label', { className: 'sv-media-field' }, h('span', null, connectionProvider === 'bailian' ? '百炼 API Key' : 'SciTiger 云端生图 API Key'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: connectionCredential?.configured ? '已保存；输入新值可更新' : '输入 API Key', onChange: (event) => setApiKey(event.target.value) })),
+            ) : h('label', { className: 'sv-media-field' }, h('span', null, '生图服务 API Key'), h('input', { className: 'sv-input', type: 'password', value: apiKey, maxLength: 512, autoComplete: 'off', placeholder: connectionCredential?.configured ? '已保存；输入新值可更新' : '输入 API Key', onChange: (event) => setApiKey(event.target.value) })),
             h('label', { className: 'sv-media-field' }, h('span', null, '生图模型（可选）'), h('input', { className: 'sv-input', value: connectionModel, maxLength: 120, placeholder: service?.model || '默认模型', onChange: (event) => setConnectionModel(event.target.value) })),
             // 说清两条路的真实代价，否则用户只能凭猜。2026-10-10 实测：本地生图引擎
             // （Qwen-Image）常驻时占 5.8 GB 内存 + 大部分 16G 卡显存，而云端通道
@@ -6702,11 +7232,20 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
         { label: '可发布成片', value: String(items.length), tone: 'brand' },
         { label: '发布资料就绪', value: String(readyCount), tone: 'green' },
         { label: '待生成', value: String(pendingCount), tone: pendingCount ? 'orange' : 'green' },
-        { label: '封面生图', value: service?.configured ? IMAGE_PROVIDER_SHORT[service.provider] || service.provider : '待配置', tone: service?.configured ? 'green' : undefined },
+        { label: '封面生图', value: service?.configured ? imageProviderLabel(service.provider) : '待配置', tone: service?.configured ? 'green' : undefined },
       ] });
 
       return h(PackFrame, { packId, openConversation, title: '发布', accent: 'red', copy: '这里直接陈列上一模块生成的成片，可点开播放。点「发布」查看或生成发布资料：标题、文案、描述、标签与横竖封面。资料齐备即视为可发布，复制到平台即可；封面可按提示词重生，也可自行上传。本页只准备资料，不会向任何平台直发；要自动投递请用「发布与账号管理」能力包。', hero, introActions: h('button', { type: 'button', className: 'sv-media-config-trigger', 'data-attention': service && !service.configured ? 'true' : 'false', onClick: () => setConnectionOpen(true) }, h(React.Fragment, null, h(IconSettingsOutline16, { size: 16, 'aria-hidden': true }), '封面生图', h('span', { className: 'sv-config-state' }, !service ? '读取中' : service.configured ? '已连接' : '待配置'))) },
         h(Notice, { error: error || detailError }),
+        // 封面生图凭据：没配好时首屏就说清缺什么、点哪里配，别等点「生图」撞禁用。
+        service && !service.configured ? h('div', { className: 'lwb-callout', 'data-tone': 'warning', role: 'alert' },
+          h('p', { className: 'lwb-callout-title' }, '封面生图还没配置 API Key'),
+          h('p', null, '没配也能发布：标题、文案、标签会照常生成，横竖封面需要你自己上传。配好之后生成发布信息时会自动画出横竖两张封面。'),
+          h('ul', { className: 'lwb-callout-next' },
+            h('li', null, h('button', { type: 'button', className: 'lwb-plain-button lwb-button-sm', onClick: () => setConnectionOpen(true) }, '打开「封面生图」保存 API Key')),
+            h('li', null, '或者继续用手动上传：在下面任意成片的发布资料里直接传图。'),
+          ),
+        ) : null,
         shelf,
         lifecycleDrawer,
         connectionDrawer,

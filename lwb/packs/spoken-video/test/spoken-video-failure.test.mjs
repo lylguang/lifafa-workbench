@@ -14,8 +14,8 @@ import {
 // 「下次换个错误措辞又漏判」。
 const HISTORICAL = [
   {
-    name: '百炼参考音色复刻的密钥失效',
-    message: '百炼参考音色复刻失败：Invalid API-key provided.',
+    name: 'SciTiger 参考音色复刻的密钥失效',
+    message: 'SciTiger 参考音色复刻失败：Invalid API-key provided.',
     category: 'credential.invalid',
     retryable: false,
     mustMention: /连接配置/u,
@@ -81,11 +81,45 @@ const HISTORICAL = [
     mustMention: /续跑/u,
   },
   {
+    name: '创作者改了受保护外壳文件',
+    message: '任务失败：受保护文件 src/CreativeVideo.tsx 被修改。',
+    category: 'content.protected_file',
+    retryable: false,
+    mustMention: /受保护外壳文件/u,
+  },
+  {
     name: '成片主画面变化不足',
     message: '成片未通过技术质检：主画面变化不足，成片可能退化为静态画面或少量文字卡片。',
     category: 'content.qc_failed',
     retryable: false,
     mustMention: /质量检查|质检/u,
+  },
+  {
+    // 2026-10-16 18:43 真实失败：渲染到 1200/6521 帧时崩溃，此前一直被归成
+    // code.defect（不重试、修法让用户去「反馈开发者」——完全执行不了）。
+    name: '渲染中段 React #130 崩溃',
+    message: 'Command failed: node remotion-cli.js render src/index.ts SpokenVideo …Error Minified React error #130; visit https://react.dev/errors/130',
+    category: 'content.render_crash',
+    retryable: true,
+    mustMention: /interpolate|组件引用/u,
+  },
+  {
+    // 2026-10-13 23:43 真实失败：`inputRange must be strictly monotonically
+    // increasing but got [1,0.14]`，同样死在渲染中段。
+    name: '渲染中段 inputRange 乱序崩溃',
+    message: 'Error inputRange must be strictly monotonically increasing but got [1,0.14]',
+    category: 'content.render_crash',
+    retryable: true,
+    mustMention: /inputRange/u,
+  },
+  {
+    // 2026-10 审计里 9 条「成片经过 2 次定向修复后仍未通过独立审片…」全部被
+    // 归成 code.defect。归到内容类后修法必须可执行，且不再说「反馈开发者」。
+    name: '审片两轮修复后仍未通过',
+    message: '成片经过 2 次定向修复后仍未通过独立审片：技术报告 attempt-3 全部通过…逐帧复核发现 67.896s 一幕是明确未完成状态…',
+    category: 'content.qc_failed',
+    retryable: false,
+    mustMention: /审片|重跑/u,
   },
   {
     name: '字幕时间轴不合规',

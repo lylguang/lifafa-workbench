@@ -5,8 +5,6 @@
 //       配音: 小米 MiMo TTS（云端，官方限时免费；有参考音频走 voiceclone，否则走内置音色）
 //       字幕: Qwen3-ASR-1.7B（本地 ComfyUI-CZX, 默认 127.0.0.1:8188）
 //   · 兼容 TTS/ASR 服务协议（LWB_SPOKEN_VIDEO_TTS_BASE_URL 指向本服务时可用，保留兼容）
-//   · 百炼(DashScope) 异步生图协议（LWB_SPOKEN_VIDEO_BAILIAN_IMAGE_BASE_URL 指向本服务）：
-//       封面: Qwen-Image-2.1 文生图（Qwen-Image 应用内置 ComfyUI, 默认 127.0.0.1:8187）
 // 音色库：voices/<音色ID>.wav|.mp3 参考音频；可选同名 .txt 放转写文本，没有则自动 ASR 并缓存。
 // 本地 LongCat 合成已不再走主流程，但配置项保留，便于免费期结束后切回。
 
@@ -141,10 +139,18 @@ const DEFAULT_CONFIG = {
   tts: { model: 'LongCat-AudioDiT-3.5B-bf16', steps: 16, guidance_strength: 4.0, guidance_method: 'apg', attention: 'auto', device: 'auto', dtype: 'auto' },
   // 小米 MiMo TTS：官方「限时免费」的云端合成，取代本地 LongCat。
   //   apiKey  — 小米账号在 platform.xiaomimimo.com 创建的 sk-... key（免费，无需实名认证）
-  //   voice   — 无参考音频时用的内置音色：冰糖/茉莉/苏打/白桦/mimo_default
+  //   model   — 三个官方模型之一：预置音色 / 音色设计 / 声音复刻
+  //   voice   — 预置音色名（仅 mimo-v2.5-tts 用）：冰糖/茉莉/苏打/白桦/mimo_default 等
+  //   voiceDesign — 音色设计描述（仅 mimo-v2.5-tts-voicedesign 用），放 user 角色
   //   style   — 可选的语气/节奏指令（放 user 角色，不会念出来）
   // 传了参考音频时自动走 mimo-v2.5-tts-voiceclone（声音复刻），忽略 voice。
-  mimo: { apiKey: '', voice: '冰糖', style: '' },
+  mimo: {
+    apiKey: '',
+    model: 'mimo-v2.5-tts',
+    voice: 'mimo_default',
+    style: '',
+    voiceDesign: '',
+  },
   asr: { model: 'Qwen3-ASR-1.7B' },
   defaultVoice: '',
   // 数字按中文读法念：LongCat 遇到阿拉伯数字会读英文（GPT-6 → "GPT six"）。
@@ -506,7 +512,7 @@ async function findVoice(voiceId) {
 // 解析克隆参考：优先上传资产，其次音色库；返回 { buffer, ext, promptText, uploadName, voiceId } 或 null。
 // 「系统默认音色」映射：工作台里选“系统音色”时传上来的是自带的 Tiffy 参考音频，
 // 若其内容哈希与内置文件一致且配置了 defaultVoice，则自动替换为用户自己的默认音色。
-async function resolveReference(base, { assetId, voiceId, task }) {
+async function resolveReference(base, { assetId, voiceId, task, needPromptText = true }) {
   if (assetId) {
     if (!/^[\w-]{8,64}$/.test(assetId)) throw new Error(`参考音频资产标识无效：${assetId}`)
     let asset = null
@@ -522,7 +528,10 @@ async function resolveReference(base, { assetId, voiceId, task }) {
     } else {
       const txtPath = join(UPLOADS_DIR, `${assetId}.txt`)
       let promptText = existsSync(txtPath) ? (await readFile(txtPath, 'utf8')).trim() : ''
-      if (!promptText) {
+      // 小米云端复刻只要音频本身，转写文本用不上（prompt_text 只喂本地
+      // LongCat）。这时还去跑本机 ASR 会把任务卡在「转写参考音频」上——
+      // 引擎没开时更是无限期挂着，用户看到的只是一直不动。
+      if (!promptText && needPromptText) {
         log(`资产 ${assetId} 首次使用，自动转写参考音频…`)
         if (task) setStatus(task, 'processing', { stage: '转写参考音频' })
         // 转写走本机 ASR：引擎没开时先拉起来（配音可能走云端，但转写这一步不经过云端）。
@@ -538,7 +547,7 @@ async function resolveReference(base, { assetId, voiceId, task }) {
     if (!voice) throw new Error(`音色「${voiceId}」不存在：请把参考音频放到 voices/${voiceId}.wav（或 .mp3），或在配置页上传`)
     const txtPath = join(VOICES_DIR, `${voiceId}.txt`)
     let promptText = existsSync(txtPath) ? (await readFile(txtPath, 'utf8')).trim() : ''
-    if (!promptText) {
+    if (!promptText && needPromptText) {
       log(`音色 ${voiceId} 首次使用，自动转写参考音频…`)
       if (task) setStatus(task, 'processing', { stage: '转写参考音色' })
       await ensureEngine('tts', { reason: '转写参考音色' })
@@ -625,8 +634,21 @@ const ffmpegRun = (args, label) => new Promise((resolve, reject) => execFile('ff
 //   · 音色：mimo-v2.5-tts 用内置名；voiceclone 用 data:audio/xxx;base64,<参考音频>
 // 三个 TTS 模型官方标注「限时免费」，RPM 100 / TPM 10M。
 const MIMO_BASE = process.env.LWB_MIMO_BASE_URL || 'https://api.xiaomimimo.com/v1'
-// 内置中文音色（官方文档「预置音色」表）；voiceclone/voicedesign 走另外的模型，不用这张表。
-const MIMO_VOICES = ['冰糖', '茉莉', '苏打', '白桦', 'mimo_default']
+// 官方三个 TTS 模型。预置音色 / 音色设计 / 声音复刻，参数形态各不相同。
+const MIMO_MODELS = ['mimo-v2.5-tts', 'mimo-v2.5-tts-voicedesign', 'mimo-v2.5-tts-voiceclone']
+// 预置音色表（官方文档「预置音色」）。voiceclone/voicedesign 走另外的模型，不用这张表。
+// 中国集群默认是中文四音色，mimo_default 随集群变化（Mia/Chloe/Milo/Dean 是英文集群默认）。
+const MIMO_VOICES = ['mimo_default', '冰糖', '茉莉', '苏打', '白桦', 'Mia', 'Chloe', 'Milo', 'Dean']
+// 音色设计预设：mimo-v2.5-tts-voicedesign 的 user 消息就是「音色描述」，
+// 官方建议覆盖性别年龄、音色质感、情绪语气、语速节奏这几个维度。1~4 句即可。
+const MIMO_VOICE_DESIGNS = [
+  { id: 'narrator-male', label: '沉稳男声 · 评书旁白', text: '一位年迈的老先生，嗓音略带沙哑和沧桑感，语速缓慢而沉稳，像在讲一段很久以前的故事，语气从容，带岁月的智慧。' },
+  { id: 'knowledge-female', label: '知性女声 · 知识讲解', text: '一位三十岁左右的女性，声音清晰沉稳，语速适中，吐字干净利落，适合知识讲解与资讯播报，语气亲切但不轻浮。' },
+  { id: 'energetic-youth', label: '元气少年 · 快节奏口播', text: '一位年轻的男性，声音清亮活泼，语速偏快，节奏明快，带着一点兴奋感，像在跟朋友分享刚发现的新鲜事。' },
+  { id: 'warm-healer', label: '温柔女声 · 情感共鸣', text: '一位三十岁左右的女性，声音温柔细腻，语速舒缓，尾音轻柔，带着一点温柔的疲惫感，像在深夜轻声安慰一位朋友。' },
+  { id: 'business-male', label: '干练男声 · 商业解读', text: '一位四十岁左右的男性，中低音，浑厚有力，语速偏快但吐字清晰，语气果断利落，像在做一场有说服力的商业分析。' },
+  { id: 'documentary', label: '纪录片旁白 · 中性', text: '一位中性偏男性的旁白，声音低沉醇厚，语速平缓克制，语调平稳没有起伏，像在自然纪录片的镜头前做客观陈述。' },
+]
 
 // MiMo 全局节流：所有 MiMo 请求（配音主链路、测试按钮、并发定时任务）在这里
 // 串行排队，相邻两次请求开始至少间隔 MIMO_MIN_GAP_MS。官方限流 RPM 100 看似宽裕，
@@ -648,13 +670,29 @@ async function mimoSynthesize(options) {
   return withMimoSlot(() => mimoRequestOnce(options))
 }
 
-async function mimoRequestOnce({ text, apiKey, model, voice, style, format = 'wav', timeoutMs = 180_000 }) {
+async function mimoRequestOnce({ text, apiKey, model, voice, style, voiceDesign, format = 'wav', timeoutMs = 180_000 }) {
   const messages = []
-  // 风格指令放 user：控制语气/节奏，内容不会出现在合成语音里
-  if (style && String(style).trim()) messages.push({ role: 'user', content: String(style).trim() })
+  // user 角色的内容在三个模型里含义不同：
+  //   · 预置音色 mimo-v2.5-tts  → 语气/节奏指令（不会念出来）
+  //   · 音色设计 voicedesign      → 音色描述本身（决定生成什么声音）
+  //   · 声音复刻 voiceclone       → 不需要 user 消息
+  // 预置音色下 user 与 style 是两回事，风格描述放 user 会被当成音色描述用。
+  // 音色设计下则完全相反：user 必须是音色描述，style 无处安放。
+  const isDesign = model === 'mimo-v2.5-tts-voicedesign'
+  const isClone = model === 'mimo-v2.5-tts-voiceclone'
+  if (isDesign) {
+    const design = String(voiceDesign || '').trim()
+    if (!design) throw new Error('音色设计模型缺少音色描述：请在桥接配置里填写「音色设计描述」，或改用预置音色模型')
+    messages.push({ role: 'user', content: design })
+  } else if (!isClone && style && String(style).trim()) {
+    messages.push({ role: 'user', content: String(style).trim() })
+  }
   // 待合成文本必须放 assistant——放 user 会被当成指令而不是要念的内容
   messages.push({ role: 'assistant', content: text })
-  const body = { model, messages, audio: { format, voice } }
+  const audio = { format }
+  // 预置音色才用 audio.voice；音色设计不传 voice（音色由描述生成）。
+  if (!isDesign && voice) audio.voice = voice
+  const body = { model, messages, audio }
   // 全局节流：距上次请求开始不足 MIMO_MIN_GAP_MS 时先等差额
   const waitMs = mimoLastStart + MIMO_MIN_GAP_MS - Date.now()
   if (waitMs > 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, waitMs))
@@ -729,11 +767,22 @@ async function mimoVoiceDataUrl(reference) {
 
 // ttsProvider / style / builtinVoice：工作台定时任务可按请求覆盖全局配置
 //（不传则跟随 config.json）。builtinVoice = MiMo 内置音色名，仅云端可用。
-async function runTts(task, { text, outputFormat, voiceSettings, assetId, voiceId, builtinVoice, ttsProvider, style }) {
+async function runTts(task, { text, outputFormat, voiceSettings, assetId, voiceId, builtinVoice, ttsProvider, style, mimoModel, voiceDesign }) {
   const base = TTS_COMFY
   setStatus(task, 'processing', { stage: '准备参考音频', progress: 0 })
+  const provider = ['cloud', 'local'].includes(ttsProvider) ? ttsProvider : loadConfig().ttsProvider
+  // 显式指定了模型（且不是复刻）时不需要参考音频：跳过解析。
+  // 否则会白跑一次本机 ASR 转写（还得先把字幕引擎拉起来），而这份转写
+  // 对预置音色和音色设计都没用——它们的声音不来自参考音频。
+  const explicitModel = MIMO_MODELS.includes(mimoModel) ? mimoModel : null
+  const skipReference = Boolean(builtinVoice)
+    || (provider === 'cloud' && explicitModel && explicitModel !== 'mimo-v2.5-tts-voiceclone')
+  // 本地 LongCat 的复刻节点需要参考音频的转写文本；小米云端复刻只要音频本身，
+  // 云端的预置音色与音色设计又不碰参考音频——所以云端模式下这份转写永远用不上，
+  // 还去跑本机 ASR 只会把任务卡在「转写参考音频」（引擎没开时更是无限期挂着）。
+  const needPromptText = provider !== 'cloud'
   // 内置音色不需要参考音频：跳过解析，否则 voiceId 会误入音色库查找。
-  const reference = builtinVoice ? null : await resolveReference(base, { assetId, voiceId, task })
+  const reference = skipReference ? null : await resolveReference(base, { assetId, voiceId, task, needPromptText })
   task.voiceId = reference?.voiceId || voiceId || null
   const cfg = effectiveTtsConfig(reference?.voiceId)
   // 数字读法：LongCat 见到阿拉伯数字会按英文念，合成前换成汉字。
@@ -748,7 +797,6 @@ async function runTts(task, { text, outputFormat, voiceSettings, assetId, voiceI
   const segments = splitTextSegmentsWithMeta(speechText)
   const multi = segments.length > 1
   const ext = outputFormat === 'mp3' ? 'mp3' : 'wav'
-  const provider = ['cloud', 'local'].includes(ttsProvider) ? ttsProvider : loadConfig().ttsProvider
   task.ttsProvider = provider
   task.ttsProviderOverridden = ttsProvider && ttsProvider !== loadConfig().ttsProvider ? true : undefined
   setStatus(task, 'processing', { stage: multi ? `分段合成（共 ${segments.length} 段）` : (provider === 'cloud' ? '云端合成' : '本地合成'), progress: 0 })
@@ -759,12 +807,34 @@ async function runTts(task, { text, outputFormat, voiceSettings, assetId, voiceI
   if (provider === 'cloud') {
     const mimo = cfg.mimo || {}
     if (!mimo.apiKey) throw new Error('当前配音方式为「云端合成」，但未配置小米 API Key：请到桥接配置中心 http://127.0.0.1:8199/ 填写，或把配音方式改为「本地合成」')
-    // 有参考音频 → voiceclone（复刻音色）；否则 → 内置音色模型（按请求覆盖优先）
+    // 模型选择顺序：
+    //   1. 请求显式指定了模型 → 用它（限定在官方三个里）。显式选择优先于参考音频：
+    //      用户点名「音色设计」时，若系统默认音色 Tiffy 的参考音频也在场，
+    //      按「有音频就复刻」会静默变成 voiceclone，选的模型形同虚设。
+    //   2. 否则有参考音频 → voiceclone（复刻）
+    //   3. 否则跟随全局配置 mimo.model
+    // 音色设计模型下 user 消息是「音色描述」，预置音色模型下 voice 是音色名。
     const useClone = Boolean(reference?.buffer)
-    const mimoModel = useClone ? 'mimo-v2.5-tts-voiceclone' : 'mimo-v2.5-tts'
-    const mimoVoice = useClone ? await mimoVoiceDataUrl(reference) : (builtinVoice || mimo.voice || '冰糖')
-    task.mimoModel = mimoModel
-    task.mimoVoice = useClone ? `clone(${reference.voiceId || reference.uploadName || 'uploaded'})` : mimoVoice
+    const explicit = MIMO_MODELS.includes(mimoModel) ? mimoModel : null
+    const wanted = explicit
+      || (useClone ? 'mimo-v2.5-tts-voiceclone' : (MIMO_MODELS.includes(mimo.model) ? mimo.model : 'mimo-v2.5-tts'))
+    // 显式选了复刻但没有参考音频：不能退回别的模型（用户要的就是复刻）。
+    const cloneWithoutRef = wanted === 'mimo-v2.5-tts-voiceclone' && !reference?.buffer
+    // 显式选了音色设计/预置音色时，参考音频不参与（复刻只由「上传参考音频」触发）。
+    const cloneMode = wanted === 'mimo-v2.5-tts-voiceclone' && !cloneWithoutRef
+    const isDesign = wanted === 'mimo-v2.5-tts-voicedesign'
+    if (cloneWithoutRef) {
+      throw new Error('已选择「声音复刻」模型，但本次任务没有参考音频：请上传参考音频，或改用预置音色 / 音色设计模型')
+    }
+    const design = String(voiceDesign || mimo.voiceDesign || '').trim()
+    if (isDesign && !design) throw new Error('已选择「音色设计」模型，但没有填写音色描述：请在桥接配置里填写「音色设计描述」，或改用预置音色模型')
+    const mimoVoice = cloneMode
+      ? await mimoVoiceDataUrl(reference)
+      : (isDesign ? '' : (builtinVoice || mimo.voice || 'mimo_default'))
+    task.mimoModel = wanted
+    task.mimoVoice = cloneMode
+      ? `clone(${reference.voiceId || reference.uploadName || 'uploaded'})`
+      : (isDesign ? `design(${design.slice(0, 24)}…)` : mimoVoice)
     for (let i = 0; i < segments.length; i++) {
       // 云端偶发单段超时/限流：一段失败不能报废整单。429 是限流不是故障，
       // 单独对待——重试 6 次、退避 15s/30s/45s… 递增（尊重 Retry-After 响应头），
@@ -776,9 +846,10 @@ async function runTts(task, { text, outputFormat, voiceSettings, assetId, voiceI
           rawBuffer = await mimoSynthesize({
             text: segments[i].text,
             apiKey: mimo.apiKey,
-            model: mimoModel,
+            model: wanted,
             voice: mimoVoice,
             style: style || mimo.style || '',
+            voiceDesign: design,
             format: 'wav',
           })
         } catch (error) {
@@ -950,7 +1021,7 @@ async function runSubtitles(task, { audioBuffer, audioFormat, language, referenc
   const duration = await audioDuration(rawFile)
   // 字幕文本优先采用工作台传入的原稿（reference_text）：ASR 会把品牌名/术语听错
   // （实测 GPT-6→"GPT四"、OpenCode 缺失），导致独立审片判定字幕与稿件不符。
-  // 时间轴按各句字数占比分配到实际音频时长上，与百炼的参考文本对齐策略一致。
+  // 时间轴按各句字数占比分配到实际音频时长上，与业界通用的参考文本对齐策略一致。
   const reference = String(referenceText || '').trim()
   task.subtitleSrt = buildSrt(reference || transcript, duration, subtitleOptions || {})
   // buildSrt 的时间轴是按字数占比估算的，而 TTS 的句间停顿/数字读法/重音并不均匀，
@@ -1061,6 +1132,10 @@ function snapSrtToSpeech(srtText, speech, totalDuration) {
 }
 
 // ---------- 生图（DashScope 兼容） ----------
+// 这组端点曾被误删，但白板线稿（spoken-video-whiteboard-art.mjs）仍在调它、
+// image 引擎与 /health.imageEngine 也都在，删掉后调用方永远 404，且「引擎在线
+// 但生成失败」会把排查带偏。路由、轮询（/api/v1/tasks/:id）、
+// 产物下载（/img-files/:name）必须同时存在。
 function patchT2i(template, prompt, width, height, { negativePrompt, seed } = {}) {
   const workflow = JSON.parse(JSON.stringify(template))
   let patched = { prompt: 0, latent: 0, seed: 0, negative: 0 }
@@ -1802,10 +1877,27 @@ pre.log{
           </div>
           <span class="full hint" id="cMimoKeyHint"></span>
 
-          <span class="lbl">内置音色</span>
+          <span class="lbl">合成模型</span>
           <div class="ctl">
-            <select id="cMimoVoice">${['冰糖', '茉莉', '苏打', '白桦', 'mimo_default'].map((v) => `<option>${v}</option>`).join('')}</select>
+            <select id="cMimoModel" onchange="applyMimoModelUI(this.value)">
+              <option value="mimo-v2.5-tts">预置音色（mimo-v2.5-tts）</option>
+              <option value="mimo-v2.5-tts-voicedesign">音色设计（voicedesign）</option>
+              <option value="mimo-v2.5-tts-voiceclone">声音复刻（voiceclone）</option>
+            </select>
           </div>
+          <span class="full hint" id="cMimoModelHint"></span>
+
+          <span class="lbl" id="cMimoVoiceLbl">内置音色</span>
+          <div class="ctl" id="cMimoVoiceRow">
+            <select id="cMimoVoice">${MIMO_VOICES.map((v) => `<option>${v}</option>`).join('')}</select>
+          </div>
+          <span class="full hint" id="cMimoVoiceHint"></span>
+
+          <span class="lbl" id="cMimoDesignLbl" style="display:none">音色设计描述</span>
+          <div class="ctl" id="cMimoDesignRow" style="display:none">
+            <textarea id="cMimoDesign" rows="3" placeholder="用 1~4 句描述想要的声音：性别年龄、音色质感、情绪语气、语速节奏"></textarea>
+          </div>
+          <div id="cMimoDesignPresets" style="display:none;margin-top:8px"></div>
 
           <span class="lbl">语气风格</span>
           <div class="ctl"><input id="cMimoStyle" type="text" placeholder="可选，例如：清晰沉稳，适合知识讲解，语速适中"></div>
@@ -1866,6 +1958,7 @@ pre.log{
         <button onclick="saveConfig()">保存配置</button>
         <span class="hint" id="cMimoTest"></span>
       </div>
+      <div id="cMimoPlayer" style="margin-top:10px"></div>
     </div>
   </section>
 
@@ -1915,7 +2008,7 @@ pre.log{
     <div class="card-head"><h2>使用提示</h2></div>
     <div class="card-body tight">
       <div class="tips">
-        <div class="li">工作台里配音/字幕渠道选「SciTiger 云端」，API Key 随便填；封面选「百炼」+ 随便填 Key。</div>
+        <div class="li">工作台里配音/字幕渠道选「SciTiger 云端」，API Key 随便填；封面生图同样选「SciTiger 云端」+ 随便填 Key。</div>
         <div class="li">配音选<b>云端合成</b>时不占用本机显存；选<b>本地合成</b>时需启动「字幕引擎」并占用约 23GB 内存。</div>
         <div class="li">字幕识别始终在本机引擎上跑；与封面生图共用 16G 显存。</div>
         <div class="li">封面生图（Qwen-Image）开着时跑字幕可能报 <b>os error 1455</b>，那是显存不够，先释放生图引擎。</div>
@@ -2110,7 +2203,9 @@ async function loadConfig(){
   $('cModel').value=c.tts.model; $('cSteps').value=c.tts.steps
   $('cGuidance').value=c.tts.guidance_strength; $('cMethod').value=c.tts.guidance_method; $('cAttn').value=c.tts.attention
   $('cAsr').value=c.asr.model; $('cNumbers').checked=c.chineseNumbers!==false
-  $('cMimoKey').value=c.mimo.apiKey||''; $('cMimoVoice').value=c.mimo.voice||'冰糖'; $('cMimoStyle').value=c.mimo.style||''
+  $('cMimoKey').value=c.mimo.apiKey||''; $('cMimoVoice').value=c.mimo.voice||'mimo_default'; $('cMimoStyle').value=c.mimo.style||''
+  $('cMimoModel').value=c.mimo.model||'mimo-v2.5-tts'; $('cMimoDesign').value=c.mimo.voiceDesign||''
+  applyMimoModelUI($('cMimoModel').value)
   var p=c.ttsProvider==='local'?'local':'cloud'
   $('pCloud').checked=p==='cloud'; $('pLocal').checked=p==='local'
   applyProviderUI(p)
@@ -2129,9 +2224,10 @@ async function saveConfig(){
     ttsProvider:currentProvider(),
     tts:{model:$('cModel').value,steps:Number($('cSteps').value),guidance_strength:Number($('cGuidance').value),
          guidance_method:$('cMethod').value,attention:$('cAttn').value},
-    mimo:{apiKey:$('cMimoKey').value.trim(),voice:$('cMimoVoice').value,style:$('cMimoStyle').value.trim()},
+    mimo:{apiKey:$('cMimoKey').value.trim(),model:$('cMimoModel').value,voice:$('cMimoVoice').value,style:$('cMimoStyle').value.trim()},
     asr:{model:$('cAsr').value}, defaultVoice:$('cDefault').value, chineseNumbers:$('cNumbers').checked
   }
+  if($('cMimoModel').value==='mimo-v2.5-tts-voicedesign') body.mimo.voiceDesign=$('cMimoDesign').value.trim()
   await jf('/admin/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
   toast('配置已保存'); loadConfig(); loadStatus()
 }
@@ -2139,13 +2235,54 @@ async function testMimo(){
   var el=$('cMimoTest'); el.textContent='合成中…'; el.className='hint'
   try{
     var r=await jf('/admin/mimo-test',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({apiKey:$('cMimoKey').value.trim(),voice:$('cMimoVoice').value,style:$('cMimoStyle').value.trim()})})
-    if(r.ok){ el.className='hint ok'; el.innerHTML='✓ 成功 '+r.bytes+' 字节 / '+(r.seconds||'?')+' 秒' }
+      body:JSON.stringify({apiKey:$('cMimoKey').value.trim(),model:$('cMimoModel').value,voice:$('cMimoVoice').value,
+        style:$('cMimoStyle').value.trim(),voiceDesign:$('cMimoDesign').value.trim()})})
+    if(r.ok){
+      el.className='hint ok'
+      el.innerHTML='✓ 成功 '+r.bytes+' 字节 / '+(r.seconds||'?')+' 秒'
+      // 试听：把测试音频直接挂在页面里，别让人只看到一个「成功」。
+      var player=$('cMimoPlayer')
+      if(player){ player.innerHTML='<audio controls preload="none" src="'+esc(r.url)+'"></audio>' }
+    }
     else { el.className='hint err'; el.textContent='✗ '+esc(r.message||'失败') }
   }catch(e){ el.className='hint err'; el.textContent='✗ '+e.message }
 }
 
 /* ---------- 音色 ---------- */
+function applyMimoModelUI(model){
+  var design = model === 'mimo-v2.5-tts-voicedesign'
+  var clone = model === 'mimo-v2.5-tts-voiceclone'
+  var hideVoice = design || clone
+  $('cMimoVoiceRow').style.display = hideVoice ? 'none' : ''
+  $('cMimoVoiceLbl').style.display = hideVoice ? 'none' : ''
+  $('cMimoVoiceHint').style.display = hideVoice ? 'none' : ''
+  $('cMimoDesignRow').style.display = design ? '' : 'none'
+  $('cMimoDesignLbl').style.display = design ? '' : 'none'
+  $('cMimoDesignPresets').style.display = design ? '' : 'none'
+  var hint = '预置音色：使用官方内置音色表（冰糖/茉莉/苏打/白桦等）。'
+  if (design) hint = '音色设计：由你描述的声音即时生成，不需要参考音频。user 消息位被音色描述占用，语气风格不生效。'
+  if (clone) hint = '声音复刻：上传参考音频后自动走复刻模型，音色名与描述都不生效。'
+  $('cMimoModelHint').textContent = hint
+  if (design) renderMimoDesignPresets()
+}
+async function renderMimoDesignPresets(){
+  var box = $('cMimoDesignPresets')
+  try {
+    var p = await jf('/admin/mimo-presets')
+    var html = '<div class="muted" style="font-size:12px;margin-bottom:6px">常用音色预设（点击填入描述）</div>'
+    p.voiceDesigns.forEach(function (d) {
+      html += '<button class="sec sm" style="margin:0 6px 6px 0" data-text="' + esc(d.text) + '">' + esc(d.label) + '</button>'
+    })
+    box.innerHTML = html
+    box.querySelectorAll('button[data-text]').forEach(function (b) {
+      b.onclick = function () {
+        $('cMimoDesign').value = this.getAttribute('data-text')
+        toast('已填入音色描述')
+      }
+    })
+  } catch (e) { box.innerHTML = '' }
+}
+
 async function loadVoices(){
   try{
     var vs=await jf('/admin/voices'), box=$('voiceList')
@@ -2379,14 +2516,16 @@ const server = createServer(async (req, res) => {
       if (body.tts && typeof body.tts === 'object') Object.assign(cfg.tts, body.tts)
       if (body.mimo && typeof body.mimo === 'object') {
         if (typeof body.mimo.apiKey === 'string') cfg.mimo.apiKey = body.mimo.apiKey.trim()
+        if (typeof body.mimo.model === 'string' && MIMO_MODELS.includes(body.mimo.model)) cfg.mimo.model = body.mimo.model
         if (typeof body.mimo.voice === 'string') cfg.mimo.voice = body.mimo.voice.trim()
         if (typeof body.mimo.style === 'string') cfg.mimo.style = body.mimo.style.trim()
+        if (typeof body.mimo.voiceDesign === 'string') cfg.mimo.voiceDesign = body.mimo.voiceDesign.trim()
       }
       if (body.asr && typeof body.asr === 'object') Object.assign(cfg.asr, body.asr)
       if (typeof body.defaultVoice === 'string') cfg.defaultVoice = body.defaultVoice.trim()
       if (typeof body.chineseNumbers === 'boolean') cfg.chineseNumbers = body.chineseNumbers
       saveConfig(cfg)
-      log(`配置已更新：配音方式=${cfg.ttsProvider === 'local' ? '本地合成' : '云端合成'} 小米 key=${cfg.mimo.apiKey ? '已配置' : '未配置'} 音色=${cfg.mimo.voice} 风格=${cfg.mimo.style || '（默认）'} asr=${cfg.asr.model} 默认音色=${cfg.defaultVoice || '（不替换）'} 数字中文读法=${cfg.chineseNumbers === false ? '关' : '开'}`)
+      log(`配置已更新：配音方式=${cfg.ttsProvider === 'local' ? '本地合成' : '云端合成'} 小米 key=${cfg.mimo.apiKey ? '已配置' : '未配置'} 模型=${cfg.mimo.model} 音色=${cfg.mimo.voice} 风格=${cfg.mimo.style || '（默认）'} asr=${cfg.asr.model} 默认音色=${cfg.defaultVoice || '（不替换）'} 数字中文读法=${cfg.chineseNumbers === false ? '关' : '开'}`)
       return json(res, 200, cfg)
     }
     // 测试小米 TTS：合成一小段并回传音频，用于验证 key/音色/风格是否可用
@@ -2394,14 +2533,26 @@ const server = createServer(async (req, res) => {
       const body = parseJson(await readBody(req, 64 * 1024)) || {}
       const apiKey = String(body.apiKey || '').trim() || loadConfig().mimo.apiKey
       if (!apiKey) return json(res, 400, { ok: false, message: '缺少 API Key' })
-      const voice = String(body.voice || '').trim() || loadConfig().mimo.voice || '冰糖'
+      const cfgMimo = loadConfig().mimo || {}
+      const model = MIMO_MODELS.includes(body.model) ? body.model : (MIMO_MODELS.includes(cfgMimo.model) ? cfgMimo.model : 'mimo-v2.5-tts')
+      const isDesign = model === 'mimo-v2.5-tts-voicedesign'
+      // 声音复刻的声音来自参考音频，试合成这里没有参考音频可传。
+      if (model === 'mimo-v2.5-tts-voiceclone') {
+        return json(res, 200, { ok: false, message: '声音复刻需要参考音频：配置页无法试听，请在配音任务里上传参考音频后生成。' })
+      }
+      const voice = isDesign ? '' : (String(body.voice || '').trim() || cfgMimo.voice || 'mimo_default')
+      const voiceDesign = String(body.voiceDesign || '').trim() || cfgMimo.voiceDesign || ''
+      if (isDesign && !voiceDesign) return json(res, 400, { ok: false, message: '音色设计模型需要音色描述' })
+      // 音色设计下语气描述无处安放（user 消息被音色描述占用），试合成只念文本。
+      const style = isDesign ? '' : String(body.style || '').trim()
       try {
         const buffer = await mimoSynthesize({
           text: '这是一段小米语音合成测试。',
           apiKey,
-          model: 'mimo-v2.5-tts',
+          model,
           voice,
-          style: String(body.style || '').trim(),
+          style,
+          voiceDesign,
           format: 'wav',
           timeoutMs: 60_000,
         })
@@ -2410,12 +2561,20 @@ const server = createServer(async (req, res) => {
         writeFileSync(file, buffer)
         let seconds = null
         try { seconds = Number((await audioDuration(file)).toFixed(2)) } catch {}
-        log(`小米 TTS 测试成功：音色=${voice} 字节=${buffer.length}`)
-        return json(res, 200, { ok: true, bytes: buffer.length, seconds, url: `/audio-files/${name}` })
+        log(`小米 TTS 测试成功：模型=${model} 音色=${voice || `design(${voiceDesign.slice(0, 20)}…)`} 字节=${buffer.length}`)
+        return json(res, 200, { ok: true, bytes: buffer.length, seconds, model, voice: voice || null, url: `/audio-files/${name}` })
       } catch (e) {
         log(`小米 TTS 测试失败：${e?.message || e}`)
         return json(res, 200, { ok: false, message: String(e?.message || e).slice(0, 300) })
       }
+    }
+    // 音色设计预设：前端配置页用它渲染「常用音色」预设按钮。
+    if (req.method === 'GET' && path === '/admin/mimo-presets') {
+      return json(res, 200, {
+        models: MIMO_MODELS,
+        voices: MIMO_VOICES,
+        voiceDesigns: MIMO_VOICE_DESIGNS,
+      })
     }
     if (req.method === 'GET' && path === '/admin/voices') {
       const voices = []
@@ -2567,6 +2726,10 @@ const server = createServer(async (req, res) => {
         builtinVoice,
         ttsProvider: body.tts_provider === 'cloud' || body.tts_provider === 'local' ? body.tts_provider : null,
         style: typeof body.style === 'string' ? body.style.trim().slice(0, 200) : '',
+        // 模型与音色描述可按任务覆盖：音色设计（voicedesign）必须带描述，
+        // 预置音色模型带 voice 名，两个形态不能混用。
+        mimoModel: typeof body.mimo_model === 'string' && MIMO_MODELS.includes(body.mimo_model) ? body.mimo_model : null,
+        voiceDesign: typeof body.voice_design === 'string' ? body.voice_design.trim().slice(0, 500) : '',
       }
       enqueueJob(`TTS ${task.id}`, () => runTts(task, input)).then(() => setStatus(task, 'completed')).catch(e => { log('TTS 失败:', e.message); setStatus(task, 'failed', { error_message: e.message }) })
       return json(res, 200, scitigerOk({ job_id: task.id, status: task.status }))
@@ -2576,11 +2739,15 @@ const server = createServer(async (req, res) => {
       const cfg = loadConfig()
       return json(res, 200, scitigerOk({
         tts_provider: cfg.ttsProvider,
+        mimo_model: cfg.mimo?.model || 'mimo-v2.5-tts',
         mimo_voice: cfg.mimo?.voice || null,
         mimo_style: cfg.mimo?.style || null,
+        mimo_voice_design: cfg.mimo?.voiceDesign || null,
         mimo_key_configured: Boolean(cfg.mimo?.apiKey),
         default_voice: cfg.defaultVoice || null,
         builtin_voices: MIMO_VOICES,
+        mimo_models: MIMO_MODELS,
+        voice_design_presets: MIMO_VOICE_DESIGNS,
       }))
     }
     if (req.method === 'POST' && path === '/api/v1/subtitle/jobs') {
@@ -2688,7 +2855,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { code: 200, data: { task_id: task.id, status: task.status, subtitle_srt: task.subtitleSrt ?? null, diagnostics: task.diagnostics ?? null, error_message: task.error_message } })
     }
 
-    // ---- DashScope 生图协议 ----
+    // ---- DashScope 生图协议（白板线稿 / 封面生图共用；恢复见上方 P0-1 注释） ----
     if (req.method === 'POST' && path === '/api/v1/services/aigc/image-generation/generation') {
       const body = parseJson(await readBody(req))
       const prompt = body?.input?.messages?.[0]?.content?.map(c => c?.text).filter(Boolean).join('\n')
@@ -2714,6 +2881,7 @@ const server = createServer(async (req, res) => {
       if (task.status === 'failed') return json(res, 200, { output: { task_status: 'FAILED', message: task.error_message }, request_id: randomUUID() })
       return json(res, 200, { output: { task_status: task.status === 'queued' ? 'PENDING' : 'RUNNING' }, request_id: randomUUID() })
     }
+    // 生图产物下载：白板线稿轮询拿到的 results[0].url 指到这里。
     m = path.match(/^\/img-files\/([\w.-]+)$/)
     if (req.method === 'GET' && m && existsSync(join(IMAGES_DIR, m[1]))) {
       const buf = await readFile(join(IMAGES_DIR, m[1]))
