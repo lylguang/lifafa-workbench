@@ -106,7 +106,9 @@ test('登录态失效要抛 PUBLISHER_LOGIN_REQUIRED，而不是报成选择器�
   )
 })
 
-test('内容级采集：只更新已绑定且标题精确匹配的作品', async () => {
+test('内容级采集：在全部本地内容里做日期+前缀匹配，未绑定的命中后补绑定', async () => {
+  // 2026-10-29 语义更新：匹配范围是全部本地内容。
+  // 旧实现只在「已绑定」的行里找，而绑定又依赖匹配本身——死循环，指标恒为 0。
   const contents = [
     { contentId: 'c1', title: '已绑定的作品', bound: true, remoteId: 'v1' },
     { contentId: 'c2', title: '未绑定的作品', bound: false },
@@ -116,12 +118,16 @@ test('内容级采集：只更新已绑定且标题精确匹配的作品', async
   page.evaluate = async () => ([
     { title: '已绑定的作品', stats: '1.2万 播放 345 点赞 12 评论', href: null },
     { title: '未绑定的作品', stats: '999 播放', href: null },
-    { title: '标题不完全一致的作品', stats: '888 播放', href: null },
+    { title: '标题完全不同的另一条', stats: '888 播放', href: null },
   ])
   const collected = await collectContents({ accountId: 'a1', platform: 'douyin', page, signal: null }, { runId: 'r1', store })
-  assert.equal(collected.length, 1, '只有已绑定且标题精确匹配的那条会被写回')
-  assert.equal(collected[0].contentId, 'c1')
+  assert.equal(collected.length, 2, '两条本地内容都应命中（标题精确一致）')
   assert.equal(store.calls.metrics[0].metrics.views, 12000)
+  assert.equal(store.calls.metrics[1].metrics.views, 999)
+  // c2 没有作品链接可取（href 为 null），绑定关系保持未绑定——不猜。
+  const c2 = store.calls.contents.find((row) => row.contentId === 'c2')
+  assert.equal(c2.remoteId, null)
+  assert.equal(c2.bound, false)
 })
 
 test('内容级采集：一条都读不到数字时不落全 null 记录（避免「采集成功」的假象）', async () => {

@@ -20,7 +20,7 @@
  */
 
 import { readFile } from 'node:fs/promises'
-import { bindByTitle, normalizeTitle } from './analytics-bind.mjs'
+import { normalizeTitle } from './analytics-bind.mjs'
 
 const ORIGIN = 'https://creator.douyin.com'
 /**
@@ -549,11 +549,9 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
   const wanted = Array.isArray(contentIds) && contentIds.length ? new Set(contentIds) : null
   const contents = await store.listContents()
   const bound = contents.filter((row) => row.bound && (!wanted || wanted.has(row.contentId)))
-  // 没有已绑定作品也要打开页面：绑定需要「平台作品列表」，而那份列表只能从这里读。
-  // 之前这里提前 return，导致 bindAll 永远没有候选（鸡生蛋），
-  // 内容级指标在 P2 上线后一直是 0 条。
-  const unbound = contents.filter((row) => !row.bound && (!wanted || wanted.has(row.contentId)))
-  if (!bound.length && !unbound.length) return []
+  // 没有任何本地内容时才不打开页面（打开是为了读平台作品列表做标题匹配）。
+  // 已绑定与否不影响：匹配器会在全部本地内容里找，命中后顺手完成绑定。
+  if (!contents.length) return []
 
   await page.goto(MANAGE_URL, { waitUntil: 'domcontentloaded', timeout: 120_000 })
   await page.waitForTimeout(4000)
@@ -587,20 +585,9 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
     }))
   }
 
-  // 用平台列表给未绑定的本地内容做按标题绑定（宁可待绑定，也不静默绑错）。
-  const boundNow = new Map()
-  if (unbound.length) {
-    const { matched } = bindByTitle(unbound, works)
-    for (const row of matched) {
-      await store.saveContents([row])
-      boundNow.set(row.contentId, row)
-    }
-  }
-
   // 一条都没匹配上时留一份诊断证据：平台读到几条、标题与链接长什么样。
   // 「采集成功但没数据」最需要证据——2026-10-29 就是靠截图才定位到选择器失效。
-  const matchedCount = works.filter((work) => bound.some((item) => item.title === work.title)
-    || [...boundNow.values()].some((item) => item.title === work.title)).length
+  const matchedCount = works.filter((work) => matchWorkToContent(work, contents)).length
   if (!matchedCount && typeof lease.evidenceJson === 'function') {
     await lease.evidenceJson('douyin-works-diagnostic', {
       works: works.length,
@@ -614,14 +601,21 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
 
   const collected = []
   for (const work of works) {
-    // 双条件匹配：发布日期相同 + 标题前缀重叠（导出的作品名称是
-    // 「标题×2 + 正文全文」，与本地标题永远不相等，见 matchWorkToContent）。
-    const target = matchWorkToContent(work, [...bound, ...boundNow.values()])
+    // 在**全部本地内容**里做双条件匹配。
+    // 2026-10-29 修：旧写法只在「已绑定」的行里找——而绑定又依赖这轮匹配，
+    // 等于永远在空列表里找，实测内容级指标恒为 0 条。
+    const target = matchWorkToContent(work, contents)
     if (!target) continue
     const metrics = work.metrics ?? parseRowStats(work.stats)
-    // 一个数都读不到时不要落一条全 null 的记录——那会让「采集成功」变成假象。
     if (Object.values(metrics).every((value) => value === null)) continue
-    const record = { ...target, metrics, source: 'collector', collectedAt: new Date().toISOString() }
+    // 命中即完成绑定：remoteId 来自作品行链接（当前页面没有就先留空，
+    // 指标已按 contentId 落库，绑定关系下次采集可以继续补）。
+    const record = {
+      ...target,
+      remoteId: target.remoteId ?? work.remoteId ?? null,
+      remoteUrl: target.remoteUrl ?? work.remoteUrl ?? null,
+      metrics, source: 'collector', collectedAt: new Date().toISOString(),
+    }
     await store.saveContentMetrics({ contentId: target.contentId, date: record.collectedAt, collectedAt: record.collectedAt, metrics, source: 'collector' })
     await store.saveContents([record])
     collected.push(record)
