@@ -3,7 +3,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import assert from 'node:assert/strict'
-import douyin, { parseCount, parseRowStats, parseLabeledNumber, videoIdFromHref, readWorksFromPage, parseCsv, worksFromExport, collectAccount, collectContents } from '../analytics-douyin.mjs'
+import douyin, { parseCount, parseRowStats, parseLabeledNumber, videoIdFromHref, readWorksFromPage, parseCsv, worksFromExport, worksFromRows, xlsxToRows, collectAccount, collectContents } from '../analytics-douyin.mjs'
 
 /**
  * 假 page：只实现 adapter 用到的 locator/goto/waitForTimeout/url。
@@ -273,4 +273,79 @@ test('内容级采集：导出 CSV 优先，按归一化标题匹配后落指标
   assert.equal(collected.length, 1, '导出 CSV 里的作品要能匹配上')
   assert.equal(store.calls.metrics[0].metrics.views, 12000)
   assert.equal(store.calls.metrics[0].metrics.likes, 345)
+})
+
+// ── 平台导出的是 xlsx（zip），不是 CSV ─────────────────────────────────────
+//
+// 2026-10-29 真机证据：douyin-export-*.bin 是 Microsoft Excel 2007+。
+// 这里用最小 zip 写入器（存储态，不压缩）造一份最小 xlsx 夹具，
+// 验证零依赖解析能读出与 CSV 相同的行。
+
+/** 最小 zip 写入器：条目用存储态（method 0），够 xlsxToRows 读。 */
+function zipStored(entries) {
+  const chunks = []
+  const central = []
+  let offset = 0
+  for (const [name, content] of entries) {
+    const data = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8')
+    const nameBuf = Buffer.from(name, 'utf8')
+    const local = Buffer.alloc(30)
+    local.writeUInt32LE(0x04034b50, 0)
+    local.writeUInt16LE(20, 4)
+    local.writeUInt16LE(0, 6)
+    local.writeUInt16LE(0, 8)
+    local.writeUInt16LE(0, 10)
+    local.writeUInt16LE(0, 12)
+    local.writeUInt32LE(data.length, 14)
+    local.writeUInt32LE(0, 18)
+    local.writeUInt16LE(nameBuf.length, 26)
+    chunks.push(local, nameBuf, data)
+    const centralEntry = Buffer.alloc(46)
+    centralEntry.writeUInt32LE(0x02014b50, 0)
+    centralEntry.writeUInt16LE(20, 4)
+    centralEntry.writeUInt16LE(0, 10)
+    centralEntry.writeUInt32LE(data.length, 20)
+    centralEntry.writeUInt16LE(nameBuf.length, 28)
+    centralEntry.writeUInt32LE(offset, 42)
+    central.push(centralEntry, nameBuf)
+    offset += 30 + nameBuf.length + data.length
+  }
+  const centralBuf = Buffer.concat(central)
+  const eocd = Buffer.alloc(22)
+  eocd.writeUInt32LE(0x06054b50, 0)
+  eocd.writeUInt16LE(entries.size, 10)
+  eocd.writeUInt32LE(centralBuf.length, 12)
+  eocd.writeUInt32LE(offset, 16)
+  return Buffer.concat([...chunks, centralBuf, eocd])
+}
+
+test('xlsxToRows 读出平台导出文件里的表头与数据行', () => {
+  // minimal xlsx: sharedStrings + sheet1，单元格 t="s" 引用字符串表
+  const shared = [
+    '<si><t>标题</t></si>',
+    '<si><t>折叠屏首发翻车</t></si>',
+    '<si><t>播放</t></si>',
+    '<si><t>点赞</t></si>',
+    '<si><t>无人小店踩坑</t></si>',
+  ]
+  const sheet = [
+    '<?xml version="1.0"?><worksheet><sheetData>',
+    '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>2</v></c><c r="C1" t="s"><v>3</v></c></row>',
+    '<row r="2"><c r="A2" t="s"><v>1</v></c><c r="B2"><v>12000</v></c><c r="C2"><v>345</v></c></row>',
+    '<row r="3"><c r="A3" t="s"><v>4</v></c><c r="B3"><v>25000</v></c><c r="C3"><v>88</v></c></row>',
+    '</sheetData></worksheet>',
+  ].join('')
+  const xlsx = zipStored(new Map([
+    ['xl/sharedStrings.xml', shared.join('')],
+    ['xl/worksheets/sheet1.xml', sheet],
+  ]))
+  const rows = xlsxToRows(xlsx)
+  assert.deepEqual(rows[0], ['标题', '播放', '点赞'])
+  assert.deepEqual(rows[1], ['折叠屏首发翻车', '12000', '345'])
+  assert.deepEqual(rows[2], ['无人小店踩坑', '25000', '88'])
+
+  // 全链路：xlsx 行 → works 指标
+  const { works } = worksFromRows(rows)
+  assert.equal(works[0].metrics.views, 12000)
+  assert.equal(works[1].metrics.likes, 88)
 })

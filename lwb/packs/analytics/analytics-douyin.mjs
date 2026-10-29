@@ -243,6 +243,98 @@ export async function readWorksFromPage(page) {
 }
 
 /**
+ * 极简 XLSX 读取（零依赖）。
+ *
+ * 平台「导出数据」给的是 xlsx（2026-10-29 实测），不是 CSV。
+ * xlsx 就是 zip：定位 EOCD → 遍历中央目录 → inflateRaw 解出
+ * sharedStrings.xml 与 sheet1.xml，再用正则抽 <t>/<v>。
+ * 刻意不做通用解析：只服务这一个文件形态，几十行比引一个 xlsx 库划算。
+ */
+import { inflateRawSync } from 'node:zlib'
+
+/** 读 zip 里全部条目（method 0 存储 / 8 deflate），返回 name → bytes。 */
+export function zipEntries(buffer) {
+  let eocd = -1
+  for (let index = buffer.length - 22; index >= 0; index -= 1) {
+    if (buffer.readUInt32LE(index) === 0x06054b50) { eocd = index; break }
+  }
+  if (eocd < 0) return new Map()
+  const count = buffer.readUInt16LE(eocd + 10)
+  let offset = buffer.readUInt32LE(eocd + 16)
+  const entries = new Map()
+  for (let index = 0; index < count; index += 1) {
+    const method = buffer.readUInt16LE(offset + 10)
+    const compressedSize = buffer.readUInt32LE(offset + 20)
+    const nameLength = buffer.readUInt16LE(offset + 28)
+    const extraLength = buffer.readUInt16LE(offset + 30)
+    const commentLength = buffer.readUInt16LE(offset + 32)
+    const localOffset = buffer.readUInt32LE(offset + 42)
+    const name = buffer.toString('utf8', offset + 46, offset + 46 + nameLength)
+    const localNameLength = buffer.readUInt16LE(localOffset + 26)
+    const localExtraLength = buffer.readUInt16LE(localOffset + 28)
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength
+    const data = buffer.subarray(dataStart, dataStart + compressedSize)
+    let content = null
+    try {
+      content = method === 0 ? data : method === 8 ? inflateRawSync(data) : null
+    } catch { content = null }
+    entries.set(name, content)
+    offset += 46 + nameLength + extraLength + commentLength
+  }
+  return entries
+}
+
+function xmlUnescape(value) {
+  return String(value ?? '')
+    .replace(/&lt;/gu, '<').replace(/&gt;/gu, '>').replace(/&quot;/gu, '"')
+    .replace(/&#x([0-9a-f]+);/giu, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#(d+);/gu, (_, dec) => String.fromCodePoint(Number(dec)))
+    .replace(/&amp;/gu, '&')
+}
+
+/** 列字母 → 0 起始下标：A=0, Z=25, AA=26。 */
+function columnIndexOf(letters) {
+  let index = 0
+  for (const ch of String(letters ?? '')) index = index * 26 + (ch.charCodeAt(0) - 64)
+  return Math.max(0, index - 1)
+}
+
+/** xlsx → 二维数组（首行表头）。只认 sharedStrings / inlineStr / 数字三种单元格。 */
+export function xlsxToRows(buffer) {
+  const entries = zipEntries(buffer)
+  if (!entries.size) return []
+  const shared = []
+  const sharedXml = entries.get('xl/sharedStrings.xml')
+  if (sharedXml) {
+    for (const match of sharedXml.toString('utf8').matchAll(/<si[^>]*>([\s\S]*?)<\/si>/gu)) {
+      const text = [...match[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/gu)].map((part) => part[1]).join('')
+      shared.push(xmlUnescape(text))
+    }
+  }
+  const sheetName = [...entries.keys()].find((name) => /^xl\/worksheets\/sheet\d+\.xml$/u.test(name))
+  if (!sheetName) return []
+  const sheet = entries.get(sheetName).toString('utf8')
+  const rows = []
+  for (const rowMatch of sheet.matchAll(/<row[^>]*>([\s\S]*?)<\/row>/gu)) {
+    const cells = []
+    for (const cellMatch of rowMatch[1].matchAll(/<c([^>]*)>([\s\S]*?)<\/c>/gu)) {
+      const reference = /r="([A-Z]+)\d+"/u.exec(cellMatch[1])
+      const column = reference ? columnIndexOf(reference[1]) : cells.length
+      const type = /t="([^"]+)"/u.exec(cellMatch[1])?.[1] ?? null
+      const valueMatch = /<v[^>]*>([\s\S]*?)<\/v>/u.exec(cellMatch[2])
+      let value = valueMatch ? valueMatch[1] : ''
+      if (type === 's') value = shared[Number(value)] ?? ''
+      else if (type === 'inlineStr') {
+        value = ([...cellMatch[2].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/gu)].map((part) => part[1]).join(''))
+      }
+      cells[column] = xmlUnescape(String(value).trim())
+    }
+    rows.push(cells)
+  }
+  return rows
+}
+
+/**
  * 极简 CSV 解析：支持双引号包裹、字段内逗号/换行、\r\n、BOM。
  *
  * 为什么不引依赖：这是采集侧的一次性解析，几十行足够，也避免给能力包
@@ -281,8 +373,8 @@ export function parseCsv(text) {
  * 标题列同理（标题 / 作品名称 / 作品标题）。认不出标题列就返回空，
  * 由调用方退回 DOM 读取——宁可采不到，也不要采错。
  */
-export function worksFromExport(csvText) {
-  const rows = parseCsv(csvText)
+export function worksFromRows(rows) {
+  rows = Array.isArray(rows) ? rows : []
   if (rows.length < 2) return { works: [], header: rows[0] ?? [] }
   const header = rows[0].map((cell) => String(cell).trim())
   const find = (keywords) => header.findIndex((cell) => keywords.some((word) => cell.includes(word)))
@@ -316,6 +408,10 @@ export function worksFromExport(csvText) {
     if (works.length >= 500) break
   }
   return { works, header }
+}
+
+export function worksFromExport(csvText) {
+  return worksFromRows(parseCsv(csvText))
 }
 
 /**
@@ -469,8 +565,10 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
   let works = []
   let exportHeader = null
   const exported = await downloadExport(page, { evidence: lease.evidence, evidenceFile: lease.evidenceFile }).catch(() => null)
-  if (exported?.text) {
-    const parsed = worksFromExport(exported.text)
+  if (exported?.buffer) {
+    // 平台导出的可能是 xlsx（实测）也可能是 csv：都能变成行数组。
+    const rows = exported.text ? parseCsv(exported.text) : xlsxToRows(exported.buffer)
+    const parsed = worksFromRows(rows)
     exportHeader = parsed.header
     works = parsed.works
   }
