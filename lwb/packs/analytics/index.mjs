@@ -2,6 +2,7 @@ import manifest from './lwb-pack.json' with { type: 'json' }
 import { registerLwbPack } from '@scitiger-ai/lwb-pack-sdk'
 import AnalyticsGateway from './gateway.mjs'
 import { AnalyticsHost } from './analytics-host.mjs'
+import { toBackgroundWork } from './analytics-collector.mjs'
 
 export const inject = ['lwbPackRegistry', 'lwbPackServices']
 
@@ -26,7 +27,14 @@ export async function apply(ctx, config = {}) {
     // 两个兄弟包都可能缺席：懒访问取不到就传 null，由 host 负责降级。
     publisher: resolvePublisher(ctx),
     spokenVideo: resolveSpokenVideo(ctx),
-    background: scope.background,
+    // 契约适配：采集器/调度器传的是 thunk（`() => work()`），而
+    // lwbPackServices 的 background 收的是 **Promise**（内部
+    // `Promise.resolve(promise)` 后加入 pending 集合）。
+    // 直接把 thunk 递过去，Promise.resolve 只会把函数本身当成结果，
+    // work 永远不会执行——实测表现是「采集一开始就永远 running：
+    // done 0/1、没有失败、没有产物，之后每次采集都被 alreadyRunning 挡住」。
+    // 这里统一展开：是函数就先调用，再把得到的 promise 交给宿主托管。
+    background: (work) => scope.background(toBackgroundWork(work)),
   })
   ctx.provide('analyticsHost', host)
   ctx.plugin(AnalyticsGateway)

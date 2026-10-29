@@ -279,3 +279,17 @@ function publicRun(run) {
 }
 
 export default AnalyticsCollector
+
+/**
+ * 把「待执行的工作」展开成 Promise，交给宿主 background 托管。
+ *
+ * 宿主注入的 background 收的是 **Promise**（lwbPackServices 内部
+ * `Promise.resolve(promise)` 后加入 pending 集合）；而采集器与调度器按
+ * thunk 风格传 `() => work()`。直接把 thunk 递过去，`Promise.resolve` 只会
+ * 把函数本身当成结果，work 永远不会执行——2026-10-29 实测：采集一开始就
+ * 永久 running（done 0/1、无失败、无产物，此后每次采集都被 alreadyRunning 挡住），
+ * 看起来像「看板坏了」，实际是一行契约不匹配。
+ */
+export function toBackgroundWork(work) {
+  return typeof work === 'function' ? work() : work
+}

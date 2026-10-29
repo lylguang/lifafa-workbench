@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { COLLECTION_MESSAGES, AnalyticsCollector, describeFailure } from '../analytics-collector.mjs'
+import { COLLECTION_MESSAGES, AnalyticsCollector, describeFailure, toBackgroundWork } from '../analytics-collector.mjs'
 
 /** 假 store：只实现采集器用到的四个方法，全内存。 */
 function fakeStore() {
@@ -152,4 +152,24 @@ test('单账号尝试次数上限为 2，不做第 3 次', async () => {
   const collector = new AnalyticsCollector({ publisher, store: fakeStore(), adapters: new Map([['bilibili', OK_ADAPTER]]), sleep: async () => {} })
   await collector.start({})
   assert.equal(calls, 2, '首发 + 1 次退避重试 = 2 次')
+})
+
+// ── background 契约 ─────────────────────────────────────────────────────────
+//
+// 2026-10-29 实测事故：宿主注入的 background 是「收 Promise 并托管」
+// （lwbPackServices 内部 Promise.resolve 后入队），而采集器按 thunk 风格传
+// `() => work()`。Promise.resolve(函数) 只会把函数本身当成结果，work 永不执行——
+// 表现为采集一开始就永久 running（done 0/1、无失败、无产物），
+// 此后每次采集都被 alreadyRunning 挡住，看起来像「看板坏了」。
+
+test('toBackgroundWork 把 thunk 展开成 promise，托管方才会真正执行', async () => {
+  let ran = false
+  // 生产形态：background 收 promise 并托管（这里用 Promise.resolve 模拟 track）
+  const track = (promise) => Promise.resolve(promise)
+  await track(toBackgroundWork(async () => { ran = true }))
+  assert.equal(ran, true, 'thunk 必须先被调用，否则工作永远不会开始')
+
+  // 已经是 promise 时原样返回
+  const promise = Promise.resolve(42)
+  assert.equal(toBackgroundWork(promise), promise)
 })
