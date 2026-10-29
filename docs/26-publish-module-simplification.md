@@ -71,7 +71,7 @@
 
 - 删除：`queuePackage enforces the confirm gate...`、`the exported bundle carries the packaged copy...`（media 侧同名导出测试与 `zipAvailable` 一并删）。
 - 改写：store 主流程测试改为「packaging 即终态」，断言 `completedStages` 恰好 8 项；workspace 边界测试改断言 approval/queue 现为 `SPOKEN_VIDEO_INVALID_INPUT`（阶段名不存在）；media 侧 approval 提交断言同步改为 `INVALID_INPUT`；`listItems` 测试改为「视频货架」语义（packaging 存在即就绪、不含 approval/queue、未过 qc 的项目不上架）；重启恢复测试改用 `task()` 查询。
-- 新增：`a project that never reached QC stays off the publish shelf`；`regenerateCover reuses a hand-edited prompt for one direction and keeps the copy intact`（含未启用生图/无 packaging/方向非法三种拒绝、只请求单方向尺寸 `1280*720`、文案与另一方向封面保持原样、revision 冲突拒绝）；`regenerateCover failure lands in coverErrors and leaves the artifact untouched`。
+- 新增：`a project that never reached QC stays off the publish shelf`；`regenerateCover reuses a hand-edited prompt for one direction and keeps the copy intact`（含未启用生图/无 packaging/方向非法三种拒绝、只请求单方向尺寸 `1280*960`、文案与另一方向封面保持原样、revision 冲突拒绝）；`regenerateCover failure lands in coverErrors and leaves the artifact untouched`。
 - 新增前端契约测试 `publish page is a flat video shelf with one lifecycle drawer and no release gates`：断言无 `sv-split`/moreDrawer/summaryDrawer、有 `sv-pb-shelf` 与分页、视频懒加载走 `readPublishAsset(kind:'video')`、自动触发用 `autoTriggered`、按提示词生图 RPC 参数正确且 dirty 时先保存、并显式反证「人工批准/加入发布队列/生成发布包/下载发布包/`stage:'approval'`/`stage:'queue'`/`exportPublishPackage`/`readExport`/`queuePackage`/`listPublishTasks`/`destination`」均不出现。
 - 既有前端契约测试中 `VideoPreviewPageV2` 的段边界由 `PublishQueuePageV3` 改为 `const PUBLISH_STATE_LABEL`。
 - `package.json` 的 `check` 脚本补上此前遗漏的 `spoken-video-publish.mjs` 与 `spoken-video-publish-host.mjs` 语法检查（25 号实施时的遗漏）。
@@ -82,7 +82,7 @@
 
 ## 7. 已知边界与遗留
 
-- **浏览器实机验收未做**：需重启工作台（旧进程加载的是旧代码快照）并重新「加载」能力包，`lwb/local/packs.json` 里的菜单快照才会刷新为「发布」。重点验收：卡片播放（首次点击拉字节的延迟）、自动触发生成、按提示词生图（需配置百炼或 SciTiger Key）、上传封面、重新生成发布信息的覆盖确认、分页与已归档项目展示。
+- **浏览器实机验收未做**：需重启工作台（旧进程加载的是旧代码快照）并重新「加载」能力包，`lwb/local/packs.json` 里的菜单快照才会刷新为「发布」。重点验收：卡片播放（首次点击拉字节的延迟）、自动触发生成、按提示词生图（需配置 SciTiger Key）、上传封面、重新生成发布信息的覆盖确认、分页与已归档项目展示。
 - 队列消费端（publish-manager 直连）依旧刻意不做——「永不直发」是权限边界。但本次连**入队这一层审计记录也一并删除了**：发布与否不再留痕在项目状态机里，只有 packaging 工件的 `generatedAt` 与任务文件历史。若日后需要「哪些视频已经发过」的台账，需要重新设计（建议独立于生产状态机的发布记录文件）。
 - `queuePackage` 删除后，`commit` RPC 对 approval/queue 会返回 `SPOKEN_VIDEO_INVALID_INPUT`（阶段名无效），无兼容层。
 - 生图轮询上限仍为 15 分钟/侧；单方向重生任务同样受此约束，超时落 `coverErrors`。

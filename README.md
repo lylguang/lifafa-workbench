@@ -8,14 +8,15 @@
 
 | 能力包 | 说明 |
 |---|---|
-| 口播视频内容创作 | 从信号发现到发布资料的全流程生产 |
+| 口播视频内容创作 | 从信号发现到发布资料的全流程生产（通用赛道演播室） |
+| 情感故事号 | 面向抖音 30-40 岁女性受众的情感故事生产线：与口播包同一套管线、换赛道焊点，反塑料感写稿闸门 + 双闸门质检，详见[情感故事号能力包](docs/39-story-account-pack.md)。做知识口播用口播包，做情感故事用本包，勿当两条独立生产线重复安装 |
 | 发布与账号管理 | 平台账号（扫码登录）与作品自动投递：用本机 Chrome 的真实登录态，默认停在发布前确认，全程截图留证 |
 | 白板手绘动画 | 把 SRT 字幕转成白板手绘动画并导出 MP4 |
 | 对标拆解 | 对标账号、爆款内容 AI 拆解与方法论库 |
 
 本仓库源自「老傅工作台」（[ScarecrowFu/dsh-laofu-workbench](https://github.com/ScarecrowFu/dsh-laofu-workbench)），并在能力包与运行层做了系统性生产增强——音画同步、云端配音、定时任务音色预设、稳定性与 Windows 适配等，逐项根因分析与改动清单见[本地增强说明](docs/36-local-enhancements.md)，要点速览见[下文](#相对上游的升级点)。
 
-> 当前为开发预览版，面向本机单用户使用。主要验证环境为 macOS；Linux / Windows 的完整安装与媒体制作流程尚未在本文中提供验证承诺。运行时锁定 DSH `dsh-v0.1.6-alpha.1`，具体版本以 [UPSTREAM.lock.json](lwb/UPSTREAM.lock.json) 为准。
+> 当前为开发预览版，面向本机单用户使用。**生产验证环境为 Windows**（双击脚本启动，交付包随附 Node 与 FFmpeg，运行细节见下文「Windows 运行要点」）；macOS / Linux 可按通用 npm 流程运行，但未做交付级验证。运行时锁定 DSH `dsh-v0.1.6-alpha.1`，具体版本以 [UPSTREAM.lock.json](lwb/UPSTREAM.lock.json) 为准。
 
 ## 工作台与场景能力包
 
@@ -43,7 +44,7 @@
 | 信号 | 采集内置公开来源和 AI 内容日报，查看与筛选素材 |
 | 选题 | 按账号、渠道与选题角度生成候选，加入待写稿 |
 | 写稿 | 起稿、编辑、润色与稿件检查；启动写稿前确认任务 |
-| 配音 / 字幕 | 使用百炼或 SciTiger 生成配音，默认同时生成字幕 |
+| 配音 / 字幕 | 使用 SciTiger 生成配音，默认同时生成字幕 |
 | 视频 / 预览 | DSH 创作 Agent 编写 Remotion 视频，通过技术质检和独立审片后展示成片 |
 | 发布资料 | 生成、编辑标题、文案、标签和封面，预览及下载产物 |
 | 内容安排 | 在服务运行时按计划执行创作流程，查看每轮记录 |
@@ -76,9 +77,9 @@
 ### 环境准备
 
 - Git。
-- Node.js `^22.19.0 || >=24.0.0`，建议使用 Node.js 22 LTS 的最新补丁版本。
-- npm、Corepack，以及本机 C/C++ 编译工具和开发头文件。macOS 可安装 Xcode Command Line Tools。
-- 视频制作另需 `ffmpeg`、`ffprobe` 和 Chrome/Chromium 渲染浏览器。
+- Node.js `^22.19.0 || >=24.0.0`，建议使用 Node.js 22 LTS 的最新补丁版本。**Windows 交付包已随附 Node 与 FFmpeg，客户机无需安装。**
+- npm、Corepack，以及本机 C/C++ 编译工具和开发头文件（Windows 安装 Visual Studio Build Tools）。
+- 视频制作另需 `ffmpeg`、`ffprobe` 和渲染浏览器（Windows 下启动脚本自动使用包内 chrome-headless-shell，无需自行下载）。
 
 首次安装需要访问 GitHub、npm 注册表及上游构建所需资源。根项目使用 npm 和 `package-lock.json`；`setup` 脚本进入 DSH 目录后通过 Corepack 使用上游锁定的 pnpm。根目录的 `packageManager` 字段不改变下面的 npm 安装流程。
 
@@ -87,6 +88,20 @@
 ```bash
 git clone https://github.com/lylguang/lifafa-workbench.git
 cd lifafa-workbench
+```
+
+### Windows 运行要点
+
+本仓库在 Windows 上生产运行，推荐流程：
+
+1. **启动**：双击项目根目录的 `启动工作台.cmd`（交付包内同名脚本在包根目录）。脚本会：把随包的 Node 与 FFmpeg 置到 PATH 最前 → 运行 `设置渲染暂存盘.ps1` 自动选择非系统盘的渲染暂存目录并把 TEMP/TMP 重定向过去 → 检测 4173 端口已有实例时直接提示复用 → 需要时拉起本地媒体桥接（8199）→ 用包内 `浏览器\chrome-headless-shell-win64\` 作为渲染浏览器（实测比系统 Chrome 快 5.6 倍）。
+2. **访问**：脚本启动服务后，把带鉴权 token 的 `http://127.0.0.1:4173/?token=...` 地址同时打印在终端并写入暂存目录下的 `workbench-url.txt`。新开浏览器时双击 `打开工作台.cmd`（读取该文件直接打开）；token 每次重启都会变化，旧地址失效属正常。
+3. **TEMP/TMP 重定向**：Remotion 打包、Chrome profile 与渲染工作区都跟随 TEMP，一次渲染可能写数百 MB。启动链路自动选择可用空间最大的非系统盘（≥ 20G，无则退回 LOCALAPPDATA），避免写满系统盘；可用 `LWB_SCRATCH_ROOT` 显式钉住。
+4. **捆绑运行时**：交付包在「运行环境/」内携带 Node（约 105M）与 FFmpeg（约 197M），客户机无需预装；系统已装的同名程序作为后备。
+
+从源码运行的等效命令：
+
+```bat
 npm ci
 npm run setup
 npm run dev -- --port 4173
@@ -94,7 +109,7 @@ npm run dev -- --port 4173
 
 `npm run setup` 获取并构建锁定版本的 DSH，放在被 Git 忽略的 `vendor/` 中。首次构建可能耗时较长。若提示缺少 Corepack 或编译工具，见[安装与故障排查](docs/troubleshooting.md)。
 
-启动会自动打开浏览器。需要手动打开时运行 `npm run dev -- --no-open --port 4173`，使用终端输出的完整 `http://127.0.0.1:4173/?token=...` 地址完成首次鉴权。不要分享访问令牌。
+启动会自动打开浏览器。需要手动打开时运行 `npm run dev -- --no-open --port 4173`，使用终端输出的完整 `http://127.0.0.1:4173/?token=...` 地址完成首次鉴权。不要分享访问令牌。Windows 下源码方式运行注意：临时目录建议也指向非系统盘（`LWB_SCRATCH_ROOT`），渲染浏览器可用 `LWB_REMOTION_BROWSER_EXECUTABLE` 指定本机 Chrome/Edge。
 
 ### 首次使用
 
@@ -125,7 +140,7 @@ npm run publisher:install
 启动器**不会自动加载 `.env`**。[.env.example](.env.example) 仅用于说明可选变量；在启动终端中用 `export` 设置，例如：
 
 ```bash
-export LWB_REMOTION_BROWSER_EXECUTABLE="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+export LWB_REMOTION_BROWSER_EXECUTABLE="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"  # macOS 示例；Windows 传 chrome.exe / msedge.exe 的绝对路径
 npm run dev -- --port 4173
 ```
 

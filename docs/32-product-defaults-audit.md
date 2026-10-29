@@ -35,9 +35,9 @@
 |---|---|---|
 | 信号来源 | 内置 17 个来源，均默认启用：百度、头条、抖音、B站、知乎、微博、Hugging Face、36氪、InfoQ、IT之家、极客公园、爱范儿、少数派、掘金、GitHub Trending、Hacker News、SciTiger AI 内容日报。间隔为 30–360 分钟，普通源单次最多 20 条，AI 日报最多 200 条。 | `spoken-video-signal-adapters.mjs` |
 | 自动采集 | 包加载后启动调度器，每 30 秒检查到期来源；业务 `data` 目录存在时开始按来源设置采集。首次信号配置为空时使用上述默认来源。卸载包后停止。 | `spoken-video-content-store.mjs`、`index.mjs` |
-| 配音与识别 | 默认渠道为百炼，另支持 SciTiger。预设百炼/SciTiger 接口地址；TTS 默认 `qwen3-tts-flash`，ASR 默认 `qwen3-asr-flash-realtime`，复刻 TTS 默认 `qwen3-tts-vc-2026-01-22`，声音注册默认 `qwen-voice-enrollment`。环境变量可覆盖接口及模型。 | `index.mjs`、`spoken-video-media.mjs` |
-| 音色 | 附带 `Tiffy - 自信` 参考音频；系统/参考音色流程使用该素材。直接使用百炼默认音色时有 `Cherry` 回退；默认语速与音量均为 1。 | `spoken-video-media.mjs`、`assets/voices/tiffy-confident.mp3` |
-| 封面生图 | 默认关闭；渠道默认百炼，另支持 SciTiger；启用且未指定模型时回退到 `wan2.7-image`。 | `index.mjs`、`spoken-video-publish.mjs` |
+| 配音与识别 | 默认渠道为 SciTiger。预设 SciTiger 接口地址；TTS 默认 `qwen3-tts-flash`，ASR 默认 `qwen3-asr-flash-realtime`，复刻 TTS 默认 `qwen3-tts-vc-2026-01-22`，声音注册默认 `qwen-voice-enrollment`。环境变量可覆盖接口及模型。 | `index.mjs`、`spoken-video-media.mjs` |
+| 音色 | 附带 `Tiffy - 自信` 参考音频；系统/参考音色流程使用该素材。直接使用默认音色时有 `Cherry` 回退；默认语速与音量均为 1。 | `spoken-video-media.mjs`、`assets/voices/tiffy-confident.mp3` |
+| 封面生图 | 默认关闭；渠道默认 SciTiger；启用且未指定模型时回退到 `wan2.7-image`。 | `index.mjs`、`spoken-video-publish.mjs` |
 | 写稿与视频 | 默认中篇稿件（1000–2499 字）；视频默认 Remotion、横屏、开启字幕、不选 BGM。选择 BGM 后默认音量 0.12。视频 Agent 最多允许两次输出上限续写。 | `spoken-video-script.mjs`、`spoken-video-media.mjs`、`index.mjs` |
 | 内容安排 | 初始无任务。新建表单默认周一至周五 21:00、每轮 1 条、竖屏、中篇、字幕开启、执行到发布资料；保存后才成为任务，创建请求未指定开关时默认为启用。 | `client.js` 的 `emptyScheduleForm()`、`spoken-video-schedule.mjs` |
 | 初始业务数据 | 无预置账号定位、项目、稿件、成片、内容安排或历史运行记录；信号源定义和参考音色属于随包提供的资源。 | `spoken-video-content-store.mjs`、`spoken-video-schedule.mjs`、`spoken-video-store.mjs` |
