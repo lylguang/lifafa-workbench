@@ -12,6 +12,7 @@ import { AnalyticsStore } from './analytics-store.mjs'
 import { AnalyticsCollector, describeFailure } from './analytics-collector.mjs'
 import { AnalyticsScheduler } from './analytics-scheduler.mjs'
 import bilibili from './analytics-bilibili.mjs'
+import douyin from './analytics-douyin.mjs'
 import { bindByTitle, normalizeManualBinding } from './analytics-bind.mjs'
 
 export class AnalyticsHost extends AnalyticsLocalSource {
@@ -25,7 +26,13 @@ export class AnalyticsHost extends AnalyticsLocalSource {
     this.publisher = publisher
     this.now = now
     this.store = new AnalyticsStore({ dataRoot: join(workspacePath, 'data', 'metrics') })
-    this.adapters = new Map([[bilibili.id, bilibili]])
+    // 采集 adapter 按平台注册。抖音是主力账号所在平台（2026-10-29 接入），
+    // 微信视频号暂无稳定数据页，暂不注册——未注册的平台会被采集器如实报成
+    // ANALYTICS_COLLECTOR_UNSUPPORTED，而不是假装采到 0。
+    this.adapters = new Map([
+      [bilibili.id, bilibili],
+      [douyin.id, douyin],
+    ])
     this.background = typeof background === 'function' ? background : (work) => { void work() }
     this.collector = new AnalyticsCollector({ publisher, store: this.store, adapters: this.adapters, now })
     // 定时采集。排期只在宿主启动时开启，卸载时由 stop() 撤销（见 index.mjs 的 dispose）。

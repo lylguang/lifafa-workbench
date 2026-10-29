@@ -186,6 +186,28 @@ export class AnalyticsCollector {
             store: this.store,
             budget: { timeoutMs, remainingMs: remaining },
           })
+          // 内容级指标（每条作品的播放/点赞/评论）在同一个租约里顺手采掉。
+          //
+          // 2026-10-29 修：adapter 契约里声明了 collectContents，但采集器从来没调过它——
+          // 于是 bilibili adapter 的 collectContents 一直是死代码，看板的播放/互动
+          // 永远是 null，用户看到的是「采集成功但没数据」。
+          // 复用同一个 page 实例，不额外开浏览器、不重复过登录态。
+          if (typeof adapter.collectContents === 'function') {
+            try {
+              await adapter.collectContents(lease, {
+                runId: run.runId,
+                contentIds,
+                store: this.store,
+                budget: { timeoutMs, remainingMs: remaining },
+              })
+            } catch (error) {
+              // 账号级已经成功，作品级失败不该把整次采集判死：记一条可读失败，
+              // 保留已采到的账号快照（部分数据好过没有，且失败原因可见）。
+              const failure = describeFailure(error)
+              run.failures.push({ accountId: account.id, code: failure.code, message: `作品数据：${failure.message}` })
+              await this.store.saveRun(publicRun(run)).catch(() => {})
+            }
+          }
         }, { timeoutMs, headless: true })
         return
       } catch (error) {
