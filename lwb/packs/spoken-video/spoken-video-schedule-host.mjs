@@ -963,7 +963,20 @@ export class SpokenVideoScheduleHost {
       }).catch(() => {})
       await this.#settleAlert(paths, runId)
     } finally {
-      if (handle) await handle.dispose().catch(() => {})
+      // 会话收尾必须有上限。
+      //
+      // 2026-10-29 实测：上一轮已落终态（记录里是 completed），但本轮的
+      // handle.dispose()（DSH Agent 会话停止）永不落定，#execute 卡在自己的
+      // finally 里，startRun 的 active 条目删不掉——之后每一次「立即执行」
+      // 都被 SPOKEN_VIDEO_SCHEDULE_BUSY 挡住，定时任务看起来像坏了。
+      // 收尾属于清理动作：30 秒内没停干净就放弃等待，把执行槽让出来。
+      // Agent 会话本身没有泄漏风险（下一轮 resume 的是同一个固定会话 id）。
+      if (handle) {
+        await Promise.race([
+          handle.dispose().catch(() => {}),
+          new Promise((resolve) => setTimeout(resolve, 30_000)),
+        ]).catch(() => {})
+      }
     }
   }
 
