@@ -152,3 +152,42 @@ test('分页按 offset/limit 切片并回传总数，desc 从最新一页开始'
   assert.deepEqual(second.items.map((row) => row.contentId), ['c3', 'c2'])
   assert.deepEqual({ total: first.total, offset: first.offset, limit: first.limit }, { total: 5, offset: 0, limit: 2 })
 })
+
+// ── 诊断列与规则式诊断 ─────────────────────────────────────────────────────
+import { percentOrNull, durationSecondsOrNull, diagnoseContent } from '../analytics-metrics.mjs'
+
+test('percentOrNull：百分比字符串 / 小数形态 / 非法值', () => {
+  assert.equal(percentOrNull('12.34%'), 12.34)
+  assert.equal(percentOrNull(0.1234), 12.34)
+  assert.equal(percentOrNull(45.6), 45.6)
+  assert.equal(percentOrNull('暂无'), null)
+  assert.equal(percentOrNull(-1), null)
+})
+
+test('durationSecondsOrNull：时分秒 / 秒 / 纯数字', () => {
+  assert.equal(durationSecondsOrNull('00:00:42'), 42)
+  assert.equal(durationSecondsOrNull('01:05'), 65)
+  assert.equal(durationSecondsOrNull('42秒'), 42)
+  assert.equal(durationSecondsOrNull(42.4), 42)
+  assert.equal(durationSecondsOrNull('待发布'), null)
+})
+
+test('diagnoseContent：完播率显著低于中位数要给出可执行建议', () => {
+  const peers = [1, 2, 3, 4, 5, 6].map((i) => ({ platform: 'douyin', contentId: `p${i}`, metrics: { views: 100, completionRate: 20 + i } }))
+  const weak = { platform: 'douyin', metrics: { views: 100, completionRate: 8 } }
+  const diagnosis = diagnoseContent(weak, peers)
+  assert.equal(diagnosis.level, 'warn')
+  assert.match(diagnosis.messages[0], /完播率 8% 低于账号中位数/, '要点名你的值与基准值')
+  assert.match(diagnosis.messages[0], /压缩开头/, '建议必须可执行')
+})
+
+test('diagnoseContent：播放量太小不下结论，数据不足只提示积累', () => {
+  const small = { platform: 'douyin', metrics: { views: 2, completionRate: 5 } }
+  assert.deepEqual(diagnoseContent(small, [{ platform: 'douyin', metrics: { views: 100, completionRate: 30 } }]), {
+    level: 'info', messages: ['播放量还小，先攒数据；满 5 次播放后给出诊断。'],
+  })
+  const lonely = { platform: 'douyin', metrics: { views: 100, completionRate: 5 } }
+  const diagnosis = diagnoseContent(lonely, [])
+  assert.equal(diagnosis.level, 'info')
+  assert.match(diagnosis.messages[0], /数据积累中/)
+})

@@ -22,6 +22,7 @@ import {
   publishSuccessRate,
   sortAndPage,
   countOrNull,
+  diagnoseContent,
   sumMetrics,
   withinRange,
 } from './analytics-metrics.mjs'
@@ -197,6 +198,48 @@ export class AnalyticsLocalSource {
   }
 
   /**
+   * 周对比：近 7 天 vs 前 7 天。回答「比上周怎么样」。
+   *
+   * 为什么不用 LLM：这是确定性聚合，数字必须可复现；AI 解读放在对话里做。
+   * 每个指标带 delta（百分比变化），基线为 0/无数据时 delta 为 null——
+   * 「上周 0 条本周 3 条」无法用百分比表达，直接展示两个数。
+   */
+  async #weeklyCompare(request = {}) {
+    const now = Date.parse(this.now?.() ?? new Date().toISOString())
+    if (!Number.isFinite(now)) return null
+    const day = 24 * 60 * 60 * 1000
+    const slice = (from, to) => ({
+      from: new Date(now - from * day).toISOString(),
+      to: new Date(now - to * day).toISOString(),
+    })
+    const summarize = async (window) => {
+      const result = await this.summary({ ...request, ...window }).catch(() => null)
+      if (!result) return null
+      const best = [...(result.series || [])].sort((left, right) => (right.views ?? -1) - (left.views ?? -1))[0] || null
+      return {
+        views: result.kpis.views,
+        likes: result.kpis.likes,
+        comments: result.kpis.comments,
+        published: result.kpis.published.count,
+        successRate: result.kpis.published.successRate,
+        bestDate: best && (best.views ?? 0) > 0 ? best.date : null,
+      }
+    }
+    const [thisWeek, lastWeek] = await Promise.all([slice(0, 7), slice(7, 14)].map(summarize))
+    const delta = (current, previous) => {
+      if (current === null || previous === null) return null
+      if (!previous) return null
+      return +(((current - previous) / previous) * 100).toFixed(1)
+    }
+    return {
+      thisWeek,
+      lastWeek,
+      viewsDelta: delta(thisWeek?.views ?? null, lastWeek?.views ?? null),
+      publishedDelta: delta(thisWeek?.published ?? null, lastWeek?.published ?? null),
+    }
+  }
+
+  /**
    * 把 store 里按日的作品指标点位按日期聚合成 {date → {views,likes,comments}}。
    * 只聚合**有值**的点位；某天没有任何点位就是缺口（前端画缺口，不画 0）。
    */
@@ -261,6 +304,9 @@ export class AnalyticsLocalSource {
     // 采集上线后忘了跟进，导致看板「总播放」永远是「—」。
     const contentSums = sumMetrics(rows)
     const dailyContent = await this.#dailyContentMetrics(range)
+    // 周对比：本周（近 7 天）vs 上一周，回答「比上周怎么样」。
+    // 不用 LLM，纯聚合——确定性数字先落地，AI 解读交给对话里的 agent。
+    const week = await this.#weeklyCompare(request)
 
     return {
       range: { from: range.from, to: range.to },
@@ -281,6 +327,7 @@ export class AnalyticsLocalSource {
         // 在途的 queued/running/awaiting-confirm 不参与，免得把比率压成一个假象。
         published: { count: attempts.length, successRate: publishSuccessRate(attempts) },
       },
+      weekly: week,
       // 契约 §4.2-1 的 series 是逐日的宽表行。published 一直有真数据；
       // views/likes/comments 在采集上线后按「当天有采集点才有值」补进宽表，
       // 保留「缺口 = 当天没采」的语义（前端画缺口，不画 0）。
@@ -348,6 +395,11 @@ export class AnalyticsLocalSource {
     const rows = publishedJobs
       .map((job) => this.#contentRow(job, stored.get(job.id)))
       .filter((row) => (request?.bound === undefined ? true : row.bound === request.bound))
+    // 单作品诊断：拿诊断列与同账号其他作品的中位数比（规则式，可解释、零成本）。
+    // 播放量太小或账号样本不足时给 info 提示，绝不编原因。
+    for (const row of rows) {
+      if (row.metrics) row.diagnosis = diagnoseContent(row, rows)
+    }
     const page = sortAndPage(rows, request)
     return { ...page, generatedAt, stale: await this.#stale(), available: jobs.available, reason: jobs.reason }
   }

@@ -21,6 +21,7 @@
 
 import { readFile } from 'node:fs/promises'
 import { normalizeTitle } from './analytics-bind.mjs'
+import { percentOrNull, durationSecondsOrNull } from './analytics-metrics.mjs'
 
 const ORIGIN = 'https://creator.douyin.com'
 /**
@@ -386,6 +387,11 @@ export function worksFromRows(rows) {
     shares: find(['分享', '转发']),
     favorites: find(['收藏']),
     followers: find(['涨粉', '吸粉']),
+    completion: find(['完播率']),
+    fiveSecond: find(['5s完播', '5秒完播']),
+    coverClick: find(['封面点击']),
+    bounce: find(['跳出']),
+    avgPlay: find(['平均播放时长']),
     link: find(['链接', '地址', 'URL', 'url']),
   }
   if (columns.title < 0) return { works: [], header }
@@ -401,7 +407,11 @@ export function worksFromRows(rows) {
       shares: parseCount(cell(columns.shares)),
       favorites: parseCount(cell(columns.favorites)),
       followersGained: parseCount(cell(columns.followers)),
-      completionRate: null,
+      completionRate: percentOrNull(cell(columns.completion)),
+      fiveSecondRate: percentOrNull(cell(columns.fiveSecond)),
+      coverClickRate: percentOrNull(cell(columns.coverClick)),
+      twoSecondBounceRate: percentOrNull(cell(columns.bounce)),
+      avgPlaySeconds: durationSecondsOrNull(cell(columns.avgPlay)),
     }
     const link = cell(columns.link) ? String(cell(columns.link)).trim() : null
     works.push({ title, metrics, stats: '', remoteId: videoIdFromHref(link), remoteUrl: link || null })

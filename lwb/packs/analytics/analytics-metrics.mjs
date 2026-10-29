@@ -11,6 +11,21 @@
 /** 可用的内容级指标。P1 没有任何采集源，它们恒为 null；P2 起由采集器填充。 */
 export const CONTENT_METRICS = Object.freeze(['views', 'likes', 'comments', 'shares', 'favorites', 'followersGained', 'completionRate'])
 
+/**
+ * 诊断列（抖音「导出数据」文件自带，2026-10-29 接入）。
+ *
+ * 这些是平台官方给的「这条视频哪里掉了人」的信号：
+ * 完播率低 → 内容铺垫太长；封面点击率低 → 封面/标题问题；
+ * 2s跳出率高 → 钩子不够强。百分比统一存 0–100 的数字。
+ */
+export const DIAGNOSTIC_METRICS = Object.freeze({
+  completionRate: '完播率',
+  fiveSecondRate: '5s完播率',
+  coverClickRate: '封面点击率',
+  twoSecondBounceRate: '2s跳出率',
+  avgPlaySeconds: '平均播放时长（秒）',
+})
+
 /** 分母固定为 views 的那批指标：views 为 null 时它们一律 null，不参与任何求和。 */
 export const VIEWS_BACKED_METRICS = Object.freeze(['likes', 'comments', 'shares', 'favorites'])
 
@@ -41,6 +56,46 @@ export function countOrNull(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null
   if (value < 0) return null
   return Math.round(value)
+}
+
+/**
+ * 百分比字段解析："12.34%" → 12.34；0.1234（≤1 的小数，平台常见的小数形态）
+ * → 12.34；解析不出来返回 null。统一存 0–100 的数字。
+ */
+export function percentOrNull(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (value < 0) return null
+    return value <= 1 ? +(value * 100).toFixed(2) : +value.toFixed(2)
+  }
+  const text = String(value ?? '').trim()
+  const match = /^([\d.]+)\s*%$/.exec(text)
+  if (match) {
+    const number = Number.parseFloat(match[1])
+    return Number.isFinite(number) && number >= 0 ? +number.toFixed(2) : null
+  }
+  const bare = Number.parseFloat(text)
+  if (Number.isFinite(bare) && bare >= 0) return bare <= 1 ? +(bare * 100).toFixed(2) : +bare.toFixed(2)
+  return null
+}
+
+/**
+ * 时长解析："00:00:42" / "01:05" / "42秒" / 42 → 秒数；解析不出来返回 null。
+ * 抖音导出的「平均播放时长」常见这几种形态。
+ */
+export function durationSecondsOrNull(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return Math.round(value)
+  const text = String(value ?? '').trim()
+  if (!text) return null
+  const parts = /^(\d{1,2}):([0-5]?\d)(?::([0-5]?\d))?$/.exec(text)
+  if (parts) {
+    const seconds = parts[3] !== undefined
+      ? Number(parts[1]) * 3600 + Number(parts[2]) * 60 + Number(parts[3])
+      : Number(parts[1]) * 60 + Number(parts[2])
+    return Number.isFinite(seconds) ? seconds : null
+  }
+  const seconds = /^([\d.]+)\s*(?:秒|s)?$/i.exec(text)
+  if (seconds) return Math.round(Number(seconds[1]))
+  return null
 }
 
 /**
@@ -316,4 +371,64 @@ export function sortAndPage(items, { sort, order = 'desc', offset = 0, limit = 2
   const start = Math.max(0, Number.isFinite(offset) ? Math.trunc(offset) : 0)
   const size = Number.isFinite(limit) ? Math.max(0, Math.trunc(limit)) : 20
   return { items: copy.slice(start, start + size), total: copy.length, offset: start, limit: size }
+}
+
+/**
+ * 单作品诊断（规则式，零成本、可解释）。
+ *
+ * 思路：拿本条作品的诊断列与**账号内其他作品的_tokens_中位数**比，
+ * 显著偏离才说话——每条 diagnosis 都说清「你的是多少、账号基准是多少、该做什么」。
+ *
+ * 为什么不用 LLM：这些规则是确定性的，LLM 反而会编原因。周报里的
+ * 「为什么」交给模型，这里的「是什么」必须可复现。
+ *
+ * @param {object} content - 带 metrics 的作品行
+ * @param {Array} peers - 同账号的其他作品行（用于算中位数基准）
+ * @returns {{level:'good'|'warn'|'info', messages:string[]}|null} 数据不足时返回 null
+ */
+export function diagnoseContent(content, peers = []) {
+  const metrics = content?.metrics || {}
+  const MIN_WORKS = 3
+  const samePlatform = (peers || []).filter((row) => row.platform === content?.platform && row.contentId !== content?.contentId)
+  const rates = samePlatform.filter((row) => finiteOrNull(row?.metrics?.completionRate) !== null)
+  // 播放量太小不下结论：一两次播放的完播率是噪声。
+  if ((finiteOrNull(metrics.views) ?? 0) < 5) {
+    return { level: 'info', messages: ['播放量还小，先攒数据；满 5 次播放后给出诊断。'] }
+  }
+  if (rates.length < MIN_WORKS) {
+    return { level: 'info', messages: [`数据积累中（账号内已有 ${rates.length} 条带完播率的作品，满 ${MIN_WORKS} 条后开始对比诊断）。`] }
+  }
+  const medianOf = (values) => {
+    const sorted = [...values].sort((left, right) => left - right)
+    const middle = Math.floor(sorted.length / 2)
+    return sorted.length % 2 ? sorted[middle] : +((sorted[middle - 1] + sorted[middle]) / 2).toFixed(2)
+  }
+  const completionMedian = medianOf(rates.map((row) => row.metrics.completionRate))
+  const messages = []
+  let level = 'good'
+  const completion = finiteOrNull(metrics.completionRate)
+  if (completion !== null) {
+    if (completion < completionMedian * 0.7) {
+      level = 'warn'
+      messages.push(`完播率 ${completion}% 低于账号中位数 ${completionMedian}%：观众中途流失多，优先压缩开头 20 秒的铺垫，把结论或冲突提前。`)
+    } else if (completion > completionMedian * 1.2) {
+      messages.push(`完播率 ${completion}% 高于账号中位数 ${completionMedian}%：这个结构跑通了，同类选题可以复用。`)
+    }
+  }
+  const bounce = finiteOrNull(metrics.twoSecondBounceRate)
+  const bounceMedian = medianOf(samePlatform.filter((row) => finiteOrNull(row?.metrics?.twoSecondBounceRate) !== null).map((row) => row.metrics.twoSecondBounceRate))
+  if (bounce !== null && bounceMedian !== null && bounce > bounceMedian * 1.3) {
+    level = 'warn'
+    messages.push(`2s跳出率 ${bounce}% 高于账号中位数 ${bounceMedian}%：前两秒的钩子没抓住人，换开头第一句或把冲突画面提前。`)
+  }
+  const coverClick = finiteOrNull(metrics.coverClickRate)
+  const coverMedian = medianOf(samePlatform.filter((row) => finiteOrNull(row?.metrics?.coverClickRate) !== null).map((row) => row.metrics.coverClickRate))
+  if (coverClick !== null && coverMedian !== null && coverClick < coverMedian * 0.7) {
+    level = level === 'warn' ? 'warn' : 'info'
+    messages.push(`封面点击率 ${coverClick}% 低于账号中位数 ${coverMedian}%：试一版更直给文字的封面，或把标题里的数字挪到封面上。`)
+  }
+  if (!messages.length) {
+    messages.push('各项指标与账号中位数接近，保持当前结构。')
+  }
+  return { level, messages }
 }

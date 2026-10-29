@@ -16,7 +16,7 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { localDateKey } from './analytics-metrics.mjs'
+import { durationSecondsOrNull, finiteOrNull, localDateKey, percentOrNull } from './analytics-metrics.mjs'
 
 /**
  * Windows：rename 的目标只要被任意句柄打开就会 EPERM，而工作台会轮询读取这些
@@ -100,7 +100,12 @@ function contentMetricsRecord(value) {
     shares: countOrNull(metrics.shares),
     favorites: countOrNull(metrics.favorites),
     followersGained: countOrNull(metrics.followersGained),
-    completionRate: typeof metrics.completionRate === 'number' && Number.isFinite(metrics.completionRate) ? metrics.completionRate : null,
+    completionRate: percentOrNull(metrics.completionRate),
+    // 诊断列（抖音导出文件自带）。percent 统一 0–100，时长统一秒。
+    fiveSecondRate: percentOrNull(metrics.fiveSecondRate),
+    coverClickRate: percentOrNull(metrics.coverClickRate),
+    twoSecondBounceRate: percentOrNull(metrics.twoSecondBounceRate),
+    avgPlaySeconds: durationSecondsOrNull(metrics.avgPlaySeconds),
   }
 }
 

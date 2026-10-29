@@ -145,6 +145,21 @@ window.__ModuleLoader__.load({
       .an-card { display:grid; gap:9px; padding:14px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-surface); }
       .an-kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(168px,1fr)); gap:10px; }
       .an-kpi { display:grid; gap:4px; padding:13px 14px; border:1px solid var(--lwb-line); border-radius:9px; background:var(--lwb-surface); }
+      .an-weekly { display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; padding:11px 13px; border:1px dashed var(--lwb-line); border-radius:9px; }
+      .an-weekly-title { flex:1 1 100%; color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); font-weight:700; }
+      .an-weekly-cell { display:grid; gap:2px; min-width:150px; }
+      .an-weekly-label { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); }
+      .an-weekly-value { color:var(--lwb-ink); font-size:var(--lwb-text-sm,13px); font-weight:700; }
+      .an-weekly-delta { font-size:var(--lwb-text-xs,12px); font-weight:700; }
+      .an-weekly-delta.up { color:var(--lwb-green,#20825c); }
+      .an-weekly-delta.down { color:#c25454; }
+      .an-diagnosis { display:grid; gap:5px; margin-top:9px; padding:9px 11px; border-radius:8px; font-size:var(--lwb-text-sm,13px); line-height:1.55; }
+      .an-diagnosis-warn { border:1px solid #ecd39b; background:rgba(217,148,39,.08); }
+      .an-diagnosis-good { border:1px solid var(--lwb-green,#20825c); background:rgba(32,130,92,.07); }
+      .an-diagnosis-info { border:1px dashed var(--lwb-line); background:transparent; }
+      .an-diagnosis-tag { font-weight:700; }
+      .an-diagnosis-body { display:grid; gap:3px; }
+      .an-diagnosis-body p { margin:0; }
       .an-kpi-label { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); }
       .an-kpi-value { font-size:26px; font-weight:800; letter-spacing:-.01em; line-height:1.15; }
       .an-kpi-hint { color:var(--lwb-muted); font-size:var(--lwb-text-xs,12px); line-height:1.5; }
@@ -465,12 +480,32 @@ window.__ModuleLoader__.load({
         kpis ? h('section', { className: 'an-section' },
           h('div', { className: 'an-section-head' }, h('h3', null, '关键指标'), h('span', null, cover.label)),
           h('div', { className: 'an-kpis' },
-            h('div', { className: 'an-kpi' }, h('span', { className: 'an-kpi-label' }, '总播放'), h('span', { className: 'an-kpi-value' }, displayCount(kpis.views)), h('span', { className: 'an-kpi-hint' }, '需开启平台采集')),
+            h('div', { className: 'an-kpi' }, h('span', { className: 'an-kpi-label' }, '总播放'), h('span', { className: 'an-kpi-value' }, displayCount(kpis.views)), h('span', { className: 'an-kpi-hint' }, kpis.views === null ? '需开启平台采集' : '已采集作品的播放合计')),
             h('div', { className: 'an-kpi' }, h('span', { className: 'an-kpi-label' }, '净增粉'), h('span', { className: 'an-kpi-value' }, displayCount(kpis.followers && kpis.followers.netGain)), h('span', { className: 'an-kpi-hint' }, kpis.followers && kpis.followers.netGain === null ? '基线不完整，需要两次快照' : '区间快照差值')),
             h('div', { className: 'an-kpi' }, h('span', { className: 'an-kpi-label' }, '发布数'), h('span', { className: 'an-kpi-value' }, displayCount(kpis.published && kpis.published.count)), h('span', { className: 'an-kpi-hint' }, `${window_.label}`)),
             h('div', { className: 'an-kpi' }, h('span', { className: 'an-kpi-label' }, '发布成功率'), h('span', { className: 'an-kpi-value' }, displayRate(publishedRate)), h('span', { className: 'an-kpi-hint' }, '成功发布 ÷ 全部发布任务')),
             h('div', { className: 'an-kpi' }, h('span', { className: 'an-kpi-label' }, '互动率'), h('span', { className: 'an-kpi-value' }, displayRate(kpis.engagementRate)), h('span', { className: 'an-kpi-hint' }, '(赞+评+转+藏) ÷ 播放')),
           ),
+          // 周对比：本周 vs 上周，回答「比上周怎么样」。
+          kpis.views !== null && summary.data && summary.data.weekly
+            ? h('div', { className: 'an-weekly' },
+                (() => {
+                  const week = summary.data.weekly;
+                  if (!week || !week.thisWeek) return null;
+                  const cell = (label, current, previous, delta) => h('div', { className: 'an-weekly-cell' },
+                    h('span', { className: 'an-weekly-label' }, label),
+                    h('span', { className: 'an-weekly-value' }, `${displayCount(current)}（上周 ${displayCount(previous)}）`),
+                    delta === null ? h('span', { className: 'an-weekly-delta' }, '— 基线不足') : h('span', { className: `an-weekly-delta ${delta >= 0 ? 'up' : 'down'}` }, `${delta >= 0 ? '↑' : '↓'} ${Math.abs(delta)}%`),
+                  );
+                  return h(React.Fragment, null,
+                    h('div', { className: 'an-weekly-title' }, '本周 vs 上周'),
+                    cell('播放', week.thisWeek.views, week.lastWeek && week.lastWeek.views, week.viewsDelta),
+                    cell('发布数', week.thisWeek.published, week.lastWeek && week.lastWeek.published, week.publishedDelta),
+                    week.thisWeek.bestDate ? h('div', { className: 'an-weekly-cell' }, h('span', { className: 'an-weekly-label' }, '本周最佳'), h('span', { className: 'an-weekly-value' }, week.thisWeek.bestDate), h('span', { className: 'an-weekly-delta' }, '播放最高的一天')) : null,
+                  );
+                })(),
+              )
+            : null,
         ) : null,
 
         !summary.loading && !summary.data && !summary.error
@@ -649,6 +684,11 @@ window.__ModuleLoader__.load({
                 item.collectedAt ? ` · 采集于 ${formatTime(item.collectedAt)}` : '',
                 item.source ? ` · 来源 ${item.source}` : '',
               ].join('')),
+              // 单作品诊断卡：规则式（确定性、可解释），与账号中位数比。
+              item.diagnosis ? h('div', { className: `an-diagnosis an-diagnosis-${item.diagnosis.level}` },
+                h('span', { className: 'an-diagnosis-tag' }, item.diagnosis.level === 'warn' ? '⚠ 有问题' : item.diagnosis.level === 'good' ? '✓ 表现好' : 'ℹ 数据积累中'),
+                h('div', { className: 'an-diagnosis-body' }, item.diagnosis.messages.map((message, index) => h('p', { key: index }, message))),
+              ) : null,
             )),
           ),
           pageCount > 1 ? h('div', { className: 'an-pager' },
