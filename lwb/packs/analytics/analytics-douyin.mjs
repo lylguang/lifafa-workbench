@@ -196,6 +196,51 @@ async function openDataCenter(page) {
   return false
 }
 
+/**
+ * 从内容管理页读作品列表：标题 + 统计文本 + 作品链接。
+ *
+ * 为什么不用 class 选择器：抖音的 class 带构建哈希，且列表行是深层嵌套的
+ * div，2026-10-29 实测选择器一个都没命中（截图显示 24 个作品明明都在页面上）。
+ * 改用「结构特征」定位，对改版免疫：
+ *  - 统计条 = 同时含「播放/点赞/评论」且没有子元素也含这三个词的最深层节点；
+ *  - 从统计条向上最多 6 层找到含作品链接的容器，取其中最长的一行非统计文本作标题。
+ */
+export async function readWorksFromPage(page) {
+  if (typeof page.evaluate !== 'function') return []
+  try {
+    return await page.evaluate(() => {
+      const STAT = ['播放', '点赞', '评论']
+      const hasStats = (text) => STAT.every((word) => text.includes(word))
+      const nodes = [...document.querySelectorAll('div,li,section,article,tr')]
+      const strips = nodes.filter((el) => {
+        const text = el.innerText || ''
+        if (text.length > 600 || !hasStats(text)) return false
+        return ![...el.children].some((child) => hasStats(child.innerText || ''))
+      })
+      const works = []
+      const seen = new Set()
+      for (const strip of strips) {
+        let row = strip
+        for (let depth = 0; depth < 6 && row.parentElement; depth += 1) {
+          row = row.parentElement
+          if (row.querySelector('a[href*="/video/"]')) break
+        }
+        const link = row.querySelector('a[href*="/video/"]')
+        const lines = (row.innerText || '').split('\n').map((line) => line.trim()).filter(Boolean)
+        const title = lines.find((line) => line.length >= 8 && !hasStats(line)
+          && !/^(已发布|定时发布中|审核中|未通过|仅自己可见|修改|置顶)/u.test(line)) || ''
+        if (!title) continue
+        const key = title + '|' + (link ? link.getAttribute('href') : '')
+        if (seen.has(key)) continue
+        seen.add(key)
+        works.push({ title, stats: strip.innerText || '', href: link ? link.getAttribute('href') : null })
+        if (works.length >= 200) break
+      }
+      return works
+    })
+  } catch { return [] }
+}
+
 async function textOf(page, selectors) {
   const locator = await firstMatch(page, selectors)
   if (!locator) return null
@@ -282,22 +327,18 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
   await page.waitForTimeout(4000)
   await assertLoggedIn(page)
 
-  const rows = await page.locator(SELECTORS.contentRows.join(', ')).all()
-  if (!rows.length) {
-    const evidence = await lease.evidence?.('douyin-content-manage', runId).catch(() => null)
-    throw selectorMissing('抖音作品管理页没有读到作品行（页面结构可能已改版）。', evidence?.relativePath ?? null)
-  }
-
   // 先把整页读成「平台作品列表」：标题 + 作品链接（含 video id）+ 统计文本。
-  const works = []
-  for (const row of rows) {
-    const title = (await row.locator(SELECTORS.rowTitle.join(', ')).first().innerText().catch(() => '')).trim()
-    if (!title) continue
-    const href = await row.locator('a[href*="/video/"]').first().getAttribute('href').catch(() => null)
-    const stats = (await row.locator(SELECTORS.rowStats.join(', ')).first().innerText().catch(() => '')).trim()
-    works.push({ title, stats, remoteId: videoIdFromHref(href), remoteUrl: href ? absoluteUrl(href) : null })
-    if (works.length >= 200) break
+  const rawWorks = await readWorksFromPage(page)
+  if (!rawWorks.length) {
+    const evidence = await lease.evidence?.('douyin-content-manage', runId).catch(() => null)
+    throw selectorMissing(`抖音内容管理页没有读到作品（页面可能改版或仍在加载）。当前页：${page.url()}`, evidence?.relativePath ?? null)
   }
+  const works = rawWorks.map((work) => ({
+    title: work.title,
+    stats: work.stats,
+    remoteId: videoIdFromHref(work.href),
+    remoteUrl: work.href ? absoluteUrl(work.href) : null,
+  }))
 
   // 用平台列表给未绑定的本地内容做按标题绑定（宁可待绑定，也不静默绑错）。
   const boundNow = new Map()

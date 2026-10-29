@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import douyin, { parseCount, parseRowStats, parseLabeledNumber, videoIdFromHref, collectAccount, collectContents } from '../analytics-douyin.mjs'
+import douyin, { parseCount, parseRowStats, parseLabeledNumber, videoIdFromHref, readWorksFromPage, collectAccount, collectContents } from '../analytics-douyin.mjs'
 
 /**
  * 假 page：只实现 adapter 用到的 locator/goto/waitForTimeout/url。
@@ -109,13 +109,12 @@ test('内容级采集：只更新已绑定且标题精确匹配的作品', async
     { contentId: 'c2', title: '未绑定的作品', bound: false },
   ]
   const store = fakeStore(contents)
-  const page = fakePage({
-    rows: [
-      { title: '已绑定的作品', stats: '1.2万 播放 345 点赞 12 评论' },
-      { title: '未绑定的作品', stats: '999 播放' },
-      { title: '标题不完全一致的作品', stats: '888 播放' },
-    ],
-  })
+  const page = fakePage({ rows: [] })
+  page.evaluate = async () => ([
+    { title: '已绑定的作品', stats: '1.2万 播放 345 点赞 12 评论', href: null },
+    { title: '未绑定的作品', stats: '999 播放', href: null },
+    { title: '标题不完全一致的作品', stats: '888 播放', href: null },
+  ])
   const collected = await collectContents({ accountId: 'a1', platform: 'douyin', page, signal: null }, { runId: 'r1', store })
   assert.equal(collected.length, 1, '只有已绑定且标题精确匹配的那条会被写回')
   assert.equal(collected[0].contentId, 'c1')
@@ -124,7 +123,8 @@ test('内容级采集：只更新已绑定且标题精确匹配的作品', async
 
 test('内容级采集：一条都读不到数字时不落全 null 记录（避免「采集成功」的假象）', async () => {
   const store = fakeStore([{ contentId: 'c1', title: '作品', bound: true, remoteId: 'v1' }])
-  const page = fakePage({ rows: [{ title: '作品', stats: '审核中' }] })
+  const page = fakePage({ rows: [] })
+  page.evaluate = async () => ([{ title: '作品', stats: '审核中', href: null }])
   const collected = await collectContents({ accountId: 'a1', platform: 'douyin', page, signal: null }, { runId: 'r1', store })
   assert.equal(collected.length, 0)
   assert.equal(store.calls.metrics.length, 0)
@@ -142,9 +142,10 @@ test('内容级采集：未绑定内容按标题从平台列表绑定后再采�
   // 这条守的是「鸡生蛋」：bindAll 需要平台作品列表，而列表只能从作品管理页读。
   // 旧实现没有已绑定作品就提前 return，导致内容级指标永远是 0 条。
   const store = fakeStore([{ contentId: 'c1', title: '折叠屏首发翻车', bound: false }])
-  const page = fakePage({
-    rows: [{ title: '折叠屏首发翻车', stats: '1.2万 播放 345 点赞 12 评论', href: 'https://www.douyin.com/video/7412345678901' }],
-  })
+  const page = fakePage({ rows: [] })
+  page.evaluate = async () => ([
+    { title: '折叠屏首发翻车', stats: '1.2万 播放 345 点赞 12 评论', href: 'https://www.douyin.com/video/7412345678901' },
+  ])
   const collected = await collectContents({ accountId: 'a1', platform: 'douyin', page, signal: null }, { runId: 'r1', store })
   assert.equal(collected.length, 1)
   const boundRow = store.calls.contents.find((row) => row.contentId === 'c1')
@@ -198,4 +199,11 @@ test('账号级采集：选择器失效时退回正文标签取值', async () =>
   const record = await collectAccount({ accountId: 'a1', platform: 'douyin', page, signal: null }, { runId: 'r1', store })
   assert.equal(record.followers, 31000)
   assert.equal(record.profileVisits, 880)
+})
+
+test('readWorksFromPage：读不到任何作品时返回空数组，由调用方报选择器缺失', async () => {
+  // 不能抛错也不能编造：页面结构变了就是变了，交给上层留证据并报 SELECTOR_MISSING。
+  assert.deepEqual(await readWorksFromPage({}), [])
+  assert.deepEqual(await readWorksFromPage({ evaluate: async () => [] }), [])
+  assert.deepEqual(await readWorksFromPage({ evaluate: async () => { throw new Error('boom') } }), [])
 })
