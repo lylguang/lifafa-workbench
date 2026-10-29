@@ -19,6 +19,8 @@
  *  - 登录态中途失效 → 抛 PUBLISHER_LOGIN_REQUIRED，由 publisher 标记 expired。
  */
 
+import { bindByTitle } from './analytics-bind.mjs'
+
 const ORIGIN = 'https://creator.douyin.com'
 /**
  * 数据页入口。
@@ -269,11 +271,15 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
   const { page } = lease
   const wanted = Array.isArray(contentIds) && contentIds.length ? new Set(contentIds) : null
   const contents = await store.listContents()
-  const targets = contents.filter((row) => row.bound && (!wanted || wanted.has(row.contentId)))
-  if (!targets.length) return []
+  const bound = contents.filter((row) => row.bound && (!wanted || wanted.has(row.contentId)))
+  // 没有已绑定作品也要打开页面：绑定需要「平台作品列表」，而那份列表只能从这里读。
+  // 之前这里提前 return，导致 bindAll 永远没有候选（鸡生蛋），
+  // 内容级指标在 P2 上线后一直是 0 条。
+  const unbound = contents.filter((row) => !row.bound && (!wanted || wanted.has(row.contentId)))
+  if (!bound.length && !unbound.length) return []
 
   await page.goto(MANAGE_URL, { waitUntil: 'domcontentloaded', timeout: 120_000 })
-  await page.waitForTimeout(3500)
+  await page.waitForTimeout(4000)
   await assertLoggedIn(page)
 
   const rows = await page.locator(SELECTORS.contentRows.join(', ')).all()
@@ -282,14 +288,33 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
     throw selectorMissing('抖音作品管理页没有读到作品行（页面结构可能已改版）。', evidence?.relativePath ?? null)
   }
 
-  const collected = []
+  // 先把整页读成「平台作品列表」：标题 + 作品链接（含 video id）+ 统计文本。
+  const works = []
   for (const row of rows) {
     const title = (await row.locator(SELECTORS.rowTitle.join(', ')).first().innerText().catch(() => '')).trim()
     if (!title) continue
-    const target = targets.find((item) => item.title === title)
-    if (!target) continue
+    const href = await row.locator('a[href*="/video/"]').first().getAttribute('href').catch(() => null)
     const stats = (await row.locator(SELECTORS.rowStats.join(', ')).first().innerText().catch(() => '')).trim()
-    const metrics = parseRowStats(stats)
+    works.push({ title, stats, remoteId: videoIdFromHref(href), remoteUrl: href ? absoluteUrl(href) : null })
+    if (works.length >= 200) break
+  }
+
+  // 用平台列表给未绑定的本地内容做按标题绑定（宁可待绑定，也不静默绑错）。
+  const boundNow = new Map()
+  if (unbound.length) {
+    const { matched } = bindByTitle(unbound, works)
+    for (const row of matched) {
+      await store.saveContents([row])
+      boundNow.set(row.contentId, row)
+    }
+  }
+
+  const collected = []
+  for (const work of works) {
+    const target = bound.find((item) => item.title === work.title)
+      ?? [...boundNow.values()].find((item) => item.title === work.title)
+    if (!target) continue
+    const metrics = parseRowStats(work.stats)
     // 一个数都读不到时不要落一条全 null 的记录——那会让「采集成功」变成假象。
     if (Object.values(metrics).every((value) => value === null)) continue
     const record = { ...target, metrics, source: 'collector', collectedAt: new Date().toISOString() }
@@ -299,6 +324,23 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
     if (collected.length >= 50) break
   }
   return collected
+}
+
+/** 从作品链接里取 video id：`https://www.douyin.com/video/7412...` 或 `?modal_id=`。 */
+export function videoIdFromHref(href) {
+  const value = String(href ?? '')
+  if (!value) return null
+  const path = /\/video\/(\d{6,})/u.exec(value)
+  if (path) return path[1]
+  const query = /[?&](?:modal_id|vid|item_id)=(\d{6,})/u.exec(value)
+  return query ? query[1] : null
+}
+
+function absoluteUrl(href) {
+  const value = String(href ?? '')
+  if (!value) return null
+  if (/^https?:\/\//iu.test(value)) return value
+  return `${ORIGIN}${value.startsWith('/') ? '' : '/'}${value}`
 }
 
 /**

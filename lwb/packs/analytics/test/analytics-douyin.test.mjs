@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import douyin, { parseCount, parseRowStats, parseLabeledNumber, collectAccount, collectContents } from '../analytics-douyin.mjs'
+import douyin, { parseCount, parseRowStats, parseLabeledNumber, videoIdFromHref, collectAccount, collectContents } from '../analytics-douyin.mjs'
 
 /**
  * 假 page：只实现 adapter 用到的 locator/goto/waitForTimeout/url。
@@ -11,6 +11,7 @@ function fakePage({ url = 'https://creator.douyin.com/creator-micro/content/mana
     locator: (selector) => ({
       first: () => ({
         innerText: async () => (/title/u.test(selector) ? row.title : row.stats),
+        getAttribute: async () => (/href/u.test(selector) ? (row.href ?? null) : null),
       }),
     }),
   }))
@@ -129,12 +130,34 @@ test('内容级采集：一条都读不到数字时不落全 null 记录（避�
   assert.equal(store.calls.metrics.length, 0)
 })
 
-test('没有已绑定作品时不打开作品管理页（省一次页面跳转）', async () => {
-  const store = fakeStore([{ contentId: 'c1', title: '未绑定', bound: false }])
+test('既没有已绑定也没有未绑定内容时，不打开作品管理页', async () => {
+  const store = fakeStore([])
   const page = fakePage({ rows: [] })
   const collected = await collectContents({ accountId: 'a1', platform: 'douyin', page, signal: null }, { runId: 'r1', store })
   assert.deepEqual(collected, [])
   assert.deepEqual(page.gotos, [])
+})
+
+test('内容级采集：未绑定内容按标题从平台列表绑定后再采指标', async () => {
+  // 这条守的是「鸡生蛋」：bindAll 需要平台作品列表，而列表只能从作品管理页读。
+  // 旧实现没有已绑定作品就提前 return，导致内容级指标永远是 0 条。
+  const store = fakeStore([{ contentId: 'c1', title: '折叠屏首发翻车', bound: false }])
+  const page = fakePage({
+    rows: [{ title: '折叠屏首发翻车', stats: '1.2万 播放 345 点赞 12 评论', href: 'https://www.douyin.com/video/7412345678901' }],
+  })
+  const collected = await collectContents({ accountId: 'a1', platform: 'douyin', page, signal: null }, { runId: 'r1', store })
+  assert.equal(collected.length, 1)
+  const boundRow = store.calls.contents.find((row) => row.contentId === 'c1')
+  assert.equal(boundRow.remoteId, '7412345678901', '标题匹配成功后要落 remoteId')
+  assert.equal(store.calls.metrics[0].metrics.views, 12000)
+})
+
+test('videoIdFromHref 认 /video/ 与 modal_id 两种链接', () => {
+  assert.equal(videoIdFromHref('https://www.douyin.com/video/7412345678901'), '7412345678901')
+  assert.equal(videoIdFromHref('/video/7412345678901'), '7412345678901')
+  assert.equal(videoIdFromHref('https://www.douyin.com/user/x?modal_id=7412345678901'), '7412345678901')
+  assert.equal(videoIdFromHref('https://creator.douyin.com/creator-micro/content/manage'), null)
+  assert.equal(videoIdFromHref(null), null)
 })
 
 test('adapter 导出形态符合采集器契约', () => {
