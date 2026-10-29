@@ -19,7 +19,8 @@
  *  - 登录态中途失效 → 抛 PUBLISHER_LOGIN_REQUIRED，由 publisher 标记 expired。
  */
 
-import { bindByTitle } from './analytics-bind.mjs'
+import { readFile } from 'node:fs/promises'
+import { bindByTitle, normalizeTitle } from './analytics-bind.mjs'
 
 const ORIGIN = 'https://creator.douyin.com'
 /**
@@ -241,6 +242,125 @@ export async function readWorksFromPage(page) {
   } catch { return [] }
 }
 
+/**
+ * 极简 CSV 解析：支持双引号包裹、字段内逗号/换行、\r\n、BOM。
+ *
+ * 为什么不引依赖：这是采集侧的一次性解析，几十行足够，也避免给能力包
+ * 增加第三方依赖（发布包已经因为 playwright 体积吃过一次教训）。
+ */
+export function parseCsv(text) {
+  const source = String(text ?? '').replace(/^﻿/u, '')
+  const rows = []
+  let row = []
+  let field = ''
+  let quoted = false
+  for (let index = 0; index < source.length; index += 1) {
+    const ch = source[index]
+    if (quoted) {
+      if (ch === '"') {
+        if (source[index + 1] === '"') { field += '"'; index += 1 }
+        else quoted = false
+      } else field += ch
+      continue
+    }
+    if (ch === '"') { quoted = true; continue }
+    if (ch === ',') { row.push(field); field = ''; continue }
+    if (ch === '\r') continue
+    if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; continue }
+    field += ch
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row) }
+  return rows.filter((cells) => cells.some((cell) => String(cell).trim() !== ''))
+}
+
+/**
+ * 把平台导出的 CSV 映射成作品指标。
+ *
+ * 表头列顺序会变、文案也会微调，所以**按关键字找列**而不是按位置：
+ * 只要某列标题里含「播放 / 点赞 / 评论 / 分享 / 收藏 / 涨粉」就认。
+ * 标题列同理（标题 / 作品名称 / 作品标题）。认不出标题列就返回空，
+ * 由调用方退回 DOM 读取——宁可采不到，也不要采错。
+ */
+export function worksFromExport(csvText) {
+  const rows = parseCsv(csvText)
+  if (rows.length < 2) return { works: [], header: rows[0] ?? [] }
+  const header = rows[0].map((cell) => String(cell).trim())
+  const find = (keywords) => header.findIndex((cell) => keywords.some((word) => cell.includes(word)))
+  const columns = {
+    title: find(['标题', '作品名称', '作品标题', '视频名称']),
+    views: find(['播放']),
+    likes: find(['点赞']),
+    comments: find(['评论']),
+    shares: find(['分享', '转发']),
+    favorites: find(['收藏']),
+    followers: find(['涨粉', '吸粉']),
+    link: find(['链接', '地址', 'URL', 'url']),
+  }
+  if (columns.title < 0) return { works: [], header }
+  const works = []
+  for (const row of rows.slice(1)) {
+    const title = String(row[columns.title] ?? '').trim()
+    if (!title) continue
+    const cell = (index) => (index >= 0 ? row[index] : null)
+    const metrics = {
+      views: parseCount(cell(columns.views)),
+      likes: parseCount(cell(columns.likes)),
+      comments: parseCount(cell(columns.comments)),
+      shares: parseCount(cell(columns.shares)),
+      favorites: parseCount(cell(columns.favorites)),
+      followersGained: parseCount(cell(columns.followers)),
+      completionRate: null,
+    }
+    const link = cell(columns.link) ? String(cell(columns.link)).trim() : null
+    works.push({ title, metrics, stats: '', remoteId: videoIdFromHref(link), remoteUrl: link || null })
+    if (works.length >= 500) break
+  }
+  return { works, header }
+}
+
+/**
+ * 点「导出数据」并捕获下载，返回文件内容（utf8）。
+ *
+ * 为什么走导出而不是读页面：内容管理页不给作品 id、标题被拼接重复、
+ * 列表懒加载只渲染 1 条（2026-10-29 诊断证据 works:1 / withHref:0）。
+ * 平台自己的导出文件是按作品一行、带完整标题与全部指标的最可靠来源。
+ */
+export async function downloadExport(page, { timeoutMs = 60_000 } = {}) {
+  if (typeof page.waitForEvent !== 'function') return null
+  const downloadPromise = page.waitForEvent('download', { timeout: timeoutMs }).catch(() => null)
+  const clickText = async (labels) => {
+    for (const label of labels) {
+      const target = page.locator(`text=${label}`).first()
+      const count = await target.count().catch(() => 0)
+      if (!count) continue
+      await target.click({ timeout: 5000 }).catch(() => {})
+      return label
+    }
+    return null
+  }
+  const opened = await clickText(['导出数据', '导出作品数据', '下载数据'])
+  if (!opened) return null
+  // 可能弹二级菜单：作品数据 / 全部作品 / 确认导出
+  await page.waitForTimeout(1200)
+  await clickText(['作品数据', '导出作品', '全部作品', '确认导出', '下载'])
+  const download = await downloadPromise
+  if (!download) return null
+  const path = await download.path().catch(() => null)
+  if (!path) return null
+  const buffer = await readFile(path).catch(() => null)
+  if (!buffer || !buffer.length) return null
+  // xlsx/zip 是二进制：交给调用方按文件名判断，这里只回传原始字节。
+  const name = download.suggestedFilename?.() ?? ''
+  return { name, buffer, text: isProbablyText(buffer) ? buffer.toString('utf8') : null }
+}
+
+/** 粗判是否文本（xlsx 是 zip，前两字节 PK）。 */
+function isProbablyText(buffer) {
+  if (buffer.length < 2) return false
+  if (buffer[0] === 0x50 && buffer[1] === 0x4b) return false
+  return !buffer.subarray(0, 512).includes(0)
+}
+
 async function textOf(page, selectors) {
   const locator = await firstMatch(page, selectors)
   if (!locator) return null
@@ -327,18 +447,31 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
   await page.waitForTimeout(4000)
   await assertLoggedIn(page)
 
-  // 先把整页读成「平台作品列表」：标题 + 作品链接（含 video id）+ 统计文本。
-  const rawWorks = await readWorksFromPage(page)
-  if (!rawWorks.length) {
-    const evidence = await lease.evidence?.('douyin-content-manage', runId).catch(() => null)
-    throw selectorMissing(`抖音内容管理页没有读到作品（页面可能改版或仍在加载）。当前页：${page.url()}`, evidence?.relativePath ?? null)
+  // 作品列表来源有两条，按可靠性排序：
+  //  1. 平台「导出数据」——按作品一行、带完整标题与全部指标，最可靠；
+  //  2. DOM 结构读取——页面不给作品 id、标题还会被拼接重复，只作兜底。
+  let works = []
+  let exportHeader = null
+  const exported = await downloadExport(page).catch(() => null)
+  if (exported?.text) {
+    const parsed = worksFromExport(exported.text)
+    exportHeader = parsed.header
+    works = parsed.works
   }
-  const works = rawWorks.map((work) => ({
-    title: work.title,
-    stats: work.stats,
-    remoteId: videoIdFromHref(work.href),
-    remoteUrl: work.href ? absoluteUrl(work.href) : null,
-  }))
+  if (!works.length) {
+    const rawWorks = await readWorksFromPage(page)
+    if (!rawWorks.length) {
+      const evidence = await lease.evidence?.('douyin-content-manage', runId).catch(() => null)
+      throw selectorMissing(`抖音内容管理页没有读到作品，导出数据也没拿到（页面可能改版或仍在加载）。当前页：${page.url()}`, evidence?.relativePath ?? null)
+    }
+    works = rawWorks.map((work) => ({
+      title: work.title,
+      stats: work.stats,
+      metrics: null,
+      remoteId: videoIdFromHref(work.href),
+      remoteUrl: work.href ? absoluteUrl(work.href) : null,
+    }))
+  }
 
   // 用平台列表给未绑定的本地内容做按标题绑定（宁可待绑定，也不静默绑错）。
   const boundNow = new Map()
@@ -357,6 +490,8 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
   if (!matchedCount && typeof lease.evidenceJson === 'function') {
     await lease.evidenceJson('douyin-works-diagnostic', {
       works: works.length,
+      exportHeader,
+      sampleMetrics: works.slice(0, 3).map((work) => ({ title: work.title.slice(0, 40), metrics: work.metrics })),
       withHref: works.filter((work) => work.remoteUrl).length,
       sample: works.slice(0, 5).map((work) => ({ title: work.title.slice(0, 60), remoteId: work.remoteId })),
       localTitles: contents.slice(0, 5).map((row) => String(row.title || '').slice(0, 60)),
@@ -365,10 +500,11 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
 
   const collected = []
   for (const work of works) {
-    const target = bound.find((item) => item.title === work.title)
-      ?? [...boundNow.values()].find((item) => item.title === work.title)
+    // 标题精确匹配（归一化后）：宁可待绑定，也不静默绑错。
+    const target = bound.find((item) => normalizeTitle(item.title) === normalizeTitle(work.title))
+      ?? [...boundNow.values()].find((item) => normalizeTitle(item.title) === normalizeTitle(work.title))
     if (!target) continue
-    const metrics = parseRowStats(work.stats)
+    const metrics = work.metrics ?? parseRowStats(work.stats)
     // 一个数都读不到时不要落一条全 null 的记录——那会让「采集成功」变成假象。
     if (Object.values(metrics).every((value) => value === null)) continue
     const record = { ...target, metrics, source: 'collector', collectedAt: new Date().toISOString() }

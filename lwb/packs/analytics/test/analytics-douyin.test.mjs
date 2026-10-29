@@ -1,6 +1,9 @@
 import test from 'node:test'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import assert from 'node:assert/strict'
-import douyin, { parseCount, parseRowStats, parseLabeledNumber, videoIdFromHref, readWorksFromPage, collectAccount, collectContents } from '../analytics-douyin.mjs'
+import douyin, { parseCount, parseRowStats, parseLabeledNumber, videoIdFromHref, readWorksFromPage, parseCsv, worksFromExport, collectAccount, collectContents } from '../analytics-douyin.mjs'
 
 /**
  * 假 page：只实现 adapter 用到的 locator/goto/waitForTimeout/url。
@@ -206,4 +209,68 @@ test('readWorksFromPage：读不到任何作品时返回空数组，由调用方
   assert.deepEqual(await readWorksFromPage({}), [])
   assert.deepEqual(await readWorksFromPage({ evaluate: async () => [] }), [])
   assert.deepEqual(await readWorksFromPage({ evaluate: async () => { throw new Error('boom') } }), [])
+})
+
+// ── 导出数据（CSV）路径 ────────────────────────────────────────────────────
+//
+// 为什么走导出：内容管理页不给作品 id（诊断证据 withHref:0）、标题被拼接重复、
+// 列表懒加载只渲染 1 条。平台自己的导出文件按作品一行、带完整标题与全部指标。
+
+test('parseCsv 支持引号字段、字段内逗号/换行、BOM 与 CRLF', () => {
+  const csv = '\uFEFF标题,播放,备注\r\n"作品A, 副标题",1.2万,"第一行\n第二行"\r\n作品B,345,\r\n'
+  const rows = parseCsv(csv)
+  assert.deepEqual(rows[0], ['标题', '播放', '备注'])
+  assert.deepEqual(rows[1], ['作品A, 副标题', '1.2万', '第一行\n第二行'])
+  assert.deepEqual(rows[2], ['作品B', '345', ''])
+})
+
+test('worksFromExport 按表头关键字认列，不依赖列顺序', () => {
+  // 故意打乱列序、改表头文案
+  const csv = [
+    '作品名称,点赞,播放量,评论数,分享次数,收藏数,涨粉',
+    '折叠屏首发翻车,345,1.2万,12,8,60,3',
+    '无人小店踩坑,88,2.5万,4,1,12,0',
+  ].join('\n')
+  const { works, header } = worksFromExport(csv)
+  assert.equal(header[0], '作品名称')
+  assert.equal(works.length, 2)
+  assert.equal(works[0].title, '折叠屏首发翻车')
+  assert.equal(works[0].metrics.views, 12000)
+  assert.equal(works[0].metrics.likes, 345)
+  assert.equal(works[0].metrics.comments, 12)
+  assert.equal(works[0].metrics.shares, 8)
+  assert.equal(works[0].metrics.favorites, 60)
+  assert.equal(works[0].metrics.followersGained, 3)
+})
+
+test('worksFromExport 认不出标题列时返回空，交给 DOM 兜底', () => {
+  const { works } = worksFromExport('日期,播放\n2026-10-29,100')
+  assert.deepEqual(works, [])
+})
+
+test('内容级采集：导出 CSV 优先，按归一化标题匹配后落指标', async () => {
+  // 真跑下载路径：写一份 CSV 到临时文件，让 waitForEvent 返回的 download 指向它。
+  const dir = await mkdtemp(join(tmpdir(), 'an-douyin-csv-'))
+  const csvPath = join(dir, 'works.csv')
+  await writeFile(csvPath, '标题,播放,点赞,评论\n折叠屏首发翻车,1.2万,345,12\n', 'utf8')
+
+  const store = fakeStore([{ contentId: 'c1', title: '折叠屏首发翻车', bound: true, remoteId: 'v1' }])
+  const page = {
+    gotos: [],
+    async goto(url) { this.gotos.push(url) },
+    async waitForTimeout() {},
+    url: () => 'https://creator.douyin.com/creator-micro/content/manage',
+    async waitForEvent() { return { path: async () => csvPath, suggestedFilename: () => 'works.csv' } },
+    locator(selector) {
+      // 只认「导出数据」这类按钮；登录墙/其它选择器一律未命中，
+      // 否则 assertLoggedIn 会被假 page 骗过。
+      const hit = /导出|作品数据|确认导出/u.test(selector)
+      return { first: () => ({ count: async () => (hit ? 1 : 0), isVisible: async () => hit, waitFor: async () => {}, click: async () => {}, innerText: async () => (hit ? '导出数据' : '') }) }
+    },
+    async evaluate() { throw new Error('导出成功后不该再读 DOM') },
+  }
+  const collected = await collectContents({ accountId: 'a1', platform: 'douyin', page, signal: null }, { runId: 'r1', store })
+  assert.equal(collected.length, 1, '导出 CSV 里的作品要能匹配上')
+  assert.equal(store.calls.metrics[0].metrics.views, 12000)
+  assert.equal(store.calls.metrics[0].metrics.likes, 345)
 })
