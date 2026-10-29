@@ -208,12 +208,13 @@ export class AnalyticsLocalSource {
     const now = Date.parse(this.now?.() ?? new Date().toISOString())
     if (!Number.isFinite(now)) return null
     const day = 24 * 60 * 60 * 1000
-    const slice = (from, to) => ({
-      from: new Date(now - from * day).toISOString(),
-      to: new Date(now - to * day).toISOString(),
+    // 参数是「多少天前」：slice(7, 0) = 从 7 天前到现在。
+    const slice = (daysAgoStart, daysAgoEnd) => ({
+      from: new Date(now - daysAgoStart * day).toISOString(),
+      to: new Date(now - daysAgoEnd * day).toISOString(),
     })
     const summarize = async (window) => {
-      const result = await this.summary({ ...request, ...window }).catch(() => null)
+      const result = await this.#summaryCore({ ...request, ...window }, { weekly: false }).catch(() => null)
       if (!result) return null
       const best = [...(result.series || [])].sort((left, right) => (right.views ?? -1) - (left.views ?? -1))[0] || null
       return {
@@ -225,7 +226,7 @@ export class AnalyticsLocalSource {
         bestDate: best && (best.views ?? 0) > 0 ? best.date : null,
       }
     }
-    const [thisWeek, lastWeek] = await Promise.all([slice(0, 7), slice(7, 14)].map(summarize))
+    const [thisWeek, lastWeek] = await Promise.all([slice(7, 0), slice(14, 7)].map(summarize))
     const delta = (current, previous) => {
       if (current === null || previous === null) return null
       if (!previous) return null
@@ -277,6 +278,12 @@ export class AnalyticsLocalSource {
    * 而不是把「缺失」全画成 0。
    */
   async summary(request = {}) {
+    // 薄壳：真正的聚合在 #summaryCore。weekly 默认开启，
+    // #weeklyCompare 内部递归调 summary 时必须传 includeWeekly:false，否则无限递归。
+    return this.#summaryCore(request, { weekly: true })
+  }
+
+  async #summaryCore(request = {}, { weekly = false } = {}) {
     const range = parseRange(request)
     const generatedAt = new Date().toISOString()
     const [accounts, jobs] = await Promise.all([this.#accounts(), this.#jobs()])
@@ -306,7 +313,7 @@ export class AnalyticsLocalSource {
     const dailyContent = await this.#dailyContentMetrics(range)
     // 周对比：本周（近 7 天）vs 上一周，回答「比上周怎么样」。
     // 不用 LLM，纯聚合——确定性数字先落地，AI 解读交给对话里的 agent。
-    const week = await this.#weeklyCompare(request)
+    const week = weekly ? await this.#weeklyCompare(request) : null
 
     return {
       range: { from: range.from, to: range.to },
