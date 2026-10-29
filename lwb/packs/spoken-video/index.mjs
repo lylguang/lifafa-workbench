@@ -600,6 +600,14 @@ export async function apply(ctx, config = {}) {
     publish,
   })
   ctx.provide('spokenVideoProjects', projects)
+  // 供兄弟能力包（数据看板）读取生产漏斗：预先绑定好本包工作区，
+  // 调用方无需也无法提供 agent。
+  // 2026-10-29 修：看板原先直接拿 projects store 调 pipelineOverview()，
+  // 而 store 需要含 workspacePath 的 agent——跨包调用拿不到，
+  // 漏斗永远报 SPOKEN_VIDEO_WORKSPACE_REQUIRED。
+  ctx.provide('spokenVideoPipeline', {
+    pipelineOverview: async () => projects.pipelineOverview({ workspacePath: context.workspacePath }),
+  })
   ctx.provide('spokenVideoContent', content)
   ctx.provide('spokenVideoMedia', media)
   ctx.provide('spokenVideoPublish', publish)

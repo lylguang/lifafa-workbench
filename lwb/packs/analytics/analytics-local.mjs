@@ -21,6 +21,8 @@ import {
   platformRows,
   publishSuccessRate,
   sortAndPage,
+  countOrNull,
+  sumMetrics,
   withinRange,
 } from './analytics-metrics.mjs'
 
@@ -194,6 +196,32 @@ export class AnalyticsLocalSource {
     return new Map((Array.isArray(rows) ? rows : []).map((row) => [row.contentId, row]))
   }
 
+  /**
+   * 把 store 里按日的作品指标点位按日期聚合成 {date → {views,likes,comments}}。
+   * 只聚合**有值**的点位；某天没有任何点位就是缺口（前端画缺口，不画 0）。
+   */
+  async #dailyContentMetrics(range) {
+    if (!this.store?.listContentMetrics) return new Map()
+    const months = []
+    const cursor = new Date(range.from)
+    while (cursor <= new Date(range.to)) {
+      months.push(cursor.getFullYear() + '-' + String(cursor.getMonth() + 1).padStart(2, '0'))
+      cursor.setMonth(cursor.getMonth() + 1)
+    }
+    months.push(new Date(range.to).getFullYear() + '-' + String(new Date(range.to).getMonth() + 1).padStart(2, '0'))
+    const points = await this.store.listContentMetrics([...new Set(months)]).catch(() => [])
+    const byDate = new Map()
+    for (const point of points || []) {
+      if (!point?.date) continue
+      const bucket = byDate.get(point.date) ?? { views: 0, likes: 0, comments: 0 }
+      bucket.views += countOrNull(point.metrics?.views) ?? 0
+      bucket.likes += countOrNull(point.metrics?.likes) ?? 0
+      bucket.comments += countOrNull(point.metrics?.comments) ?? 0
+      byDate.set(point.date, bucket)
+    }
+    return byDate
+  }
+
   async #funnel() {
     const pipeline = await this.#pipeline()
     return { rows: funnelFromPipeline(pipeline.items), available: pipeline.available, reason: pipeline.reason }
@@ -227,16 +255,23 @@ export class AnalyticsLocalSource {
       .filter(accountFilter(request?.accountIds, request?.platform))
       .filter((job) => withinRange(job.createdAt, range.from, range.to))
 
+    // 内容级指标聚合（P2 采集上线后这里有真数据）：
+    // rows 已按发布区间过滤，且 #contentRow 会把 store 里的最新指标合进来。
+    // 旧实现在这里把 kpis 写死为 null——那是采集未上线时代的占位，
+    // 采集上线后忘了跟进，导致看板「总播放」永远是「—」。
+    const contentSums = sumMetrics(rows)
+    const dailyContent = await this.#dailyContentMetrics(range)
+
     return {
       range: { from: range.from, to: range.to },
       generatedAt,
       stale: await this.#stale(),
       kpis: {
-        views: null,
-        likes: null,
-        comments: null,
-        shares: null,
-        favorites: null,
+        views: contentSums.views,
+        likes: contentSums.likes,
+        comments: contentSums.comments,
+        shares: contentSums.shares,
+        favorites: contentSums.favorites,
         engagementRate: engagementRate(rows),
         followers: { current: null, netGain: null, baselineDate: null },
         // published.count 是**发布尝试数**（区间内 createdAt 落在此的全部任务，含失败、
@@ -246,11 +281,11 @@ export class AnalyticsLocalSource {
         // 在途的 queued/running/awaiting-confirm 不参与，免得把比率压成一个假象。
         published: { count: attempts.length, successRate: publishSuccessRate(attempts) },
       },
-      // 契约 §4.2-1 的 series 是逐日的宽表行。P1 只有 published 有真数据，
-      // views/likes/comments/followersNetGain 无源 → null（前端画缺口，不画 0）。
-      // published 与 kpis.published.count 同源：都按全部发布尝试计。
-      series: summarySeries(attempts, range),
-      platforms: platformRows(platforms),
+      // 契约 §4.2-1 的 series 是逐日的宽表行。published 一直有真数据；
+      // views/likes/comments 在采集上线后按「当天有采集点才有值」补进宽表，
+      // 保留「缺口 = 当天没采」的语义（前端画缺口，不画 0）。
+      series: summarySeries(attempts, range, dailyContent),
+      platforms: platformRows(contentPlatformTotals(rows)),
       funnel: funnel.rows,
       available: {
         publisher: accounts.available || jobs.available,
@@ -372,16 +407,31 @@ export class AnalyticsLocalSource {
  * views/likes/comments/followersNetGain 两头都是 null——
  * 前端按「缺口 → 断线渲染」，绝不画成 0。RPC 4 的单指标序列同义。
  */
-function summarySeries(jobs, range) {
+function summarySeries(jobs, range, dailyContent = new Map()) {
   const counts = new Map(publishedDaily(jobs, range).map((point) => [point.date, point.value]))
   return eachDayKey(range.from, range.to).map((date) => ({
     date,
-    views: null,
-    likes: null,
-    comments: null,
+    views: dailyContent.get(date)?.views ?? null,
+    likes: dailyContent.get(date)?.likes ?? null,
+    comments: dailyContent.get(date)?.comments ?? null,
     followersNetGain: null,
     published: counts.get(date) ?? 0,
   }))
+}
+
+/** 按平台聚合内容指标，供 platformRows 使用（旧实现传的是全 null 的空壳）。 */
+function contentPlatformTotals(rows) {
+  const totals = {}
+  for (const row of rows || []) {
+    const platform = row?.platform
+    if (!platform) continue
+    const bucket = totals[platform] ??= { views: null, likes: null, comments: null, followers: null }
+    for (const key of ['views', 'likes', 'comments']) {
+      const value = countOrNull(row?.metrics?.[key])
+      if (value !== null) bucket[key] = (bucket[key] ?? 0) + value
+    }
+  }
+  return totals
 }
 
 /**

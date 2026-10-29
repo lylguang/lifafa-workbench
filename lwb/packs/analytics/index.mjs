@@ -59,6 +59,9 @@ function resolvePublisher(ctx) {
 
 function resolveSpokenVideo(ctx) {
   try {
+    // 优先用 spoken-video 预绑定好的漏斗服务（自带工作区，跨包可调）。
+    const pipeline = ctx.get('spokenVideoPipeline')
+    if (pipeline) return pipeline
     return ctx.get('spokenVideoProjects') || null
   } catch {
     return null

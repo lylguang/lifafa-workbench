@@ -56,6 +56,25 @@ export function countOrNull(value) {
  * @param {Array<{metrics: object}>} contents 集合 S
  * @returns {number|null} 分母为 0 或 null 时返回 null
  */
+/**
+ * 对一批内容指标做 null 感知求和。
+ *
+ * 语义与 countOrNull 一致：某指标在**所有**内容上都是 null（平台没给、
+ * 或还没采到）时，结果为 null——不用 0 冒充「没数据」；只要有一条有值，
+ * 其余 null 按 0 计入（那些是平台明确报了 0 的）。
+ */
+export function sumMetrics(contents) {
+  const sums = { views: null, likes: null, comments: null, shares: null, favorites: null }
+  for (const content of contents || []) {
+    const metrics = content?.metrics || {}
+    for (const key of Object.keys(sums)) {
+      const value = countOrNull(metrics[key])
+      if (value !== null) sums[key] = (sums[key] ?? 0) + value
+    }
+  }
+  return sums
+}
+
 export function engagementRate(contents) {
   let likes = 0
   let views = 0
