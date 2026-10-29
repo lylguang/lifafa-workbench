@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 1,
+  "id": "story-account",
+  "packageName": "@scitiger-ai/lwb-story-account",
+  "name": "情感故事号",
+  "version": "0.1.0",
+  "description": "面向 30-40 岁女性受众的情感故事口播生产线：真实素材驱动选题、反塑料感写稿、配音字幕、竖屏渲染、技术质检与独立审片双闸门、封面与发布资料。",
+  "market": {
+    "category": "内容创作",
+    "tags": [
+      "情感故事",
+      "口播创作",
+      "反AI味",
+      "竖屏成片",
+      "双闸门质检"
+    ],
+    "workflow": [
+      "确定账号定位",
+      "采集故事素材",
+      "生成故事选题",
+      "写口播故事稿",
+      "配音与字幕",
+      "竖屏成片",
+      "质检双闸门",
+      "发布资料"
+    ],
+    "icon": "故",
+    "introduction": "用真实素材（新闻评论、高赞回答、身边事）改写成年女性情感故事，按「冲突开场—细节推进—反转—留白」结构写稿，并强制通过反塑料感检查。成片为 1080x1920 竖屏，技术质检与独立审片 Agent 双闸门，未过闸不出片。",
+    "workflowHint": "账号定位贯穿全程；故事素材是可追溯的事实来源，写稿不得脱离素材凭空编造细节。",
+    "gettingStarted": [
+      "AI 创作使用「系统设置 → 模型」中的默认模型，请先完成模型配置。",
+      "配音、字幕需配置媒体服务；未配置时仍可用「导入稿件」方式把已有文案走完流水线。",
+      "内容安排已故意不提供：账号前期要求日更与卡点发布，定时任务无法保证人工确认评论互动。",
+      "创作数据保存在专属工作区，卸载能力包会保留工作区和数据。",
+      "本包只准备发布资料，不向任何平台直发；需要自动投递时另行加载「发布与账号管理」能力包。"
+    ],
+    "features": [
+      {
+        "menuId": "positioning",
+        "title": "账号定位",
+        "description": "锁定受众、故事题材与情绪边界。",
+        "icon": "target"
+      },
+      {
+        "menuId": "materials",
+        "title": "故事素材",
+        "description": "收集可追溯的真实素材来源。",
+        "icon": "signal"
+      },
+      {
+        "menuId": "topics",
+        "title": "故事选题",
+        "description": "从素材产出具体场景与关键对白。",
+        "icon": "idea"
+      },
+      {
+        "menuId": "scripts",
+        "title": "故事写稿",
+        "description": "生成口播稿并做反塑料感检查。",
+        "icon": "write"
+      },
+      {
+        "menuId": "audio-captions",
+        "title": "配音与字幕",
+        "description": "导入配音与字幕，校验后进入成片。",
+        "icon": "audio"
+      },
+      {
+        "menuId": "video-preview",
+        "title": "竖屏成片",
+        "description": "登记 1080x1920 成片并预览。",
+        "icon": "video"
+      },
+      {
+        "menuId": "qc",
+        "title": "质检双闸门",
+        "description": "技术质检与独立审片同页汇总。",
+        "icon": "shield"
+      },
+      {
+        "menuId": "publish",
+        "title": "发布资料",
+        "description": "整理标题、文案、标签与封面标题。",
+        "icon": "publish"
+      }
+    ]
+  },
+  "menus": [
+    {
+      "id": "pipeline",
+      "label": "制作流水线",
+      "glyph": "流",
+      "tone": "blue"
+    },
+    {
+      "id": "positioning",
+      "label": "账号定位",
+      "glyph": "位",
+      "tone": "violet"
+    },
+    {
+      "id": "materials",
+      "label": "故事素材",
+      "glyph": "材",
+      "tone": "blue"
+    },
+    {
+      "id": "topics",
+      "label": "故事选题",
+      "glyph": "题",
+      "tone": "orange"
+    },
+    {
+      "id": "scripts",
+      "label": "故事写稿",
+      "glyph": "稿",
+      "tone": "violet"
+    },
+    {
+      "id": "audio-captions",
+      "label": "配音 / 字幕",
+      "glyph": "声",
+      "tone": "pink"
+    },
+    {
+      "id": "video-preview",
+      "label": "竖屏成片",
+      "glyph": "视",
+      "tone": "green"
+    },
+    {
+      "id": "qc",
+      "label": "质检闸门",
+      "glyph": "检",
+      "tone": "red"
+    },
+    {
+      "id": "publish",
+      "label": "发布资料",
+      "glyph": "发",
+      "tone": "red"
+    }
+  ]
+}
