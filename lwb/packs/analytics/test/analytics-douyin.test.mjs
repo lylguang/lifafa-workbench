@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import douyin, { parseCount, parseRowStats, collectAccount, collectContents } from '../analytics-douyin.mjs'
+import douyin, { parseCount, parseRowStats, parseLabeledNumber, collectAccount, collectContents } from '../analytics-douyin.mjs'
 
 /**
  * 假 page：只实现 adapter 用到的 locator/goto/waitForTimeout/url。
@@ -152,4 +152,27 @@ test('登录墙按页面文本识别：URL 不变也要判成登录失效', asyn
     () => collectAccount({ accountId: 'a1', platform: 'douyin', page, signal: null }, { runId: 'r1', store: fakeStore() }),
     (error) => error.code === 'PUBLISHER_LOGIN_REQUIRED',
   )
+})
+
+test('parseLabeledNumber 按标签就近取数，支持「标题一行数值一行」的卡片排版', () => {
+  // 创作者中心数据卡的典型正文：标题与数值各占一行
+  const text = '数据中心\n粉丝总数\n2.4万\n主页访问\n1,203\n播放量\n18.6万'
+  assert.equal(parseLabeledNumber(text, ['粉丝总数', '总粉丝']), 24000)
+  assert.equal(parseLabeledNumber(text, ['主页访问']), 1203)
+  // 数字在前也认
+  assert.equal(parseLabeledNumber('1.2万 粉丝', ['粉丝']), 12000)
+  // 取不到就是 null，不用 0 冒充
+  assert.equal(parseLabeledNumber('数据中心\n暂无数据', ['粉丝总数']), null)
+  // 不会把远处无关指标当成目标：标签后 40 字符内没有数字就不取
+  assert.equal(parseLabeledNumber('粉丝总数\n' + '占位'.repeat(30) + '999', ['粉丝总数']), null)
+})
+
+test('账号级采集：选择器失效时退回正文标签取值', async () => {
+  const store = fakeStore()
+  const page = fakePage({ url: 'https://creator.douyin.com/creator-micro/data-center/overview' })
+  // 所有语义选择器都不命中，只有正文里有数字
+  page.evaluate = async () => '数据中心\n粉丝总数\n3.1万\n主页访问\n880'
+  const record = await collectAccount({ accountId: 'a1', platform: 'douyin', page, signal: null }, { runId: 'r1', store })
+  assert.equal(record.followers, 31000)
+  assert.equal(record.profileVisits, 880)
 })

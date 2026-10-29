@@ -20,9 +20,25 @@
  */
 
 const ORIGIN = 'https://creator.douyin.com'
-/** 数据概览（粉丝、主页访问）。 */
-const DATA_URL = `${ORIGIN}/creator-micro/data/overview`
-/** 作品管理（逐条播放/点赞/评论）。 */
+/**
+ * 数据页入口。
+ *
+ * 2026-10-29 实测：直连 `creator-micro/data/overview` 会被重定向到首页
+ * 「关注列表」——那个路径在当前版本已经不存在。抖音的数据入口是侧栏的
+ * 「数据中心」，它的真实路径随版本变化。
+ * 所以账号级采集改成**先走侧栏点击**，再退到候选直连路径；
+ * 数字一律按正文里的标签就近取值（parseLabeledNumber），不依赖 class 哈希。
+ */
+const HOME_URL = `${ORIGIN}/creator-micro/home`
+/** 侧栏「数据中心」的可见文案。 */
+const DATA_CENTER_LABELS = ['数据中心', '数据概览']
+/** 数据中心直连候选（点击失败时按顺序试）。 */
+const DATA_URL_CANDIDATES = [
+  `${ORIGIN}/creator-micro/data-center/overview`,
+  `${ORIGIN}/creator-micro/data-center/content`,
+  `${ORIGIN}/creator-micro/data/overview`,
+]
+/** 作品管理（publisher 发布 adapter 已在跑，路径生产验证过）。 */
 const MANAGE_URL = `${ORIGIN}/creator-micro/content/manage`
 
 const SELECTORS = {
@@ -117,6 +133,67 @@ export function parseCount(value) {
   return Math.round(unit ? number * unit : number)
 }
 
+/** 读整页正文（限长）。平台改版时 class 会变，正文文案相对稳定。 */
+async function bodyText(page, limit = 8000) {
+  try {
+    if (typeof page.evaluate !== 'function') return ''
+    const text = await page.evaluate(() => (globalThis.document?.body?.innerText ?? ''))
+    return String(text ?? '').slice(0, limit)
+  } catch { return '' }
+}
+
+/**
+ * 按标签就近取数字：`粉丝总数\n1.2万` / `粉丝 1.2万` / `1.2万 粉丝` 都能读。
+ * 只认标签附近 40 个字符内的数字，避免抓到无关指标；取不到返回 null。
+ */
+export function parseLabeledNumber(text, labels) {
+  const source = String(text ?? '')
+  if (!source) return null
+  const NUMBER = '([\\d,.]+\\s*[万亿wkK]?)'
+  for (const label of labels) {
+    // 标签在前（创作者中心卡片就是这种：标题一行、数值下一行）
+    const after = new RegExp(`${label}[^\\d]{0,40}?${NUMBER}`, 'u').exec(source)
+    if (after) {
+      const value = parseCount(after[1])
+      if (value !== null) return value
+    }
+    // 数字在前
+    const before = new RegExp(`${NUMBER}\\s*${label}`, 'u').exec(source)
+    if (before) {
+      const value = parseCount(before[1])
+      if (value !== null) return value
+    }
+  }
+  return null
+}
+
+/**
+ * 打开数据中心：优先点侧栏入口（路径无关），失败再试候选直连。
+ * @returns {Promise<boolean>} 是否成功切到数据中心
+ */
+async function openDataCenter(page) {
+  try {
+    await page.goto(HOME_URL, { waitUntil: 'domcontentloaded', timeout: 120_000 })
+    await page.waitForTimeout(3500)
+    for (const label of DATA_CENTER_LABELS) {
+      const link = page.locator(`text=${label}`).first()
+      const count = await link.count().catch(() => 0)
+      if (!count) continue
+      await link.click().catch(() => {})
+      await page.waitForTimeout(4500)
+      return true
+    }
+  } catch { /* 落到直连候选 */ }
+  for (const url of DATA_URL_CANDIDATES) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+      await page.waitForTimeout(3500)
+      if (!/home/iu.test(page.url())) return true
+    } catch { /* 试下一个 */ }
+  }
+  return false
+}
+
 async function textOf(page, selectors) {
   const locator = await firstMatch(page, selectors)
   if (!locator) return null
@@ -155,17 +232,18 @@ async function assertLoggedIn(page) {
  */
 export async function collectAccount(lease, { runId, store } = {}) {
   const { page, signal } = lease
-  await page.goto(DATA_URL, { waitUntil: 'domcontentloaded', timeout: 120_000 })
-  // 创作中心是重 SPA，首屏数字常在 1.5–4 秒后才挂出来，等一下再读。
-  await page.waitForTimeout(3500)
+  await openDataCenter(page)
   await assertLoggedIn(page)
   if (signal?.aborted) return null
 
-  const followers = parseCount(await textOf(page, SELECTORS.followers))
-  const profileVisits = parseCount(await textOf(page, SELECTORS.profileVisits))
+  // 两条取值路径：先按语义选择器，再退回正文标签就近取数。
+  // 平台改版时 class 会变，但「粉丝总数 / 主页访问」这些文案相对稳定。
+  const text = await bodyText(page)
+  const followers = parseCount(await textOf(page, SELECTORS.followers)) ?? parseLabeledNumber(text, ['粉丝总数', '总粉丝', '粉丝数', '粉丝'])
+  const profileVisits = parseCount(await textOf(page, SELECTORS.profileVisits)) ?? parseLabeledNumber(text, ['主页访问', '主页访客', '主页浏览量'])
   if (followers === null && profileVisits === null) {
     const evidence = await lease.evidence?.('douyin-account-data', runId).catch(() => null)
-    throw selectorMissing('抖音数据概览页没有可读的粉丝/访问数（页面结构可能已改版）。', evidence?.relativePath ?? null)
+    throw selectorMissing(`抖音数据中心页没有可读的粉丝/访问数（页面可能改版或仍在加载）。当前页：${page.url()}`, evidence?.relativePath ?? null)
   }
 
   const record = {
