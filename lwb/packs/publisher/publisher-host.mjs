@@ -583,6 +583,9 @@ export class PublisherHost {
         status: account.status,
         signal: controller.signal,
         evidence: (name) => this.saveCollectionEvidence(account.id, name),
+        // 文本证据（诊断 JSON）：采集读不到数据时，光有截图看不清结构，
+        // 把「读到了什么」原样落盘，比让维护者猜快得多。
+        evidenceJson: (name, data) => this.saveCollectionEvidenceText(account.id, name, data),
       }))
       const guard = new Promise((_, reject) => {
         timer = setTimeout(() => {
@@ -628,6 +631,16 @@ export class PublisherHost {
    * publish evidence tree (`evidence/<jobId>/`) so the two namespaces cannot
    * collide or cross-validate each other.
    */
+  /** 把采集诊断数据（JSON/文本）存进 collection/ 证据目录。失败返回 null，不影响采集。 */
+  async saveCollectionEvidenceText(accountId, name, data) {
+    try {
+      const text = typeof data === 'string' ? data : JSON.stringify(data ?? null, null, 2)
+      const safeName = String(name || 'collection').replace(/[^A-Za-z0-9._-]/gu, '-').slice(0, 80)
+      const relative = await this.store.saveCollectionEvidence(accountId, `${safeName}-${Date.now()}.json`, Buffer.from(text, 'utf8'))
+      return { relativePath: relative, bytes: text.length }
+    } catch { return null }
+  }
+
   async saveCollectionEvidence(accountId, name) {
     try {
       const session = this.browser.sessions.get(accountId)

@@ -350,6 +350,19 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
     }
   }
 
+  // 一条都没匹配上时留一份诊断证据：平台读到几条、标题与链接长什么样。
+  // 「采集成功但没数据」最需要证据——2026-10-29 就是靠截图才定位到选择器失效。
+  const matchedCount = works.filter((work) => bound.some((item) => item.title === work.title)
+    || [...boundNow.values()].some((item) => item.title === work.title)).length
+  if (!matchedCount && typeof lease.evidenceJson === 'function') {
+    await lease.evidenceJson('douyin-works-diagnostic', {
+      works: works.length,
+      withHref: works.filter((work) => work.remoteUrl).length,
+      sample: works.slice(0, 5).map((work) => ({ title: work.title.slice(0, 60), remoteId: work.remoteId })),
+      localTitles: contents.slice(0, 5).map((row) => String(row.title || '').slice(0, 60)),
+    }).catch(() => null)
+  }
+
   const collected = []
   for (const work of works) {
     const target = bound.find((item) => item.title === work.title)
