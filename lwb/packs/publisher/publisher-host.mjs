@@ -586,6 +586,7 @@ export class PublisherHost {
         // 文本证据（诊断 JSON）：采集读不到数据时，光有截图看不清结构，
         // 把「读到了什么」原样落盘，比让维护者猜快得多。
         evidenceJson: (name, data) => this.saveCollectionEvidenceText(account.id, name, data),
+        evidenceFile: (name, bytes) => this.saveCollectionEvidenceBytes(account.id, name, bytes),
       }))
       const guard = new Promise((_, reject) => {
         timer = setTimeout(() => {
@@ -638,6 +639,16 @@ export class PublisherHost {
       const safeName = String(name || 'collection').replace(/[^A-Za-z0-9._-]/gu, '-').slice(0, 80)
       const relative = await this.store.saveCollectionEvidence(accountId, `${safeName}-${Date.now()}.json`, Buffer.from(text, 'utf8'))
       return { relativePath: relative, bytes: text.length }
+    } catch { return null }
+  }
+
+  /** 把采集下载到的原始文件（如平台导出的 CSV/XLSX）原样存进证据目录。 */
+  async saveCollectionEvidenceBytes(accountId, name, bytes) {
+    try {
+      if (!bytes || !bytes.length) return null
+      const safeName = String(name || 'collection').replace(/[^A-Za-z0-9._-]/gu, '-').slice(0, 80)
+      const relative = await this.store.saveCollectionEvidence(accountId, `${safeName}-${Date.now()}.bin`, bytes)
+      return { relativePath: relative, bytes: bytes.length }
     } catch { return null }
   }
 

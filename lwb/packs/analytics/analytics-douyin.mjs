@@ -325,7 +325,7 @@ export function worksFromExport(csvText) {
  * 列表懒加载只渲染 1 条（2026-10-29 诊断证据 works:1 / withHref:0）。
  * 平台自己的导出文件是按作品一行、带完整标题与全部指标的最可靠来源。
  */
-export async function downloadExport(page, { timeoutMs = 60_000, evidence = null } = {}) {
+export async function downloadExport(page, { timeoutMs = 60_000, evidence = null, evidenceFile = null } = {}) {
   if (typeof page.waitForEvent !== 'function') return null
   const downloadPromise = page.waitForEvent('download', { timeout: timeoutMs }).catch(() => null)
   const clickText = async (labels) => {
@@ -354,11 +354,19 @@ export async function downloadExport(page, { timeoutMs = 60_000, evidence = null
     return null
   }
   const path = await download.path().catch(() => null)
-  if (!path) return null
+  if (!path) {
+    await evidence?.('douyin-export-download-no-path').catch(() => {})
+    return null
+  }
   const buffer = await readFile(path).catch(() => null)
-  if (!buffer || !buffer.length) return null
+  if (!buffer || !buffer.length) {
+    await evidence?.('douyin-export-download-empty').catch(() => {})
+    return null
+  }
   // xlsx/zip 是二进制：交给调用方按文件名判断，这里只回传原始字节。
   const name = download.suggestedFilename?.() ?? ''
+  // 把下载到的原始文件留一份证据：格式猜错时不用再跑一遍采集。
+  await evidenceFile?.(`douyin-export-${name || 'file'}`, buffer).catch(() => {})
   return { name, buffer, text: isProbablyText(buffer) ? buffer.toString('utf8') : null }
 }
 
@@ -460,7 +468,7 @@ export async function collectContents(lease, { runId, store, contentIds } = {}) 
   //  2. DOM 结构读取——页面不给作品 id、标题还会被拼接重复，只作兜底。
   let works = []
   let exportHeader = null
-  const exported = await downloadExport(page, { evidence: lease.evidence }).catch(() => null)
+  const exported = await downloadExport(page, { evidence: lease.evidence, evidenceFile: lease.evidenceFile }).catch(() => null)
   if (exported?.text) {
     const parsed = worksFromExport(exported.text)
     exportHeader = parsed.header
