@@ -20,6 +20,12 @@ import { existsSync } from 'node:fs'
  *    deep inside a background job.
  */
 
+/**
+ * 关闭浏览器的等待上限。超过就认为连接已经不可用，直接杀进程。
+ * context.close() 在页面卡死或连接已断时可能永不落定，调用方会因此挂死。
+ */
+const CLOSE_TIMEOUT_MS = 15_000
+
 const CHROME_CANDIDATES = [
   process.env.LWB_PUBLISHER_CHROME,
   process.env.LWB_REMOTION_BROWSER_EXECUTABLE,
@@ -226,7 +232,22 @@ export class PublisherBrowserPool {
     if (!session) return false
     clearTimeout(session.timer)
     this.sessions.delete(accountId)
-    await session.context.close().catch(() => {})
+    // 关闭必须有上限：context.close() 在连接已断/页面卡死时可能永不落定，
+    // 而调用方（采集、发布任务的 finally）会因此永久挂住——实测表现为
+    // 「采集永远 running、没有失败、没有产物」。超时后直接杀浏览器进程。
+    const closed = await Promise.race([
+      session.context.close().then(() => true).catch(() => true),
+      new Promise((resolve) => setTimeout(() => resolve(false), CLOSE_TIMEOUT_MS)),
+    ])
+    if (!closed) {
+      try {
+        const browser = session.context.browser?.()
+        const child = browser?.process?.()
+        child?.kill?.('SIGKILL')
+      } catch { /* 进程已经没了 */ }
+      this.onLog('browser', '浏览器未在时限内关闭，已强制结束进程。')
+      return true
+    }
     this.onLog('browser', '已关闭浏览器会话。')
     return true
   }

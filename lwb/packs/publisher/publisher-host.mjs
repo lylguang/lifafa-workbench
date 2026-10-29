@@ -591,11 +591,34 @@ export class PublisherHost {
         }, timeoutMs)
       })
       return await Promise.race([task, guard])
+    } catch (error) {
+      // 借用方判定登录失效时，把账号状态一并标成 expired。
+      //
+      // 发布路径早就这么做（见 #run 的 PUBLISHER_LOGIN_REQUIRED 分支），
+      // 但采集路径走的是这里——漏了这一步，界面会一直显示「已登录」，
+      // 用户只看到「采集失败」而不知道该重新扫码。2026-10-29 实测：
+      // 抖音 profile 实际已掉登录，账号状态仍是 active。
+      const code = error?.code
+      if (code === 'PUBLISHER_LOGIN_REQUIRED' || code === 'PUBLISHER_ACCOUNT_EXPIRED') {
+        await this.store.patchAccountState(account.id, {
+          status: 'expired',
+          lastCheckedAt: this.now(),
+          lastError: '登录状态已失效，请重新扫码登录。',
+        }).catch(() => {})
+      }
+      throw error
     } finally {
       if (timer) clearTimeout(timer)
       // Abort first, then close: closing the borrowed page must be the last word.
       controller.abort()
-      if (borrowed) await this.browser.close(account.id).catch(() => {})
+      if (borrowed) {
+        // 关闭再上一次保险：即使 browser.close 内部卡住，也不能让借用方
+        // （采集/发布）永远等下去——那样整轮任务会停在 running 且没有失败原因。
+        await Promise.race([
+          this.browser.close(account.id).catch(() => {}),
+          new Promise((resolve) => setTimeout(resolve, 30_000)),
+        ])
+      }
       this.busy.delete(account.id)
     }
   }

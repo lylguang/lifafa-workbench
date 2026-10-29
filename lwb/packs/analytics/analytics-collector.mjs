@@ -179,7 +179,12 @@ export class AnalyticsCollector {
       // 单次页面操作不许超过账号剩余预算，否则 300s 的墙钟封顶形同虚设。
       const timeoutMs = Math.min(COLLECTION_BUDGET.pageTimeoutMs, remaining)
       try {
-        await this.publisher.withAccountPage(account.id, async (lease) => {
+        // 硬上限：withAccountPage 内部只给「借用任务」设了超时，
+        // 浏览器获取/关闭这两步没有上限——实测一个掉登录的账号能把整轮采集
+        // 卡成永久 running（done 0/1、没有失败、没有产物，而且此后每次采集
+        // 都被 alreadyRunning 挡住）。这里对整段加一道兜底。
+        await Promise.race([
+          this.publisher.withAccountPage(account.id, async (lease) => {
           await adapter.collectAccount(lease, {
             runId: run.runId,
             contentIds,
@@ -208,7 +213,12 @@ export class AnalyticsCollector {
               await this.store.saveRun(publicRun(run)).catch(() => {})
             }
           }
-        }, { timeoutMs, headless: true })
+          }, { timeoutMs, headless: true }),
+          new Promise((_, reject) => {
+            const timer = setTimeout(() => reject(new CollectorError('PUBLISHER_ACCOUNT_TIMEOUT', '采集超时，该平台响应过慢')), COLLECTION_BUDGET.accountBudgetMs)
+            timer.unref?.()
+          }),
+        ])
         return
       } catch (error) {
         const failure = describeFailure(error)
