@@ -334,3 +334,63 @@ function readBoundary(token, unitFor) {
   if (!unit) return null
   return Number(call[2]) * unit
 }
+// ── 场景时长守卫 ────────────────────────────────────────────────────────────
+//
+// 2026-10-28 对 41 条历史成片的统计结论：
+//   · 单幕超过 30 秒的 4 条里 3 条最终被独立审片否决（73/58/78 分）；
+//   · 平均幕长 45.7 秒的那条是全库最低分（58 分，最长一幕 78 秒）；
+//   · 通过片子的平均幕长集中在 4–12 秒。
+// 节奏病态在渲染前就能从 SCENES 表读出来——在导演预检阶段打回改表，
+// 代价一次 LLM 往返；等渲染完被审片否决再进修复轮，贵 15–35 分钟，
+// 且修复提示词 bias 是「保留已有场景」，实际从不改表。
+export const SCENE_PACING_LIMITS = Object.freeze({
+  maxSceneSeconds: 30,
+  avgSceneSeconds: 20,
+  tailDragRatio: 1.8,
+  tailDragMinAvg: 15,
+})
+
+/**
+ * 从场景跨度里找节奏问题，返回可执行的人话清单（空数组 = 通过）。
+ *
+ * 只看单幕上限、全片均值、尾段拖沓三个量，刻意不看幕数——
+ * 幕数多不是问题（622s/58 幕那条拿了 85 分），幕长失衡才是。
+ * spans 来自 parseSceneSpans（{id?, start, end}，单位秒）。
+ */
+export function scenePacingFindings(spans) {
+  const list = (Array.isArray(spans) ? spans : [])
+    .map((span) => ({ id: span?.id ?? '', start: Number(span?.start), end: Number(span?.end) }))
+    .filter((span) => Number.isFinite(span.start) && Number.isFinite(span.end) && span.end > span.start)
+  if (list.length < 3) return []
+  const durations = list.map((span) => span.end - span.start)
+  const avg = durations.reduce((sum, value) => sum + value, 0) / durations.length
+  const maxIndex = durations.reduce((best, value, index) => (value > durations[best] ? index : best), 0)
+  const max = durations[maxIndex]
+  const findings = []
+  if (max > SCENE_PACING_LIMITS.maxSceneSeconds) {
+    findings.push(
+      `第 ${maxIndex + 1} 幕（${list[maxIndex].id || '未命名'}）长 ${max.toFixed(1)} 秒，超过 ${SCENE_PACING_LIMITS.maxSceneSeconds} 秒上限。`
+      + '把它拆成 2–3 个各有语义推进的短幕，新边界必须回 inputs/subtitles.srt 按真实 cue 起止校准。',
+    )
+  }
+  if (avg > SCENE_PACING_LIMITS.avgSceneSeconds) {
+    findings.push(
+      `全片平均幕长 ${avg.toFixed(1)} 秒，超过 ${SCENE_PACING_LIMITS.avgSceneSeconds} 秒上限——这是审片实测反复否决的「节奏拖沓」形态。`
+      + '整体重排 SCENES 表：超长幕拆分、每幕只讲一件事，不要靠改画面组件来回避。',
+    )
+  }
+  if (list.length >= 6) {
+    const k = Math.floor(durations.length / 3)
+    const head = durations.slice(0, k)
+    const tail = durations.slice(-k)
+    const headAvg = head.reduce((sum, value) => sum + value, 0) / k
+    const tailAvg = tail.reduce((sum, value) => sum + value, 0) / tail.length
+    if (tailAvg > SCENE_PACING_LIMITS.tailDragMinAvg && tailAvg > headAvg * SCENE_PACING_LIMITS.tailDragRatio) {
+      findings.push(
+        `节奏前紧后松：结尾 1/3 平均幕长 ${tailAvg.toFixed(1)} 秒，是开头（${headAvg.toFixed(1)} 秒）的 ${(tailAvg / headAvg).toFixed(1)} 倍。`
+        + '观众流失集中在尾段——压缩或拆分尾段场景，让全片幕长走势平稳。',
+      )
+    }
+  }
+  return findings
+}

@@ -1168,6 +1168,34 @@ function boundedHttpUrl(value, label) {  const raw = text(value, label, 4000)
   return parsed.toString()
 }
 
+/**
+ * 质量基线：每条成片一行 JSONL，追加到项目目录。
+ *
+ * 没有基线，改提示词/调阈值都是「感觉更好了」。三个终态都记：
+ * committed（提交成功）/ technical-qc-failed / editorial-rejected，
+ * 外加场景时长结构——渲染前守卫（scenePacingFindings）的阈值就靠它校准。
+ * 追加失败不抛：基线是度量辅助，不该让一条成功的成片因此报错。
+ */
+function appendQualityBaseline(projectRoot, record) {
+  try {
+    const line = `${JSON.stringify({ at: new Date().toISOString(), ...record })}\n`
+    appendFileSync(join(projectRoot, 'quality-baseline.jsonl'), line, { encoding: 'utf8', flag: 'a' })
+  } catch { /* 度量失败不影响主流程 */ }
+}
+
+/** 场景跨度 → 结构统计，供基线与日志使用。 */
+function sceneStructureStats(spans) {
+  const durations = (Array.isArray(spans) ? spans : [])
+    .map((span) => Number(span?.end) - Number(span?.start))
+    .filter((value) => Number.isFinite(value) && value > 0)
+  if (!durations.length) return null
+  return {
+    sceneCount: durations.length,
+    avgSceneSeconds: +(durations.reduce((sum, value) => sum + value, 0) / durations.length).toFixed(1),
+    maxSceneSeconds: +Math.max(...durations).toFixed(1),
+  }
+}
+
 function srtTime(milliseconds) {
   const total = Math.max(0, Math.round(milliseconds))
   const hours = Math.floor(total / 3_600_000)
@@ -1676,6 +1704,28 @@ async function extractVideoReviewFrames(videoPath, outputDir, durationSeconds, s
   const failure = results.find((result) => result.status === 'rejected')
   if (failure) throw failure.reason
   return { timestamps, frameFiles }
+}
+
+/**
+ * 按审片点名的精确时间点补抽证据帧。
+ *
+ * 修复轮原先只拿场景中点采样帧——审片说「294.9 秒柱图与字幕错位」时，
+ * 导演手里根本没有 294.9 秒的帧，只能靠时间戳脑补现场。逐帧容错：
+ * 个别时间点抽不出来就丢掉，部分证据仍好过没有。
+ */
+async function extractFramesAt(videoPath, outputDir, stamps, signal) {
+  await mkdir(outputDir, { recursive: true, mode: 0o700 })
+  const frameFiles = stamps.map((_, index) => join(outputDir, `finding-${String(index + 1).padStart(2, '0')}.png`))
+  const results = await Promise.allSettled(stamps.map(async (stamp, index) => {
+    await execFileAsync('ffmpeg', ['-v', 'error', '-y', '-ss', String(stamp), '-i', videoPath, '-frames:v', '1', frameFiles[index]], { signal, maxBuffer: 1024 * 1024 * 4 })
+    const info = await stat(frameFiles[index])
+    if (!info.isFile() || info.size < 256) throw new Error('抽帧文件为空')
+  }))
+  const kept = { timestamps: [], frameFiles: [] }
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled') { kept.timestamps.push(stamps[index]); kept.frameFiles.push(frameFiles[index]) }
+  })
+  return kept
 }
 
 // 接触表：把成片均匀采样拼成一张 4 列网格图（帧数随时长 8–20 张，480px 宽），
@@ -4896,6 +4946,23 @@ async #mimoReferenceDataUrl(root, input) {
           this.signal?.throwIfAborted()
           const report = await inspectSpokenVideoAgentProject(workspace)
           if (report.passed) await mergeRuntimeEvalFailure(report, workspace, this.signal)
+          // 场景时长守卫（渲染前）：节奏病态的场景表在这里就打回，不进渲染。
+          // 依据与阈值见 spoken-video-scene-table.mjs 的 scenePacingFindings。
+          // 初导与修复后复查两处 validate 都要过这道闸：修复轮最容易只改
+          // 组件不改 SCENES，改完节奏照样拖。
+          if (report.passed) {
+            try {
+              const pacing = scenePacingFindings(parseSceneTable(await readFile(workspace.creativeFile, 'utf8')))
+              if (pacing.length) {
+                report.passed = false
+                report.repairable = true
+                for (const message of pacing) {
+                  report.failures.push(`scene-pacing: ${message}`)
+                  report.findings.push({ file: 'src/CreativeVideo.tsx', line: 1, column: 1, message })
+                }
+              }
+            } catch { /* 场景表读不出来时不拦截 */ }
+          }
           await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: report.passed, failures: report.failures, findings: report.findings, creativeBytes: report.creativeBytes } })
           return report
         },
@@ -5037,7 +5104,15 @@ async #mimoReferenceDataUrl(root, input) {
       const technicalReport = { generatedAt: new Date().toISOString(), projectId: run.projectId, videoTaskId: run.id, attempt: attemptNumber, ...technical }
       await Promise.all([writeJson(technicalReportPath, technicalReport), writeJson(canonicalTechnicalReportPath, technicalReport)])
       await this.#setVideoPhase(root, run.id, 'technical-qc', { technical, technicalReportFile: portableRelative(root, technicalReportPath) })
-      if (!technical.passed) fail('SPOKEN_VIDEO_VIDEO_TECHNICAL_QC_FAILED', `成片未通过技术质检：${technical.issues.join(' ')}`)
+      if (!technical.passed) {
+        appendQualityBaseline(root, {
+          outcome: 'technical-qc-failed', runId: run.id, projectId: run.projectId,
+          durationSeconds: videoProbe.durationSeconds ?? null,
+          attempts: repairAttempt, score: null,
+          issues: technical.issues.length, ...sceneStructureStats(sceneSpans),
+        })
+        fail('SPOKEN_VIDEO_VIDEO_TECHNICAL_QC_FAILED', `成片未通过技术质检：${technical.issues.join(' ')}`)
+      }
 
       await this.#setVideoPhase(root, run.id, 'editorial-review')
       const reviewerRole = repairAttempt ? `reviewer-${attemptNumber}` : 'reviewer'
@@ -5080,6 +5155,23 @@ async #mimoReferenceDataUrl(root, input) {
         editorialRepair: { attempts: attempt, maxAttempts: VIDEO_EDITORIAL_REPAIR_MAX_ATTEMPTS, history: editorialRepairHistory },
       })
       const creatorRole = `creator-repair-${attempt}`
+      // 按审片 findings 的精确时间点补抽证据帧（≤6 张，间隔小于 1.5 秒的去重），
+      // 让导演看到审片实际看到的位置，而不是拿场景中点帧脑补。
+      let findingFrames = null
+      try {
+        const stamps = []
+        for (const finding of reviewed.review.findings || []) {
+          const stamp = Number(finding?.timestampSeconds)
+          if (!Number.isFinite(stamp) || stamp < 0) continue
+          if (stamps.some((kept) => Math.abs(kept - stamp) < 1.5)) continue
+          stamps.push(stamp)
+          if (stamps.length >= 6) break
+        }
+        if (stamps.length) {
+          const dir = join(workspace.projectDir, 'outputs', 'review-frames', `attempt-${attempt}`, 'findings')
+          findingFrames = await extractFramesAt(reviewed.renderedPath, dir, stamps, this.signal)
+        }
+      } catch { /* 证据帧失败不阻塞修复，退回原采样帧 */ }
       await this.videoCreator({
         prompt: buildVideoEditorialRepairPrompt({
           runDir: workspace.projectDir,
@@ -5089,12 +5181,30 @@ async #mimoReferenceDataUrl(root, input) {
           contactSheetFile: reviewed.contactSheet?.file ?? null,
           attempt,
           maximum: VIDEO_EDITORIAL_REPAIR_MAX_ATTEMPTS,
+          findingFrames,
         }),
         agent,
         validate: async () => {
           this.signal?.throwIfAborted()
           const report = await inspectSpokenVideoAgentProject(workspace)
           if (report.passed) await mergeRuntimeEvalFailure(report, workspace, this.signal)
+          // 场景时长守卫（渲染前）：节奏病态的场景表在这里就打回，不进渲染。
+          // 依据与阈值见 spoken-video-scene-table.mjs 的 scenePacingFindings。
+          // 初导与修复后复查两处 validate 都要过这道闸：修复轮最容易只改
+          // 组件不改 SCENES，改完节奏照样拖。
+          if (report.passed) {
+            try {
+              const pacing = scenePacingFindings(parseSceneTable(await readFile(workspace.creativeFile, 'utf8')))
+              if (pacing.length) {
+                report.passed = false
+                report.repairable = true
+                for (const message of pacing) {
+                  report.failures.push(`scene-pacing: ${message}`)
+                  report.findings.push({ file: 'src/CreativeVideo.tsx', line: 1, column: 1, message })
+                }
+              }
+            } catch { /* 场景表读不出来时不拦截 */ }
+          }
           await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: report.passed, failures: report.failures, findings: report.findings, creativeBytes: report.creativeBytes } })
           return report
         },
@@ -5128,6 +5238,13 @@ async #mimoReferenceDataUrl(root, input) {
       // 落盘不等于放行——它仍然不会进发布页（qc 未通过、没有 userOverride），
       // 只是给了用户一个「我看过审片意见，这条我要」的选择。放行由人工显式触发。
       await this.#setVideoPhase(root, run.id, 'committing')
+      appendQualityBaseline(root, {
+        outcome: 'editorial-rejected', runId: run.id, projectId: run.projectId,
+        durationSeconds: videoProbe.durationSeconds ?? null,
+        attempts: editorialRepairHistory.length, score: review.score ?? null,
+        issues: technical.issues.length,
+        ...sceneStructureStats(parseSceneTable(await readFile(workspace.creativeFile, 'utf8'))),
+      })
       const rejectedVideoFile = `media/videos/${run.id}.mp4`
       const rejectedVideoPath = resolve(root, rejectedVideoFile)
       await mkdir(dirname(rejectedVideoPath), { recursive: true, mode: 0o700 })
@@ -5189,6 +5306,13 @@ async #mimoReferenceDataUrl(root, input) {
     const qcCommit = await this.projectsStore.commitProduced(agent, {
       projectId: run.projectId, expectedRevision: videoCommit.project.revision, stage: 'qc', idempotencyKey: `media-${run.id}-qc`, source: 'spoken-video/ai-review',
       payload: { mode: 'ai-director', reportFile, reviewFile, passed: true, technical, review, sampledFrames: technical.sampledFrames, contactSheet: technical.contactSheet },
+    })
+    appendQualityBaseline(root, {
+      outcome: 'committed', runId: run.id, projectId: run.projectId,
+      durationSeconds: videoProbe.durationSeconds ?? null,
+      attempts: editorialRepairHistory.length, score: review.score ?? null,
+      issues: technical.issues.length,
+      ...sceneStructureStats(parseSceneTable(await readFile(workspace.creativeFile, 'utf8'))),
     })
     await this.#setVideoPhase(root, run.id, 'completed', { committedRevision: qcCommit.project.revision })
     return {

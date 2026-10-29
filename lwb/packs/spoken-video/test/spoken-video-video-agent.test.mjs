@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { assertObjectJsonSchema } from '../../../../vendor/deepseek-harness/packages/core/tools/lib/index.js'
+import { scenePacingFindings } from '../spoken-video-scene-table.mjs'
 import {
   buildVideoCreatorContinuationPrompt,
   buildVideoCreatorPrompt,
+  buildVideoCreatorRepairPrompt,
   buildVideoEditorialRepairPrompt,
   buildVideoReviewerPrompt,
   normalizeVideoReview,
@@ -264,4 +266,47 @@ test('导演提示词把横屏铺满宽度写成可检查的硬约束', () => {
   const prompt = buildVideoCreatorPrompt({ runDir: '/tmp/run' })
   assert.match(prompt, /左右边界各不超过画面宽度的 8%/u, '横屏留白要有量化上限')
   assert.match(prompt, /禁止把内容挤在左半边/u, '要直接点出被反复否决的具体形态')
+})
+
+// ── 场景节奏守卫 ────────────────────────────────────────────────────────────
+//
+// 阈值来自 41 条历史成片：单幕>30s 的 4 条里 3 条被审片否决（73/58/78 分）；
+// 平均幕长 45.7s 那条是全库最低分。守卫在渲染前打回，走 creator repair 通道，
+// 代价一次 LLM 往返——比渲染后被否决再进修复轮省 15–35 分钟。
+
+test('scenePacingFindings 抓住单幕超长、整体拖沓与尾段失衡', () => {
+  // 正常节奏：6–12s 均匀分布 → 无发现
+  const healthy = Array.from({ length: 20 }, (_, i) => ({ id: `s${i}`, start: i * 10, end: (i + 1) * 10 }))
+  assert.deepEqual(scenePacingFindings(healthy), [])
+  // 单幕超长：一条 38s 的幕（211s/38.2s 那条实测被否决）
+  const withLong = [...healthy.slice(0, 10), { id: 's-long', start: 100, end: 138.2 }, ...healthy.slice(10).map((s) => ({ ...s, start: s.start + 38, end: s.end + 38 }))]
+  const findings = scenePacingFindings(withLong)
+  assert.ok(findings.some((text) => /38\.2 秒/.test(text)), '要点名超长那幕与秒数')
+  assert.ok(findings.every((text) => /subtitles\.srt|校准/.test(text) || /SCENES/.test(text) || /拆/.test(text)), '发现必须可执行')
+  // 整体拖沓：平均 45.7s（全库最低分那条的形态）
+  const bloated = Array.from({ length: 12 }, (_, i) => ({ id: `s${i}`, start: i * 45.7, end: (i + 1) * 45.7 }))
+  assert.ok(scenePacingFindings(bloated).some((text) => /平均幕长 45\.7 秒/.test(text)))
+  // 尾段拖沓：末 1/3 是开头 1/3 的 3 倍且超过 15s
+  const tailDrag = Array.from({ length: 9 }, (_, i) => ({ id: `s${i}`, start: i * 10, end: (i + 1) * 10 })).map((s, i) => i >= 6 ? { ...s, start: 60 + (i - 6) * 36, end: 60 + (i - 5) * 36 } : s)
+  assert.ok(scenePacingFindings(tailDrag).some((text) => /前紧后松/.test(text)))
+  // 健康的密集短幕不能误伤：58 幕 / 每幕 10s（622s/58 幕那条拿了 85 分）
+  assert.deepEqual(scenePacingFindings(Array.from({ length: 58 }, (_, i) => ({ id: `s${i}`, start: i * 10.7, end: (i + 1) * 10.7 }))), [])
+})
+
+test('修复提示词要求节奏/版式类问题改 SCENES 表，并带上审片点名帧', () => {
+  const editorial = buildVideoEditorialRepairPrompt({
+    runDir: '/tmp/run', review: { score: 61, findings: [{ severity: 'major', timestampSeconds: 294.9, message: '柱图与字幕错位' }], reviewEvidence: [] },
+    frameFiles: ['a.png'], timestamps: [295], findingFrames: { timestamps: [294.9], frameFiles: ['findings/finding-01.png'] },
+    attempt: 1, maximum: 2,
+  })
+  assert.match(editorial, /审片点名时间点的精确帧/u, '要带上 findings 时间点的证据帧')
+  assert.match(editorial, /294\.9 秒：.*finding-01\.png/u, '证据帧与时间点成对出现')
+  assert.match(editorial, /必须直接调整 SCENES 表/u, '节奏类问题必须指向场景表')
+
+  const creator = buildVideoCreatorRepairPrompt({
+    runDir: '/tmp/run', attempt: 1, maximum: 2,
+    report: { failures: ['scene-pacing: 第 3 幕（s03）长 38.2 秒，超过 30 秒上限。'], findings: [], passed: false, creativeBytes: 100 },
+  })
+  assert.match(creator, /scene-pacing/u, '守卫失败清单要原样进修复提示词')
+  assert.match(creator, /必须通过调整 SCENES 表解决/u)
 })

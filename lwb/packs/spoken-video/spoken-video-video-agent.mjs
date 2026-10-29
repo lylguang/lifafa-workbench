@@ -142,11 +142,14 @@ export function buildVideoCreatorRepairPrompt({ runDir, report, attempt, maximum
     `任务工作目录：${runDir}`,
     ...report.failures.map((failure) => `- ${failure}`),
     '保留已有场景、时间轴和创意，只修正上述问题。只允许修改 src/CreativeVideo.tsx，不得修改受保护外壳、检查器或检查清单。',
+    // 场景时长守卫（scene-pacing）打回的问题根因在 SCENES 表：改组件改不了节奏。
+    // 必须拆分超长/雷同的幕并按字幕真实时间戳校准新边界，然后重跑预检确认。
+    '若上述问题以 scene-pacing 开头：那是场景节奏守卫的判定，必须通过调整 SCENES 表解决——拆分超长或版式雷同的幕、让每幕只讲一件事，新边界回 inputs/subtitles.srt 按真实 cue 起止校准；只改画面组件无法通过下一轮检查。',
     '使用帧驱动动画；不需要 CSS 过渡时删除属性或明确使用 none。完成后运行 node scripts/preflight.mjs，确认检查通过。不要重建整个工程或重新生成上游素材。',
   ].join('\n\n')
 }
 
-export function buildVideoEditorialRepairPrompt({ runDir, review, frameFiles, timestamps, contactSheetFile, attempt, maximum }) {
+export function buildVideoEditorialRepairPrompt({ runDir, review, frameFiles, timestamps, contactSheetFile, attempt, maximum, findingFrames = null }) {
   const evidence = (Array.isArray(review?.reviewEvidence) ? review.reviewEvidence : []).slice(0, 8).map((item) => ({
     timestampSeconds: item.timestampSeconds,
     observedMainVisual: clipped(item.observedMainVisual, 600),
@@ -162,8 +165,16 @@ export function buildVideoEditorialRepairPrompt({ runDir, review, frameFiles, ti
     `任务工作目录：${runDir}`,
     '继续现有 Remotion 工程。先读取 task.json、inputs/draft.json 和 src/CreativeVideo.tsx，再查看下面列出的本轮成片抽帧。只允许修改 src/CreativeVideo.tsx；不得修改字幕、配音、受保护外壳、预检器或输入文件。',
     `本轮抽帧：\n${frameFiles.map((file, index) => `- ${timestamps[index]} 秒：${file}`).join('\n')}${contactSheetFile ? `\n全片接触表（4 列网格、时间从左到右从上到下递增）：${contactSheetFile}` : ''}`,
+    // 审片点名时间点的精确帧：这些是审片实际看到画面的位置，比场景中点采样
+    // 更贴近 findings 描述的现场。由主流程按 findings.timestampSeconds 补抽。
+    ...(Array.isArray(findingFrames?.frameFiles) && findingFrames.frameFiles.length
+      ? [`审片点名时间点的精确帧：\n${findingFrames.frameFiles.map((file, index) => `- ${findingFrames.timestamps[index]} 秒：${file}`).join('\n')}`]
+      : []),
     `审片结果：\n${JSON.stringify({ score: review?.score, summary: clipped(review?.summary, 1000), findings, reviewEvidence: evidence }, null, 2)}`,
     '逐项修复 blocker 和 major 问题。问题涉及重复版式时，必须改变对应段落的视觉表达和空间结构，不能只换颜色或文字；问题涉及大面积无意义留白时，应重新分配主体尺度和垂直构图；问题涉及压叠、悬空连线或关系不可读时，应修正布局与元素生命周期。保留已经有效的场景，不要无关重做整片。',
+    // 节奏/版式类问题的根因在场景表：组件修补改不了节奏。2026-10-29 补，
+    // 依据是 41 条历史成片里修复轮对节奏类 findings 从不改 SCENES 的实测。
+    '若问题涉及节奏拖沓、单幕过长、场景时长失衡或连续多幕版式雷同：必须直接调整 SCENES 表——拆分过长或雷同的幕、让每幕只讲一件事，新边界回 inputs/subtitles.srt 按真实 cue 起止校准；只改画面组件无法解决这类问题。',
     // 修复轮最容易按下葫芦浮起瓢：补了空白又造成出界/重叠。给出去重后的硬性自检。
     '修复时不要只顾被点名的那一帧：补内容常会把元素挤出边界。落盘前对每个场景复核三点——主内容覆盖画布高度约 60%–85% 且纵向居中；所有元素的右边界在画布宽度减 80px 之内、长英文单词不被相邻元素遮挡或截断；任意两个文本块不重叠（横幅、卡片、装饰窗口的坐标区间互斥）。',
     '修复必须落实到实际代码和完整时间轴。不要删除有问题的内容来规避审片，也不要修改字幕或稿件。完成后运行 node scripts/preflight.mjs，并用 task.json.commands.still 在问题时间点附近检查代表帧；本阶段不要自行渲染完整成片，主流程会统一重渲染和复审。',
