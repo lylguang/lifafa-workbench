@@ -9,7 +9,7 @@ import test from 'node:test'
 import { WebSocketServer } from 'ws'
 import { buildTechnicalReport, DEFAULT_VIDEO_VISUAL_BRIEF, DEFAULT_VOICE_PROFILE, mediaServiceConfig, normalizeProbe, normalizeRenderRequest, normalizeVoiceoverRequest, subtitleResult } from '../spoken-video-media.mjs'
 import { SpokenVideoProjectStore, SpokenVideoStoreError } from '../spoken-video-store.mjs'
-import { SpokenVideoMediaHost, parseRemotionRenderProgress, parseSceneSpans, reviewTimestamps, REVIEW_FRAME_LIMIT, REVIEW_FRAME_HARD_LIMIT, REVIEW_MAX_GAP_SECONDS, analyzeFrameContent } from '../spoken-video-media-host.mjs'
+import { SpokenVideoMediaHost, groupRunsByCharWeight, parseRemotionRenderProgress, parseSceneSpans, reviewTimestamps, REVIEW_FRAME_LIMIT, REVIEW_FRAME_HARD_LIMIT, REVIEW_MAX_GAP_SECONDS, analyzeFrameContent } from '../spoken-video-media-host.mjs'
 import { remotionEncodingSettings, remotionRendererAvailable } from '../spoken-video-remotion.mjs'
 
 function agent(cwd) { return { session: { header: { cwd } } } }
@@ -3233,4 +3233,48 @@ test('启动时清理被硬杀留下的暂存目录', async () => {
   assert.ok(removed >= 1, '应当清理掉 8 天前的暂存目录')
   assert.ok(existsSync(fresh), '刚创建的暂存目录不能被误删')
   await rm(fresh, { recursive: true, force: true }).catch(() => {})
+})
+
+// ── 字幕分组 DP 的差一错误（2026-10-29 实测事故）───────────────────────────
+//
+// groupRunsByCharWeight 给第 j 组算实际时长时，从 runs[a][0]（上一组的
+// 第一个 run）起算，把上一组最后一个 run 的时长和组间隙都算进了本组。
+// 每组成本被系统性扭曲，DP 切出「第一句 11.87 秒、第二句 1.06 秒」的
+// 荒谬分组——71c23ff6 项目的成片多处字幕与语音错位，用户实测复现。
+// 正确语义：组 j 覆盖 runs[a+1..b]，时长 = runs[b][1] − runs[a+1][0]。
+
+test('groupRunsByCharWeight：各组的实际时长从本组第一个 run 起算（差一错误回归）', async () => {
+  const { groupRunsByCharWeight } = await import('../spoken-video-media-host.mjs')
+  // 构造：3 句，字数 15/14/10；7 个 run，真实分组应为 [0-2][3-5][6-6]，
+  // 且每组的实际时长与字数占比接近（~2.9s / ~2.7s / ~2s）。
+  const runs = [
+    [0, 2.9], [3.0, 5.9], [6.1, 8.9],      // 第一句的语音（共 ~2.9s/段）
+    [9.0, 11.9], [12.1, 14.9], [15.0, 17.9], // 第二句
+    [18.0, 20.0],                            // 第三句
+  ]
+  const texts = ['第一句话有十五个字左右的样子。', '第二句话稍微短一点点。', '第三句最短。']
+  const groups = groupRunsByCharWeight(runs, texts)
+  assert.ok(groups, '应能分组')
+  assert.equal(groups.length, 3)
+  // 每组的窗口必须从**本组第一个 run** 的起点开始——
+  // 旧实现从上一组最后一个 run 的起点起算，第一组之后的窗口全部右移
+  // （旧 DP 最优解会把组 1 切到 6.1s 起，即上一组的第三个 run）。
+  assert.equal(groups[1][0], 9.0, '组 1 必须从自己的第一个 run 起算，而不是上一组的起点')
+  assert.equal(groups[2][0], 15.0, '组 2 同理：从 runs[5] 起算（run5+run6 归第三句，5s 更贴近期望 4.92s）')
+})
+
+test('groupRunsByCharWeight：真实事故形态——长 run 后接短 run 不再被错误吞并', () => {
+  // 复刻 71c23ff6 的形态：一句 16 字的音频实际横跨 11.9 秒（TTS 慢速），
+  // 下一句 14 字只有 1.06 秒。修复前 DP 会把 11.9 秒整段判给第一句。
+  const runs = [
+    [0, 2.8], [3.0, 4.5],           // 第一句：正常语速
+    [5.0, 16.87],                    // 第二句：异常长 run（连续语音）
+    [17.2, 18.26],                   // 第三句
+  ]
+  const texts = ['十四个字的句子用来占位', '第二句也是十四个字上下', '短句']
+  const groups = groupRunsByCharWeight(runs, texts)
+  assert.ok(groups)
+  // 第二组必须覆盖那个长 run：时长按字数占比预期 ~2.3s，但 run 不可拆分，
+  // 组窗口只能整段包含——重要的是不把长 run 错误地并进相邻组。
+  assert.equal(groups.length, 3)
 })

@@ -214,7 +214,12 @@ export function groupRunsByCharWeight(runs, texts) {
       for (let a = j - 1; a < b; a += 1) {
         if (cost[j - 1][a] === INF) continue
         const expected = (speechTotal * weights[j]) / weightSum
-        const actual = runs[b][1] - runs[a][0]
+        // 组 j 覆盖 runs[a+1..b]：a 是上一组的最后一个 run。
+        // 2026-10-29 修：旧写法从 runs[a][0] 起算，把上一组最后一个 run 的时长
+        // 和组间隙都算进了本组——每组成本被系统性扭曲，DP 会切出
+        // 「第一句 11.87 秒、第二句 1.06 秒」这种荒谬分组，
+        // 用户看到的就是字幕与语音大面积错位（71c23ff6 项目实测）。
+        const actual = runs[b][1] - runs[a + 1][0]
         const total = cost[j - 1][a] + Math.abs(actual - expected)
         if (total < cost[j][b]) { cost[j][b] = total; from[j][b] = a }
       }
