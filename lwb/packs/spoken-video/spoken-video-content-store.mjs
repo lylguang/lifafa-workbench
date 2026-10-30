@@ -489,10 +489,23 @@ function scriptGenerationsFile(value, protectedIds = new Set()) {
   if (value?.schemaVersion !== SCRIPT_GENERATION_SCHEMA || !Array.isArray(value.generations)) return { schemaVersion: SCRIPT_GENERATION_SCHEMA, generations: [] }
   const active = value.generations.filter((item) => ACTIVE_SCRIPT_GENERATION_STATUSES.has(item?.status))
   const terminal = value.generations.filter((item) => !ACTIVE_SCRIPT_GENERATION_STATUSES.has(item?.status))
-  // 常规窗口取末 N 条，但被在跑轮次引用的记录额外留下——它可能正好在窗口之外。
-  const recent = terminal.slice(-SCRIPT_GENERATION_TERMINAL_LIMIT)
+  // 常规窗口取**时间最新**的 N 条，但被在跑轮次引用的记录额外留下——它可能正好在窗口之外。
+  //
+  // 2026-10-30 实测事故：这里原来写的是 `terminal.slice(-N)`，按**数组位置**取末 N 条。
+  // 但本函数返回值把 active 排在数组头部（见最后一行），于是在跑的记录写入后就在
+  // 位置 0，跑完变终端仍留在位置 0；一旦终端记录超 40 条，`slice(-40)` 会把
+  // **时间最新的那条当成最旧的丢掉**——文件里明明有 41 条（包括刚跑完的那条），
+  // 读取时却被裁掉，`scriptGenerationStatus` 永久报「写稿生成记录不存在」，
+  // 后续所有 mutate 静默 no-op。
+  // 修：先按时间升序排，再取末 N——位置不等于时间。
+  const timeOf = (item) => {
+    const stamp = Date.parse(item?.startedAt || item?.queuedAt || '')
+    return Number.isFinite(stamp) ? stamp : 0
+  }
+  const chronological = [...terminal].sort((left, right) => timeOf(left) - timeOf(right))
+  const recent = chronological.slice(-SCRIPT_GENERATION_TERMINAL_LIMIT)
   const kept = new Set(recent.map((item) => item?.id))
-  const extra = terminal.filter((item) => protectedIds.has(item?.id) && !kept.has(item?.id))
+  const extra = chronological.filter((item) => protectedIds.has(item?.id) && !kept.has(item?.id))
   return { schemaVersion: SCRIPT_GENERATION_SCHEMA, generations: [...active, ...extra, ...recent] }
 }
 function emptyScriptGenerationsFile() { return { schemaVersion: SCRIPT_GENERATION_SCHEMA, generations: [] } }

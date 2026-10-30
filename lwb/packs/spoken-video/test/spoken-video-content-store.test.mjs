@@ -887,3 +887,36 @@ test('without a running round the window still drops the oldest records', async 
   assert.equal(listed.some((item) => item.id === generations[0].id), false, 'the oldest is dropped')
   assert.ok(listed.some((item) => item.id === generations[44].id), 'the newest is kept')
 })
+
+test('刚跑完的写稿记录不会因为「数组位置在头部」被当成最旧的裁掉', async (t) => {
+  // 2026-10-30 实测事故：在跑的记录写入时被排到数组头部（返回值约定是
+  // [...active, ...recent]），跑完变终端后仍留在头部。终端记录一旦超过 40 条，
+  // 旧的 `terminal.slice(-40)` 会按**位置**切掉头部那条——而它恰恰是时间最新的。
+  // 现象：文件里明明有这条 completed 记录，listScriptGenerations 与
+  // scriptGenerationStatus 却都看不到它（永久报「写稿生成记录不存在」）。
+  const { workspace, store, currentAgent } = await setup(t)
+  const justFinished = {
+    id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+    status: 'completed',
+    // 时间最新，但按位置排在数组第 0 位（模拟「在跑时被前置」的写入顺序）
+    startedAt: '2026-10-30T12:00:00Z',
+    completedAt: '2026-10-30T12:01:00Z',
+    projectId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  }
+  const older = Array.from({ length: 40 }, (_, n) => ({
+    id: `g${String(n).padStart(7, '0')}-0000-4000-8000-000000000000`,
+    status: 'completed',
+    startedAt: `2026-10-${String(n % 28 + 1).padStart(2, '0')}T00:00:00Z`,
+  }))
+  await mkdir(join(workspace, 'data'), { recursive: true })
+  await writeFile(join(workspace, 'data', 'script-generations.json'), JSON.stringify({
+    schemaVersion: 1,
+    generations: [justFinished, ...older],
+  }))
+
+  const listed = await store.listScriptGenerations(currentAgent)
+  assert.ok(listed.some((item) => item.id === justFinished.id), '时间最新的记录必须留在窗口内，不管它在数组第几位')
+  const record = await store.scriptGenerationStatus(currentAgent, { id: justFinished.id })
+  assert.equal(record.status, 'completed', '并且能按 id 读到——否则前端会永久报「记录不存在」')
+  assert.equal(listed.length, 40, '窗口仍然有界')
+})
