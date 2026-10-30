@@ -20,6 +20,17 @@ window.__ModuleLoader__.load({
     const PACK_ID = 'story-account';
     const NS = 'storyAccount';
 
+    // 写稿记录四态：成功 / 失败 / 进行中 / 排队中。
+    // 后端只产出 'success' / 'failed' / 'running' 三种（见 story-account-content.mjs）。
+    // 这里与后端共用同一套字面量；历史写稿记录曾把成功态误写成旧拼写，导致已完成
+    // 稿件被归到「排队中」、chip 无 good 色，故判定严格只认上述三种值。
+    function writeRecordStatus(status) {
+      if (status === 'success') return { label: '已完成', tone: 'good' };
+      if (status === 'failed') return { label: '失败', tone: 'bad' };
+      if (status === 'running') return { label: '进行中', tone: undefined };
+      return { label: '排队中', tone: undefined };
+    }
+
     let connection = null;
 
     async function remote(method, request) {
@@ -1268,13 +1279,14 @@ window.__ModuleLoader__.load({
           historyError ? h('p', { className: 'sa-blocker' }, historyError) : null,
           historyItems.length ? h('div', { className: 'sa-gen-list' }, historyItems.map((record) => {
             const script = record.draft?.script || '';
+            const status = writeRecordStatus(record.status);
             return h('div', { key: record.id, className: 'sa-gen' },
               h('div', { className: 'sa-gen-head' },
                 h('span', { className: 'sa-gen-title' }, projectTitle(record.projectId)),
                 h('span', { className: 'sa-row' },
                   h(Chip, {
-                    tone: record.status === 'succeeded' ? 'good' : record.status === 'failed' ? 'bad' : undefined,
-                  }, record.status === 'succeeded' ? '已完成' : record.status === 'failed' ? '失败' : record.status === 'running' ? '进行中' : '排队中'),
+                    tone: status.tone,
+                  }, status.label),
                   record.quality?.qualityScore != null ? h('span', { className: 'sa-meta' }, `${record.quality.qualityScore} 分`) : null,
                 ),
               ),
@@ -1881,6 +1893,7 @@ window.__ModuleLoader__.load({
 
     exports.inject = ['connection', 'lwbPackClient'];
     exports.apply = apply;
+    exports.writeRecordStatus = writeRecordStatus;
     return module.exports;
   },
 });
