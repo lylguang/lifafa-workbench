@@ -606,7 +606,11 @@ export class StoryAccountContent {
         voice: input.voice,
         palette: input.palette,
         subtitleMaxChars: input.subtitleMaxChars,
-        reviewVideo: this.#reviewVideo,
+        // 私有方法作为属性取出时不会绑定 this（只有 this.#reviewVideo(...) 才绑定），
+        // 直接传裸方法会让流水线无接收者调用它 → this 为 undefined →
+        // 内部 this.reviewExecutor 抛「Cannot read properties of undefined」，
+        // 独立审片这一步必崩，双闸门实际只剩一闸。这里传绑定好的闭包。
+        reviewVideo: (request) => this.#reviewVideo(request),
       })
       record.result = result
       record.steps = result.steps
