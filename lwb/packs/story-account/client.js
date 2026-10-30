@@ -309,43 +309,70 @@ window.__ModuleLoader__.load({
      * 复用宿主 lwb 对话框视觉体系（modal 遮罩 / 卡片 / 三类按钮）。
      * 失败时把服务端真实原因留在弹窗里——删除失败只说「删不掉」等于没说。
      */
+    /**
+     * 二次确认弹窗：删除、人工放行这类不可逆或需要担责的操作都走这里。
+     * 复用宿主 lwb 对话框视觉体系（modal 遮罩 / 卡片 / 三类按钮）。
+     * 失败时把服务端真实原因留在弹窗里——删除失败只说「删不掉」等于没说。
+     * 可选 input 字段（带 Field + 校验）让它也能替代 window.prompt 这类阻塞输入：
+     * 传 meta.input 即渲染一个输入框，确认时把当前值传给 onConfirm(value)。
+     */
     function useConfirm() {
       const [meta, setMeta] = React.useState(null);
       const [busy, setBusy] = React.useState(false);
       const [error, setError] = React.useState(null);
+      const [inputValue, setInputValue] = React.useState('');
       React.useEffect(() => {
         if (!meta) return undefined;
         const onKey = (event) => { if (event.key === 'Escape' && !busy) setMeta(null); };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
       }, [meta, busy]);
-      const ask = React.useCallback((options) => { setBusy(false); setError(null); setMeta(options); }, []);
+      const ask = React.useCallback((options) => {
+        setBusy(false);
+        setError(null);
+        setInputValue(options?.input?.defaultValue ?? '');
+        setMeta(options);
+      }, []);
       const close = React.useCallback(() => { if (!busy) setMeta(null); }, [busy]);
+      const inputError = meta?.input?.validate ? meta.input.validate(inputValue) : null;
       const confirm = React.useCallback(async () => {
         if (!meta?.onConfirm) return;
         setBusy(true);
         setError(null);
         try {
-          await meta.onConfirm();
+          await meta.onConfirm(meta.input ? inputValue : undefined);
           setMeta(null);
         } catch (caught) {
           setError(caught instanceof Error ? caught.message : String(caught));
         } finally {
           setBusy(false);
         }
-      }, [meta]);
+      }, [meta, inputValue]);
       const node = meta ? h('div', { className: 'lwb-modal-backdrop', onClick: close },
         h('div', { className: 'lwb-card lwb-pack-detail', role: 'dialog', 'aria-modal': 'true', 'aria-label': meta.title, onClick: (event) => event.stopPropagation() },
           h('div', { className: 'lwb-pack-detail-head' },
             h('div', null, h('h2', { className: 'lwb-modal-title' }, meta.title), meta.copy ? h('p', { className: 'lwb-modal-copy' }, meta.copy) : null),
           ),
+          meta.input ? h(Field, { label: meta.input.label || '' },
+            h('input', {
+              type: 'text',
+              className: 'sa-input',
+              value: inputValue,
+              placeholder: meta.input.placeholder || '',
+              disabled: busy,
+              autoFocus: true,
+              onChange: (event) => setInputValue(event.target.value),
+              onKeyDown: (event) => { if (event.key === 'Enter' && !inputError) { void confirm(); } },
+            }),
+          ) : null,
+          inputError ? h('p', { className: 'sa-blocker', role: 'alert' }, inputError) : null,
           error ? h('p', { className: 'sa-blocker', role: 'alert' }, error) : null,
           h('div', { className: 'lwb-row-actions', style: { justifyContent: 'flex-end' } },
             h('button', { type: 'button', className: 'lwb-plain-button', disabled: busy, onClick: close }, '取消'),
             h('button', {
               type: 'button',
               className: meta.danger ? 'sa-danger' : 'lwb-primary-button',
-              disabled: busy || meta.confirmDisabled === true,
+              disabled: busy || meta.confirmDisabled === true || Boolean(inputError),
               onClick: () => { void confirm(); },
             }, busy ? '处理中…' : (meta.confirm || '确认')),
           ),
@@ -445,12 +472,22 @@ window.__ModuleLoader__.load({
       const action = useAction();
       const confirm = useConfirm();
 
-      const create = () => action.run('create', async () => {
-        const title = window.prompt('给这条故事起一个项目名（内部用）：', '未命名故事');
-        if (!title) return;
-        await remote('create', { title });
-        projects.reload();
-        overview.reload();
+      const create = () => confirm.ask({
+        title: '新建故事项目',
+        copy: '项目名只在内部展示，方便你在流水线里区分不同故事。',
+        input: {
+          label: '项目名（内部用）',
+          defaultValue: '未命名故事',
+          placeholder: '给这条故事起个名字',
+          validate: (value) => (value.trim() ? null : '项目名不能是空白。'),
+        },
+        confirm: '创建',
+        onConfirm: async (title) => {
+          if (!title) return;
+          await remote('create', { title: title.trim() });
+          projects.reload();
+          overview.reload();
+        },
       });
 
       // 项目删不掉是上一版最实的缺口：建错了只能留着。删除走二次确认，
@@ -762,6 +799,7 @@ window.__ModuleLoader__.load({
       // 采集要检索外部内容，比一次模型调用慢，轮询间隔放宽到 2 秒。
       // 采集结果同样跨页存活：切走不会中断采集，也不会让已找到的条目消失。
       const [harvest, setHarvest] = useLiveTask('harvest', 'materialHarvestStatus', 'harvests', 2000);
+      const [notice, setNotice] = React.useState(null);
 
       const items = materials.value?.items || [];
       const kinds = catalog.value?.sourceKinds || [];
@@ -804,7 +842,7 @@ window.__ModuleLoader__.load({
         await materials.reload();
         setHarvest(null);
         setPicked({});
-        window.alert(`已入库 ${result.count} 条素材。`);
+        setNotice(`已入库 ${result.count} 条素材。下一步：去「故事选题」生成候选。`);
       });
 
       const add = () => action.run('add', async () => {
@@ -831,6 +869,7 @@ window.__ModuleLoader__.load({
           }, harvest?.status === 'running' ? '采集进行中…' : '让 agent 去找素材'),
         }),
         h(ErrorLine, { error: action.error || materials.error }),
+        notice ? h('p', { className: 'sa-hint', role: 'status' }, notice) : null,
 
         /* ① 采集入口 */
         h('section', { className: 'sa-card' },
@@ -954,6 +993,7 @@ window.__ModuleLoader__.load({
       const materials = useRemoteValue(() => remote('listMaterials'), []);
       const action = useAction();
       const [generation, setGeneration] = useLiveTask('topic', 'topicGenerationStatus', 'topics');
+      const [notice, setNotice] = React.useState(null);
 
       const start = () => action.run('start', async () => {
         const created = await remote('startTopicGeneration', {});
@@ -980,7 +1020,7 @@ window.__ModuleLoader__.load({
           },
         });
         projects.reload();
-        window.alert('选题已写入项目。下一步：故事写稿。');
+        setNotice('选题已写入项目。下一步：故事写稿。');
       });
 
       const materialCount = materials.value?.items?.length || 0;
@@ -993,6 +1033,7 @@ window.__ModuleLoader__.load({
           actions: h('button', { type: 'button', className: 'sa-primary', disabled: Boolean(action.busy) || generation?.status === 'running', onClick: start }, generation?.status === 'running' ? '生成中…' : '生成 5 个候选'),
         }),
         h(ErrorLine, { error: action.error }),
+        notice ? h('p', { className: 'sa-hint', role: 'status' }, notice) : null,
         // 不再让用户选题材与角度：agent 基于素材池和账号定位自行判断并排序，
         // 每个候选都带推荐理由和依据强度，人只负责「用这个」。
         h('section', { className: 'sa-card' },
@@ -1054,6 +1095,7 @@ window.__ModuleLoader__.load({
       const [history, setHistory] = React.useState(null);
       const [historyError, setHistoryError] = React.useState(null);
       const [notice, setNotice] = React.useState('');
+      const [saved, setSaved] = React.useState(false);
       const loadHistory = React.useCallback(() => {
         remote('listScriptGenerations').then(setHistory, (error) => setHistoryError(error instanceof Error ? error.message : String(error)));
       }, []);
@@ -1117,7 +1159,8 @@ window.__ModuleLoader__.load({
         });
         await remote('approveScript', { projectId });
         remote('list').then(setProjects, () => {});
-        window.alert('稿件已保存并确认。可以进入配音与字幕。');
+        setNotice('稿件已保存并确认。可以进入配音与字幕。');
+        setSaved(true);
       });
 
       const local = maskScript(body);
@@ -1231,6 +1274,10 @@ window.__ModuleLoader__.load({
         }),
         h(ErrorLine, { error: action.error }),
         notice ? h('p', { className: 'sa-hint', role: 'status' }, notice) : null,
+        saved ? h('div', { className: 'sa-actions', style: { justifyContent: 'flex-start', marginTop: 'var(--lwb-space-2)' } },
+          h('button', { type: 'button', className: 'lwb-primary-button lwb-button-sm', onClick: () => { setSaved(false); openPackMenu('voiceover'); } }, '去配音'),
+          h('button', { type: 'button', className: 'lwb-plain-button lwb-button-sm', onClick: () => { setSaved(false); openPackMenu('subtitles'); } }, '去字幕'),
+        ) : null,
         // ③ 不能开工就说清为什么，并给一个能点的动作——按钮无解释地全灰是静默失败。
         blockedReason ? h(Callout, { tone: 'warning', title: blockedReason.title },
           blockedReason.copy,
