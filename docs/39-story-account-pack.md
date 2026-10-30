@@ -26,6 +26,7 @@
 | 依赖 | `package.json` 的 peerDependencies 与 spoken-video 同源（`@deepseek-ai/dsh-*`），client 走 `@scitiger-ai/lwb-dsh-bundle` | `lwb/packs/story-account/package.json` |
 | 浏览器桥 | 独立命名空间 `storyAccount`（与口播包的 `spokenVideo` 平级），所有方法在 `storyAccountScope.request` 里执行工作区归属与凭据作用域 | `gateway.mjs` |
 | 数据 | 专属工作区，卸载能力包会保留工作区和数据 | `lwb-pack.json` gettingStarted、`story-account-paths.mjs` |
+| 凭据 | **媒体服务凭据按包隔离、不共享**：宿主给每个包的凭据引用加包命名空间前缀（`pack-workspaces.mjs` 的 `packCredentialRef`），同一 purpose 在两个包里是两把不同的 Key。因此**两个包各配一次媒体服务 API Key**；环境变量名与 spoken-video 相同（如 `LWB_SPOKEN_VIDEO_SCITIGER_BASE_URL`），媒体服务地址读同一套环境变量，运维只需配一次 | `lwb/dsh-bundle/pack-workspaces.mjs:348` |
 | 渲染 | 同样基于 Remotion，但工程按 1080×1920 竖屏搭 | `story-account-render.mjs`、`story-account-qc.mjs`（`width: 1080, height: 1920, fps: 30`） |
 
 **不要同时把两个包当成两条独立生产线用**：它们管线同源，差别在赛道焊点。做知识口播用 spoken-video，做情感故事用本包。
@@ -117,7 +118,7 @@ npm run dev -- --port 4173 # 或 Windows 下双击 启动工作台.cmd
 首次使用前置：
 
 1. 「设置 → 系统设置 → 模型」配置默认模型（AI 创作使用它）。
-2. 配音/字幕需配置媒体服务；未配置时仍可用「导入稿件」方式把已有文案走完流水线。
+2. 配音/字幕需配置媒体服务；未配置时仍可用「导入稿件」方式把已有文案走完流水线。**注意：媒体服务凭据按包独立保存**——即使已在「口播视频」包里配过 Key，本包仍需在「配音 / 字幕 → 打开连接配置」再存一次；媒体服务地址不用改（两个包读同一套环境变量）。
 
 ## 7. 已知限制（刻意的产品决定，不是没做完）
 

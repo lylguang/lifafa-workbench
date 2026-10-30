@@ -1442,9 +1442,9 @@ window.__ModuleLoader__.load({
         }),
         h(ErrorLine, { error: action.error || catalog.error }),
         // 凭据状态：有结论才显示。没保存 Key 时把入口直接给出来——这是用户
-        // 唯一能自己修的一项，而且和「口播视频」包共用同一份密钥。
+        // 唯一能自己修的一项；注意它与「口播视频」包各自独立，两个包各配一次 Key。
         credential?.configured === false ? h(Callout, { tone: 'warning', title: '还没保存媒体服务 API Key' },
-          '配音、字幕都走本机媒体桥接。Key 保存在 DSH 私有凭据库里，不会写进稿件、任务或浏览器存储；与「口播视频」包共用同一份。',
+          '配音、字幕都走本机媒体桥接。Key 保存在 DSH 私有凭据库里，不会写进稿件、任务或浏览器存储；与「口播视频」包各自独立——两个包各需在「配音 / 字幕 → 连接配置」里保存一次，不会自动复用对方包的 Key。',
           [h('button', { key: 'open', type: 'button', className: 'lwb-plain-button lwb-button-sm', onClick: () => setCredentialOpen(true) }, '打开连接配置保存 API Key')])
           : credential?.configured === true ? h(Callout, { tone: 'success', title: '媒体服务凭据已保存' },
             `API Key 在私有凭据库里${credential.writable ? '' : '（由启动环境管理，页面不能修改或清除）'}。试听通过就说明它真的能用。`)
@@ -1522,7 +1522,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'lwb-card lwb-pack-detail', role: 'dialog', 'aria-modal': 'true', 'aria-label': '连接配置', onClick: (event) => event.stopPropagation() },
             h('div', { className: 'lwb-pack-detail-head' }, h('div', null,
               h('h2', { className: 'lwb-modal-title' }, '连接配置'),
-              h('p', { className: 'lwb-modal-copy' }, 'API Key 保存到 DSH 私有凭据库，不会写入稿件、任务或浏览器存储。与「口播视频」包共用同一份密钥。'),
+              h('p', { className: 'lwb-modal-copy' }, 'API Key 保存到 DSH 私有凭据库，不会写入稿件、任务或浏览器存储。与「口播视频」包各自独立：本包需在「配音 / 字幕 → 连接配置」里单独保存一次，即使「口播视频」包已经配过也不会自动复用。'),
             )),
             h('div', { className: 'sa-field' }, h('span', null, '生成方式'), h('p', { className: 'sa-hint' }, '本机桥接（小米 MiMo）——配音与字幕都走它。')),
             h('label', { className: 'sa-field' }, h('span', null, '本机桥接 API Key'),
