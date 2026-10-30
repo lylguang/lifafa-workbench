@@ -233,6 +233,96 @@ export function checkStructure(body) {
  */
 export const SPOKEN_LONG_SENTENCE_CHARS = 25
 
+/**
+ * 「说人话」术语表：行业黑话 → 日常说法。
+ *
+ * 为什么要有这张表：写稿提示词里原来只有一句「避免学术腔和空泛的 AI 套话」，
+ * 太抽象，模型不知道该躲哪些词。实测 71c23ff6 那篇稿子里出现了
+ * 「架构门禁 / 依赖边界 / 同源共错 / 用例 / 脱敏 / 全绿 / 抽样」——
+ * 对不懂编程的观众等于天书，而听不懂就是划走的直接原因
+ * （同账号「AI 漫剧」那条完播率 0%、2s 跳出 83%）。
+ *
+ * 只收**明确的圈内话**：像「对齐」「复盘」「沉淀」这类已经进入日常汉语的词不收，
+ * 否则会把正常表达也判成黑话，提示就失去可信度。
+ */
+export const JARGON_TERMS = Object.freeze([
+  { term: '架构门禁', plain: '先把代码的架子管住' },
+  { term: '依赖边界', plain: '哪一层能调哪一层' },
+  { term: '分层架构', plain: '代码分几层摆' },
+  { term: '同源共错', plain: '写的人和查的人是一拨，一起错' },
+  { term: '单元测试', plain: '小范围自测' },
+  { term: '回归测试', plain: '改完再把旧功能测一遍' },
+  { term: '用例', plain: '测试举的例子' },
+  { term: '脱敏', plain: '把真实信息改掉' },
+  { term: '全绿', plain: '每一步都显示通过' },
+  { term: '技术债', plain: '以前欠下的坑' },
+  { term: '灰度发布', plain: '先放一小部分人用' },
+  { term: '幂等', plain: '重复点也不会重复扣钱' },
+  { term: '熔断', plain: '出问题自动停掉' },
+  { term: '限流', plain: '限制请求次数' },
+  { term: '埋点', plain: '记录用户点了什么' },
+  { term: '耦合', plain: '两块代码缠在一起' },
+  { term: '解耦', plain: '把缠在一起的分开' },
+  { term: '重构', plain: '推倒重写一遍' },
+  { term: '中台', plain: '中间那层公共系统' },
+  { term: '抓手', plain: '能下手的地方' },
+  { term: '赋能', plain: '帮上忙' },
+  { term: '闭环', plain: '从头到尾走通' },
+  { term: '链路', plain: '一整条流程' },
+  { term: '拉通', plain: '串起来' },
+  { term: '颗粒度', plain: '细到什么程度' },
+  { term: '心智', plain: '用户脑子里的印象' },
+  { term: '组合拳', plain: '几招一起上' },
+  { term: '降本增效', plain: '省钱又省事' },
+  { term: '打通', plain: '接上' },
+  { term: '矩阵', plain: '一堆账号或渠道一起做' },
+  { term: '打法', plain: '做法' },
+  { term: '势能', plain: '攒起来的势头' },
+  { term: '转化漏斗', plain: '从看到到成交的每一步' },
+  { term: '私域', plain: '自己能直接联系的人' },
+  { term: '公域', plain: '平台上的公共流量' },
+  { term: 'GMV', plain: '卖出去的总金额' },
+  { term: 'ROI', plain: '花一块钱能挣回几块' },
+  { term: '履约', plain: '把答应的事做完' },
+  { term: '承接', plain: '接住流量' },
+  { term: '产能', plain: '能出多少活' },
+])
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[]\]/gu, (ch) => `\${ch}`)
+}
+
+/** 找出包含某词的整句，截断后返回，供润色就地改。 */
+function sentenceAround(normalized, term) {
+  const sentences = normalized.split(/(?<=[。！？!?；;])/u)
+  const hit = sentences.find((sentence) => sentence.includes(term))
+  if (!hit) return null
+  const trimmed = hit.trim()
+  return trimmed.length > 40 ? `${Array.from(trimmed).slice(0, 40).join('')}…` : trimmed
+}
+
+/**
+ * 黑话密度检测。返回命中明细与一条可执行提示。
+ * 阈值取 1：口播里出现一处黑话就值得改——但只有 ≥3 处才升级成显眼提示，
+ * 免得一句话的稿子被刷屏。
+ */
+export function checkPlainLanguage(body) {
+  const normalized = normalizeWhitespace(body)
+  const hits = []
+  for (const entry of JARGON_TERMS) {
+    const matches = normalized.match(new RegExp(escapeRegExp(entry.term), 'gu'))
+    if (!matches?.length) continue
+    hits.push({ term: entry.term, plain: entry.plain, count: matches.length, sentence: sentenceAround(normalized, entry.term) })
+  }
+  const hitCount = hits.reduce((sum, item) => sum + item.count, 0)
+  const advisories = []
+  if (hitCount > 0) {
+    const sample = hits.slice(0, 3).map((item) => `「${item.term}」→${item.plain}`).join('；')
+    advisories.push(`${hitCount} 处行业黑话（${hits.length} 个词），听不懂的观众会直接划走。建议改成日常说法：${sample}`)
+  }
+  return { hitCount, termCount: hits.length, hits, advisories }
+}
+
 export function checkSpokenDelivery(body) {
   const normalized = normalizeWhitespace(body)
   const sentences = normalized.split(/[。！？!?]+/u).map((sentence) => sentence.replace(/\s+/g, '')).filter(Boolean)
@@ -242,6 +332,8 @@ export function checkSpokenDelivery(body) {
   const numberedMarkers = normalized.match(/(?:第[一二三四五六七八九十\d]+|[一二三四五六七八九十\d]+、)/gu) || []
   const contrastMarkers = normalized.match(/不是.{0,36}?而是/gu) || []
   const longSentenceCount = sentenceLengths.filter((length) => length >= SPOKEN_LONG_SENTENCE_CHARS).length
+  // 说人话检测：口播面向的是不懂技术的普通人，黑话等于劝退。
+  const plainLanguage = checkPlainLanguage(body)
 
   const advisories = []
   if (longSentenceCount > 0) {
@@ -253,6 +345,7 @@ export function checkSpokenDelivery(body) {
   if (numberedMarkers.length >= 3) advisories.push(`枚举结构 ${numberedMarkers.length} 处，连续堆叠会显得书面化`)
   if (contrastMarkers.length >= 3) advisories.push(`「不是…而是…」结构 ${contrastMarkers.length} 处，注意重复句式`)
   if (acronymTokens.length >= 5) advisories.push(`英文缩写 ${acronymTokens.length} 处，口播中先解释再使用`)
+  for (const advisory of plainLanguage.advisories) advisories.push(advisory)
 
   return {
     sentenceCount: sentences.length,
@@ -263,6 +356,9 @@ export function checkSpokenDelivery(body) {
     acronymTokenCount: acronymTokens.length,
     numberedMarkerCount: numberedMarkers.length,
     contrastMarkerCount: contrastMarkers.length,
+    jargonHitCount: plainLanguage.hitCount,
+    jargonTerms: plainLanguage.hits.map((item) => item.term),
+    plainLanguage,
     advisories,
   }
 }
@@ -365,6 +461,8 @@ function scoreSpokenDelivery(diagnostic) {
   score -= Math.min(0.15, Math.max(0, diagnostic.numberedMarkerCount - 2) * 0.05)
   score -= Math.min(0.15, Math.max(0, diagnostic.contrastMarkerCount - 2) * 0.05)
   score -= Math.min(0.2, diagnostic.acronymTokenCount * 0.02)
+  // 黑话扣分：一处 -4%，最多 -25%。与「长句」同量级——两者都是听不下去的主因。
+  score -= Math.min(0.25, (diagnostic.jargonHitCount || 0) * 0.04)
   return clamp(score, 0, 1)
 }
 
@@ -432,7 +530,7 @@ export function analyzeScriptQuality({ title = '', body = '', tier = DEFAULT_SCR
     verdict,
     originalityRisk: originality.risk,
     scoreBreakdown: { components, caps, passThreshold: cfg.rewriteScoreThreshold },
-    checks: { length, structure, spokenDelivery, similarity, originality },
+    checks: { length, structure, spokenDelivery, plainLanguage: spokenDelivery.plainLanguage, similarity, originality },
     recommendations: buildRecommendations({ length, structure, spokenDelivery, originality }, verdict, score),
   }
 }
@@ -496,6 +594,11 @@ export function buildScriptPrompt({ input, topic, signals, profile, currentBody 
   const rules = [
     `正文目标字数（不含空白）：${tierContract(input.tier)} 字（${input.tier} 档）。字数是稿件门槛，不要用猜测的时长秒数压缩或拉长稿件。`,
     '口播语气：清晰、口语化、具体、严谨；每句话只承载一个主要意思；避免学术腔和空泛的 AI 套话；避免连续堆叠「第一、第二、第三」枚举。',
+    // 「说人话」硬规则（2026-10-30）。把抽象要求换成具体禁词表：
+    // 实测「避免学术腔」这句写了也没用——稿子里照样出现架构门禁 / 依赖边界 /
+    // 同源共错 / 用例 / 脱敏 / 全绿，对不懂技术的观众等于天书，听不懂就划走。
+    `说人话（硬性）：把读者想成**一个不懂技术、想搞副业的普通上班族**。他听不懂就直接划走，不会因为你讲得专业而留下。禁止使用这些行业黑话，一律换成日常说法：${JARGON_TERMS.slice(0, 24).map((item) => `「${item.term}」→${item.plain}`).join('；')}。同类词（圈内才懂的缩写、岗位名、系统名）一并换成生活里的说法。判断标准：把这句话念给家里长辈听，听不懂就是没写对。`,
+    '举例要用身边的东西，不要用系统里的东西。说「就像外卖小哥按楼号找门牌」，不要说「就像路由按地址转发」；说「跟记账本对不上」，不要说「数据不一致」。',
     // 朗读适配守则（2026-10-23 盲听实验结论：直读基调是对的，生硬感来自长句——
     // 一篇 733 字真实稿件 15 处单句超 25 字，最长 59 字一口气念完）。这不是
     // 配音环节能补救的：标点必须在稿面上。判据与 checkSpokenDelivery 的
@@ -536,6 +639,15 @@ export function buildScriptPrompt({ input, topic, signals, profile, currentBody 
     sections.push('信号素材：无。只依据选题展开，事实性内容谨慎处理并标注 needsVerification。')
   }
   if (input.mode === 'polish' && currentBody) {
+    // 润色时把黑话命中逐条摆出来：模型拿到「原句 + 该换成什么」才改得动，
+    // 只给一句「更口语化」等于让它自己找，实测经常原样返回。
+    const plain = checkPlainLanguage(currentBody)
+    if (plain.hits.length) {
+      sections.push([
+        '这份稿件里检测到行业黑话，润色时必须逐处改掉（保留事实与结构，只换说法）：',
+        plain.hits.map((item) => `- 「${item.term}」→ ${item.plain}${item.sentence ? `（原句：${item.sentence}）` : ''}`).join('\n'),
+      ].join('\n'))
+    }
     sections.push(`当前稿件（在此基础上润色，保留其中已核实的事实与结构优点）：\n${String(currentBody).slice(0, 12000)}`)
   }
   return sections.join('\n\n')

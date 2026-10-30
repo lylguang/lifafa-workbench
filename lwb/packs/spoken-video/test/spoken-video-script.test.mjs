@@ -240,3 +240,56 @@ test('stripHookAnnotation stays linear on long unannotated prose', () => {
   assert.equal(result.draft.script, body)
   assert.ok(elapsedMs < 1000, `stripHookAnnotation 耗时 ${elapsedMs.toFixed(0)}ms，疑似回溯失控`)
 })
+
+// ── 说人话：行业黑话检测（2026-10-30）─────────────────────────────────────
+//
+// 用户反馈「写出的稿子太专业了」。抽查 71c23ff6 那篇稿子，命中
+// 架构门禁/依赖边界/同源共错/用例/脱敏/全绿/产能 共 9 处——对不懂技术的观众
+// 等于天书，而听不懂就是划走的直接原因（同账号「AI漫剧」完播率 0%）。
+// 这三条测试分别守：检测能命中、能给出替换建议与原句、正常口语不误伤。
+
+test('checkPlainLanguage 命中行业黑话并给出替换说法与原句', async () => {
+  const { checkPlainLanguage } = await import('../spoken-video-script.mjs')
+  const body = '那套复盘的第一层，是架构门禁。用规则卡住分层和依赖边界，不让代码乱穿。举个脱敏的场景，用例里一个都没覆盖。'
+  const result = checkPlainLanguage(body)
+  assert.ok(result.hitCount >= 4, `应命中至少 4 处，实际 ${result.hitCount}`)
+  const terms = result.hits.map((item) => item.term)
+  for (const expected of ['架构门禁', '依赖边界', '脱敏', '用例']) {
+    assert.ok(terms.includes(expected), `应命中「${expected}」`)
+  }
+  const first = result.hits.find((item) => item.term === '架构门禁')
+  assert.equal(first.plain, '先把代码的架子管住', '必须给出日常说法')
+  assert.match(first.sentence, /架构门禁/u, '必须带出原句，润色才知道改哪里')
+  assert.match(result.advisories[0], /行业黑话/u)
+  assert.match(result.advisories[0], /架构门禁/u, '提示里要点名具体词')
+})
+
+test('checkPlainLanguage 不误伤日常口语（对齐/复盘/沉淀这类词不算黑话）', async () => {
+  const { checkPlainLanguage } = await import('../spoken-video-script.mjs')
+  const body = '我复盘了一下，这笔钱对不上。大家先把账对齐，再慢慢沉淀客户。客户说东西能不能用，这才是关键。'
+  assert.equal(checkPlainLanguage(body).hitCount, 0, '日常词不能被判成黑话')
+})
+
+test('写稿提示词带「说人话」硬规则与禁用词表，润色时注入命中明细', async () => {
+  const { buildScriptPrompt } = await import('../spoken-video-script.mjs')
+  const fresh = buildScriptPrompt({ input: { mode: 'new', tier: 'medium' }, topic: { title: '测试' }, signals: [], profile: null })
+  assert.match(fresh, /说人话（硬性）/u)
+  assert.match(fresh, /不懂技术、想搞副业的普通上班族/u, '必须写清读者画像')
+  assert.match(fresh, /「架构门禁」→/u, '必须给出禁用词与替换示例')
+
+  const polish = buildScriptPrompt({
+    input: { mode: 'polish', tier: 'medium' }, topic: { title: '测试' }, signals: [], profile: null,
+    currentBody: '那套复盘的第一层，是架构门禁。',
+  })
+  assert.match(polish, /检测到行业黑话/u)
+  assert.match(polish, /「架构门禁」→ 先把代码的架子管住（原句：那套复盘的第一层，是架构门禁。）/u, '润色要拿到原句才能就地改')
+})
+
+test('质量报告把黑话计入口播分并进建议列表', async () => {
+  const { analyzeScriptQuality } = await import('../spoken-video-script.mjs')
+  const clean = analyzeScriptQuality({ title: 'a', body: '这件事我想了很久。钱不在写，在验。', tier: 'short' })
+  const jargon = analyzeScriptQuality({ title: 'a', body: '这件事我想了很久。问题在架构门禁和依赖边界，用例也没覆盖，脱敏场景更麻烦。', tier: 'short' })
+  assert.ok(jargon.qualityScore < clean.qualityScore, '黑话必须扣分')
+  assert.ok(jargon.checks.plainLanguage.hitCount >= 3)
+  assert.ok(jargon.recommendations.some((item) => item.includes('行业黑话')), '建议里要点出黑话')
+})
