@@ -18,6 +18,7 @@ import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { resolveRemotionBrowserExecutable } from './story-account-remotion-browser.mjs'
 
 const execFileAsync = promisify(execFile)
 const PACK_ROOT = dirname(fileURLToPath(import.meta.url))
@@ -389,8 +390,20 @@ export async function prepareStoryVideoProject({
 }
 
 /** 跑 Remotion 渲染。stdio 用 inherit：沙箱里管道捕获会被 EPERM 拒绝。 */
-export async function renderStoryVideo(workspace, { signal } = {}) {
-  if (!await storyRemotionAvailable()) throw new StoryRenderError('STORY_RENDER_UNAVAILABLE', '当前安装未包含 Remotion 渲染器。')
+export async function renderStoryVideo(
+  workspace,
+  { signal, resolveBrowser = resolveRemotionBrowserExecutable, remotionAvailable = storyRemotionAvailable, run = execFileAsync } = {},
+) {
+  if (!await remotionAvailable()) throw new StoryRenderError('STORY_RENDER_UNAVAILABLE', '当前安装未包含 Remotion 渲染器。')
+  // 离线条：必须显式指定浏览器，绝不把决定权交回 Remotion 让它去联网下载
+  // chrome-headless-shell（storage.googleapis.com）——离线/内网/CI 必失败。
+  const browserExecutable = resolveBrowser()
+  if (!browserExecutable) {
+    throw new StoryRenderError(
+      'STORY_RENDER_UNAVAILABLE',
+      '本机没有可用的渲染浏览器，无法离线渲染竖屏成片。请任选其一：① 用「启动工作台.cmd」启动工作台（会自动带上 Remotion 浏览器）；② 运行 npm run setup 安装 chrome-headless-shell；③ 在环境变量 LWB_REMOTION_BROWSER_EXECUTABLE 里指定本机 Chrome / Chromium 可执行文件路径。',
+    )
+  }
   const args = [
     REMOTION_CLI,
     'render',
@@ -401,8 +414,9 @@ export async function renderStoryVideo(workspace, { signal } = {}) {
     '--concurrency', '4',
     '--codec', 'h264',
     '--overwrite',
+    '--browser-executable', browserExecutable,
   ]
-  await execFileAsync(process.execPath, args, { cwd: workspace.projectDir, signal, windowsHide: true, maxBuffer: 64 * 1024 * 1024 })
+  await run(process.execPath, args, { cwd: workspace.projectDir, signal, windowsHide: true, maxBuffer: 64 * 1024 * 1024 })
   return { outputPath: workspace.outputPath, spec: workspace.spec }
 }
 

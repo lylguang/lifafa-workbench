@@ -563,18 +563,27 @@ function sharedHeadlessShellPath() {
   } catch { /* 浏览器未安装时退回自选路径 */ }
   return null
 }
+// 解析渲染用浏览器可执行文件：优先配套 headless-shell（实测快 5.6 倍），退回系统 Chrome。
+// 返回绝对路径；找不到任何可用浏览器时返回 null——调用方应据此抛错或退回自选，
+// 绝不要静默让 Remotion 去 storage.googleapis.com 联网下载（离线/内网/CI 必失败）。
+// 回退次序与环境变量与 story-account 的镜像实现保持一致。
+export function resolveRemotionBrowserExecutable() {
+  const headlessShell = process.env.LWB_REMOTION_HEADLESS_SHELL?.trim()
+  if (headlessShell && headlessShell.length <= MAX_EXECUTABLE_PATH) return headlessShell
+  const shared = sharedHeadlessShellPath()
+  if (shared) return shared
+  const override = process.env.LWB_REMOTION_BROWSER_EXECUTABLE?.trim()
+  if (override) return override
+  return null
+}
+
 function browserExecutableArgs() {
   // 优先用配套 headless-shell（实测快 5.6 倍）：环境变量显式指定 > 共享目录自动探测。
   // 自动探测是必须的：Remotion 自选浏览器时把缓存目录解析到渲染 cwd 的
   // node_modules/.remotion，任务工作区经 symlink spawn 必 ENOENT（同上）。
-  const headlessShell = process.env.LWB_REMOTION_HEADLESS_SHELL?.trim()
-  if (headlessShell && headlessShell.length <= MAX_EXECUTABLE_PATH) return ['--browser-executable', headlessShell]
-  const shared = sharedHeadlessShellPath()
-  if (shared) return ['--browser-executable', shared]
-  // 退回系统 Chrome：慢，但一定能启动。
-  const override = process.env.LWB_REMOTION_BROWSER_EXECUTABLE?.trim()
-  if (override) return ['--browser-executable', override]
-  return []
+  // 找不到时返回空数组（沿用旧行为：交回 Remotion 自选，由上层决定是否允许联网）。
+  const executable = resolveRemotionBrowserExecutable()
+  return executable ? ['--browser-executable', executable] : []
 }
 
 // Remotion 连接浏览器是固定 25 秒预算，与本次渲染内容无关：浏览器进程偶尔启动后
