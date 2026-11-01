@@ -2,7 +2,7 @@
 import { parse } from '@babel/parser'
 import postcss from 'postcss'
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { SUSPICION_MAX, SUSPICION_MEAN, decodePcmMono8k, driftStats, estimateStarts, parseSrt, snapStarts, speechIntervalsFromPcm } from './spoken-video-subtitle-align.mjs'
@@ -172,6 +172,35 @@ export async function inspectSubtitleAudioAlignment(projectDir, srt) {
   return warnings
 }
 
+/**
+ * 音效使用审计——只产警告，不阻塞渲染。
+ *
+ * 背景（2026-11-01）：音效包从 3 枚扩到 10 枚，并放宽到「每分钟 6–10 处」。
+ * 但提示词只是建议，Agent 实际可能：① 引用不存在的音效名（自己编个 whoosh2.wav），
+ * Remotion 会静默跳过 → 音效凭空消失；② 整片一个音效都不用（实测旧片 233 秒
+ * 仅 17 处）；③ 反过来堆得太密，变成噪音。三种都只警告：
+ * 前两种影响观感但不破坏产物，第三种属于风格判断。
+ */
+export function inspectSfxUsage(source, { durationSeconds = null, available = null } = {}) {
+  const warnings = []
+  const report = (code, message) => warnings.push({ code, file: 'src/CreativeVideo.tsx', line: 1, column: 1, message })
+  const names = [...source.matchAll(/sfx\/([\w.-]+)\.wav/gu)].map((match) => `${match[1]}.wav`)
+  const unique = [...new Set(names)]
+  if (available) {
+    const unknown = unique.filter((name) => !available.includes(name))
+    if (unknown.length) report('sfx-missing', `引用了音效目录里不存在的文件：${unknown.join('、')}。Remotion 遇到缺失的 <Audio> 会静默跳过，音效不会响。请只用 public/sfx/ 里实际存在的文件（当前：${available.join('、')}）。`)
+  }
+  // 计数按 <Audio src={staticFile("sfx/...")}> 出现次数，而不是去重后的文件名。
+  const uses = (source.match(/sfx\/[\w.-]+\.wav/gu) ?? []).length
+  const seconds = Number(durationSeconds)
+  if (Number.isFinite(seconds) && seconds > 0) {
+    const perMinute = uses / (seconds / 60)
+    if (seconds >= 90 && uses === 0) report('sfx-absent', `全片 ${Math.round(seconds)} 秒没有任何音效。没有声音设计的成片听感发干——至少给场景切换与关键结论铺音效。`)
+    else if (perMinute > 12) report('sfx-density', `音效密度 ${perMinute.toFixed(1)} 处/分钟，超过建议上限 10 处/分钟：音效会从「强调」变成「噪音」。`)
+  }
+  return warnings
+}
+
 export async function inspectAgentProject(workspace) {
   const findings = []
   const warnings = []
@@ -200,6 +229,12 @@ export async function inspectAgentProject(workspace) {
       }
       warnings.push(...await inspectSubtitleAudioAlignment(workspace.projectDir, srt))
     }
+    // 音效审计：引用了不存在的音效 / 整片没有音效 / 堆得太密。
+    const sfxAvailable = await readdir(join(workspace.projectDir, 'public', 'sfx')).catch(() => null)
+    warnings.push(...inspectSfxUsage(creativeSource, {
+      durationSeconds: workspace.durationSeconds ?? null,
+      available: sfxAvailable ? sfxAvailable.filter((name) => name.endsWith('.wav')) : null,
+    }))
   }
   return {
     passed: findings.length === 0,

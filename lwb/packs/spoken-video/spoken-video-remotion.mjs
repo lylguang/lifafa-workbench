@@ -350,6 +350,7 @@ async function copyAgentGuidance(projectDir) {
     ['remotion-best-practices/rules/keyword-relay.tsx', 'remotion-best-practices/rules/keyword-relay.tsx'],
     ['remotion-best-practices/rules/number-spotlight.tsx', 'remotion-best-practices/rules/number-spotlight.tsx'],
     ['remotion-best-practices/rules/stage-type-on.tsx', 'remotion-best-practices/rules/stage-type-on.tsx'],
+    ['remotion-best-practices/rules/motion-grammar.tsx', 'remotion-best-practices/rules/motion-grammar.tsx'],
     ['content-video/SKILL.md', 'content-video/SKILL.md'],
   ]
   await Promise.all(targets.map(async ([source, target]) => {
@@ -365,9 +366,18 @@ async function copyAgentGuidance(projectDir) {
 // 的 public/sfx/，供创作 Agent 在关键动画节点铺 <Audio>。生成是尽力而为：
 // ffmpeg 缺失或失败时跳过目录，提示词要求 Agent 以目录实际内容为准。
 //
-// 响度必须做归一化：旁白峰值约 -4.6dB，而初版音效峰值只有 -16.7 ~ -25.5dB，
+// 响度必须做归一化：旁白峰值约 -4.6dB。实测旧版音效峰值只有 -16.7 ~ -25.5dB，
 // 混进成片后人耳完全听不到（实测把音量推到 0.6 仍被淹没）。感知音效靠瞬态峰值，
-// 所以这里用 loudnorm 把峰值压到 -1 ~ -1.5dB，让它在旁白之上能被清晰听见。
+// 所以这里用 loudnorm 压到 -1 ~ -2dB 的真峰值上限（TP），实际达成峰值 -4 ~ -9dB，
+// 让它在旁白之上能被清晰听见。
+//
+// 2026-11-01 扩容：原来只有 whoosh/pop/ding 三枚，实测成片 233 秒只有 17 处音效
+// （平均 14 秒一次），听感上「干」。补上四类结构性声音——riser（铺垫转折）、
+// impact（结论落点）、tick（数字滚动）、paper/swoosh-up/blip/swell（细节动作），
+// 全部用 lavfi 本地合成：零版权风险、零外部下载。
+//
+// 注意：持续音（riser/swell）用 loudnorm 的 I 目标而非峰值——按 I=-16 归一化会让
+// 它们落到 -15dB（比短促音效低 10dB，等于白做），实测改成 I=-9 才与其它音效同族。
 async function writeSfxKit(publicDir) {
   const sfxDir = join(publicDir, 'sfx')
   await mkdir(sfxDir, { recursive: true, mode: 0o700 })
@@ -375,6 +385,20 @@ async function writeSfxKit(publicDir) {
     ['whoosh.wav', ['-f', 'lavfi', '-i', 'anoisesrc=d=0.45:c=pink:a=0.9', '-af', 'highpass=f=250,lowpass=f=1600,afade=t=in:st=0:d=0.16,afade=t=out:st=0.26:d=0.19,volume=6dB,loudnorm=I=-16:TP=-1.5:LRA=7']],
     ['pop.wav', ['-f', 'lavfi', '-i', 'sine=frequency=760:duration=0.12', '-af', 'afade=t=out:st=0.015:d=0.105,volume=9dB,loudnorm=I=-13:TP=-1:LRA=6']],
     ['ding.wav', ['-f', 'lavfi', '-i', 'sine=frequency=1180:duration=0.6', '-af', 'afade=t=out:st=0.05:d=0.55,volume=8dB,loudnorm=I=-13:TP=-1:LRA=6']],
+    // 上升扫频 1.2s：180→700Hz。用在章节切换前 0.8–1.2 秒，把观众推到「要转折了」的预期上。
+    ['riser.wav', ['-f', 'lavfi', '-i', 'aevalsrc=0.35*sin(2*PI*(180+520*t)*t):s=48000:d=1.2', '-af', 'afade=t=in:st=0:d=0.25,afade=t=out:st=1.0:d=0.2,loudnorm=I=-9:TP=-1.5:LRA=7']],
+    // 低频下坠 + 指数衰减 0.55s：78→52Hz。结论句/数字落点用，给「砸下来」的重量。
+    ['impact.wav', ['-f', 'lavfi', '-i', 'aevalsrc=0.9*sin(2*PI*(78-26*t)*t)*exp(-13*t):s=48000:d=0.55', '-af', 'afade=t=out:st=0.35:d=0.2,loudnorm=I=-14:TP=-1:LRA=6']],
+    // 极短咔哒 35ms：数字滚动时每 3 帧一枚，音量压到 0.06–0.1，靠密度而非响度。
+    ['tick.wav', ['-f', 'lavfi', '-i', 'sine=frequency=2400:duration=0.035', '-af', 'afade=t=out:st=0.004:d=0.031,loudnorm=I=-18:TP=-2:LRA=6']],
+    // 短促上扫噪声 0.34s：卡片/图表自下而上入场。
+    ['swoosh-up.wav', ['-f', 'lavfi', '-i', 'anoisesrc=d=0.34:c=pink:a=0.9', '-af', 'highpass=f=900,lowpass=f=3200,afade=t=in:st=0:d=0.08,afade=t=out:st=0.16:d=0.18,volume=5dB,loudnorm=I=-16:TP=-1.5:LRA=7']],
+    // 翻页 0.26s：中高频噪声快衰减，用于版式整体切换（笔记本/清单页）。
+    ['paper.wav', ['-f', 'lavfi', '-i', 'anoisesrc=d=0.26:c=white:a=0.8', '-af', 'highpass=f=1800,lowpass=f=6500,afade=t=in:st=0:d=0.02,afade=t=out:st=0.06:d=0.2,volume=4dB,loudnorm=I=-17:TP=-2:LRA=7']],
+    // 轻点 90ms：小元素（标签、图标、要点条目）点入，比 pop 软，适合高频次使用。
+    ['blip.wav', ['-f', 'lavfi', '-i', 'sine=frequency=1420:duration=0.09', '-af', 'afade=t=out:st=0.01:d=0.08,volume=6dB,loudnorm=I=-16:TP=-2:LRA=6']],
+    // 下行扫频 1.0s：520→190Hz。段落收束/从紧张回到平稳时用。
+    ['swell.wav', ['-f', 'lavfi', '-i', 'aevalsrc=0.3*sin(2*PI*(520-330*t)*t):s=48000:d=1.0', '-af', 'afade=t=in:st=0:d=0.15,afade=t=out:st=0.75:d=0.25,loudnorm=I=-9:TP=-1.5:LRA=7']],
   ]
   for (const [name, args] of clips) {
     try { await execFileAsync('ffmpeg', ['-hide_banner', '-nostats', '-y', ...args, '-ac', '2', '-ar', '48000', join(sfxDir, name)], { timeout: 30_000 }) } catch {}

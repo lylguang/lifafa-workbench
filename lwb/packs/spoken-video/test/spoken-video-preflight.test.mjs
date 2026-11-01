@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, mkdir, readFile, writeFile, rm, realpath, lstat, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, writeFile, rm, realpath, lstat, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { inspectCreativeSource, inspectSceneBoundaryCoverage, inspectTimelineAlignment } from '../spoken-video-preflight.mjs'
+import { inspectCreativeSource, inspectSceneBoundaryCoverage, inspectSfxUsage, inspectTimelineAlignment } from '../spoken-video-preflight.mjs'
 import { inspectContentSafety } from '../spoken-video-content-safety.mjs'
 import { inspectSceneCueCoverage, parseSceneCueMap } from '../spoken-video-scene-cues.mjs'
 import { parseSceneSpans } from '../spoken-video-scene-table.mjs'
@@ -692,3 +692,75 @@ test('a failed probe does not block the next project in the same process', async
 })
 
 
+
+test('音效包是 10 枚本地合成音，且每一枚都够响（不会被旁白盖住）', async (t) => {
+  // 2026-11-01 扩容守卫：原来只有 whoosh/pop/ding 三枚，成片平均 14 秒才有一处音效，
+  // 听感「干」。扩容后必须保证每枚都真的生成出来了、且峰值在 -12 ~ -3dB 之间——
+  // 低于 -12dB 会被旁白（峰值约 -4.6dB）淹没，等于白做（这正是初版 -16.7dB 的教训）。
+  let ffmpegReady = true
+  try { execFileSync('ffmpeg', ['-version'], { stdio: 'pipe' }) } catch { ffmpegReady = false }
+  if (!ffmpegReady) { t.skip('ffmpeg 不可用'); return }
+  const dir = await mkdtemp(join(tmpdir(), 'sfx-kit-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const audioPath = join(dir, 'test.wav'); await writeFile(audioPath, 'audio fixture')
+  const workspace = await prepareSpokenVideoAgentProject({ projectRoot: dir, runId: 'sfx', audioPath, title: 't', script: 's', durationSeconds: 2, subtitles: [], subtitleEnabled: false })
+  const expected = ['whoosh', 'pop', 'ding', 'riser', 'impact', 'tick', 'swoosh-up', 'paper', 'blip', 'swell']
+  const sfxDir = join(workspace.projectDir, 'public', 'sfx')
+  for (const name of expected) {
+    const file = join(sfxDir, `${name}.wav`)
+    assert.ok(existsSync(file), `${name}.wav 必须生成`)
+    const peak = execFileSync('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8', stdio: 'pipe', stderr: 'pipe' }).toString()
+    void peak
+  }
+  // 逐枚量峰值：ffmpeg 把 volumedetect 打在 stderr
+  const peaks = {}
+  for (const name of expected) {
+    const out = execFileSync('sh', ['-c', `ffmpeg -hide_banner -nostats -i "${join(sfxDir, name + '.wav')}" -af volumedetect -f null - 2>&1 | grep max_volume`], { encoding: 'utf8' })
+    peaks[name] = Number(/max_volume: (-?[\d.]+) dB/u.exec(out)?.[1])
+  }
+  for (const [name, peak] of Object.entries(peaks)) {
+    assert.ok(Number.isFinite(peak), `${name} 的峰值必须可测`)
+    assert.ok(peak <= -3 && peak >= -12, `${name} 峰值 ${peak}dB 必须落在 -12 ~ -3dB（旁白约 -4.6dB）`)
+  }
+})
+
+test('音效审计：不存在的音效名、整片无声、密度过高都要报出来', () => {
+  const kit = ['whoosh.wav', 'pop.wav', 'ding.wav', 'riser.wav', 'impact.wav']
+  const audio = (name) => `const Sfx=()=>(<Sequence from={0} durationInFrames={24} layout="none"><Audio src={staticFile("sfx/${name}.wav")} volume={0.34}/></Sequence>);`
+  // 引用了目录里没有的文件：Remotion 会静默跳过，音效凭空消失
+  const missing = inspectSfxUsage(audio('whoosh2'), { available: kit })
+  assert.equal(missing.length, 1)
+  assert.equal(missing[0].code, 'sfx-missing')
+  assert.match(missing[0].message, /whoosh2\.wav/u)
+  // 正常引用不报
+  assert.deepEqual(inspectSfxUsage(audio('whoosh'), { available: kit, durationSeconds: 240 }), [])
+  // 长片一个音效都没有
+  const silent = inspectSfxUsage('export const X=()=>null', { available: kit, durationSeconds: 240 })
+  assert.equal(silent[0]?.code, 'sfx-absent')
+  // 短片不因没有音效而警告（几十秒的片子可以不铺）
+  assert.deepEqual(inspectSfxUsage('export const X=()=>null', { available: kit, durationSeconds: 40 }), [])
+  // 密度过高：60 秒里 15 处 = 15 处/分钟 > 12
+  const dense = inspectSfxUsage(Array.from({ length: 15 }, () => audio('pop')).join('\n'), { available: kit, durationSeconds: 60 })
+  assert.equal(dense[0]?.code, 'sfx-density')
+  // 不知道时长时不判断密度（不猜）
+  assert.deepEqual(inspectSfxUsage(Array.from({ length: 15 }, () => audio('pop')).join('\n'), { available: kit }), [])
+})
+
+test('动效基元文件随任务下发：过渡与入场分层不需要 Agent 自己重写', async (t) => {
+  // 2026-11-01：SceneBridge/Stagger/Sfx 写在 rules/motion-grammar.tsx，靠 copyAgentGuidance
+  // 下发。若漏登记，提示词里指的路径就是空的——Agent 会自己造一个劣化版本。
+  const dir = await mkdtemp(join(tmpdir(), 'motion-grammar-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const audioPath = join(dir, 'test.wav'); await writeFile(audioPath, 'audio fixture')
+  const workspace = await prepareSpokenVideoAgentProject({ projectRoot: dir, runId: 'mg', audioPath, title: 't', script: 's', durationSeconds: 2, subtitles: [], subtitleEnabled: false })
+  const file = join(workspace.projectDir, 'skills', 'remotion-best-practices', 'rules', 'motion-grammar.tsx')
+  assert.ok(existsSync(file), 'motion-grammar.tsx 必须下发到任务 skills 目录')
+  const text = readFileSync(file, 'utf8')
+  assert.match(text, /export const SceneBridge/u)
+  assert.match(text, /export const Stagger/u)
+  assert.match(text, /export const Sfx/u)
+  // 基元里的音效名必须与音效包一致，否则复制过去就是一堆静默缺失的 Audio。
+  const kit = await readdir(join(workspace.projectDir, 'public', 'sfx'))
+  const referenced = [...text.matchAll(/sfx\/([\w.-]+)\.wav/gu)].map((m) => m[1] + '.wav')
+  for (const name of referenced) assert.ok(kit.includes(name), `基元引用的 ${name} 必须真的在音效包里`)
+})

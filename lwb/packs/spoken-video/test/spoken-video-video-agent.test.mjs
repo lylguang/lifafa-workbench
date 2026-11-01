@@ -310,3 +310,18 @@ test('修复提示词要求节奏/版式类问题改 SCENES 表，并带上审�
   assert.match(creator, /scene-pacing/u, '守卫失败清单要原样进修复提示词')
   assert.match(creator, /必须通过调整 SCENES 表解决/u)
 })
+
+test('creator prompt carries the expanded sound kit and the motion grammar it can copy', () => {
+  // 2026-11-01：音效从 3 枚扩到 10 枚、密度改成按分钟计，并要求场景过渡与入场分层。
+  // 这些内容只活在提示词里——一旦被改掉，Agent 会静默退回「三枚音效 + 整幕淡入」，
+  // 而产物本身不会报错。所以逐项钉死。
+  const prompt = buildVideoCreatorPrompt({ runDir: '/tmp/video-agent/run-2' })
+  for (const name of ['whoosh', 'pop', 'ding', 'riser', 'impact', 'tick', 'swoosh-up', 'paper', 'blip', 'swell']) {
+    assert.match(prompt, new RegExp(`sfx/${name}\.wav|${name}\.wav`, 'u'), `提示词必须介绍 ${name}.wav`)
+  }
+  assert.match(prompt, /每分钟 6–10 处/u, '音效密度必须按分钟给，而不是全片封顶 12 处')
+  assert.match(prompt, /motion-grammar\.tsx/u, '必须告诉 Agent 去哪复制过渡/入场基元')
+  assert.match(prompt, /SceneBridge/u)
+  assert.match(prompt, /Stagger/u)
+  assert.match(prompt, /整屏淡入/u, '必须显式禁止整幕整体淡入')
+})
