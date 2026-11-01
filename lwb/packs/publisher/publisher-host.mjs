@@ -75,6 +75,8 @@ export class PublisherHost {
     this.active = new Map()
     /** Accounts currently opening or publishing; one browser per account. */
     this.busy = new Set()
+    /** Last keep-alive pass summary, so the UI can say "N could not be read this round". */
+    this.lastKeepAlive = null
   }
 
   /* ------------------------------ readiness ------------------------------ */
@@ -98,8 +100,12 @@ export class PublisherHost {
       counts: {
         accounts: accounts.length,
         active: accounts.filter((item) => item.status === 'active').length,
+        // 本轮没读到的账号数：loginCheck 为 unreadable 的那些（状态被原样保留）。
+        unreadable: accounts.filter((item) => item.loginCheck === 'unreadable').length,
         running: jobs.filter((job) => ['queued', 'running', 'awaiting-confirm'].includes(job.status)).length,
       },
+      // 上一次保活巡检的逐类计数，界面用来写「本轮有 N 个没读到」。
+      loginScan: this.lastKeepAlive,
     }
   }
 
@@ -169,27 +175,64 @@ export class PublisherHost {
     if (this.busy.has(account.id)) fail('PUBLISHER_ACCOUNT_BUSY', '该账号正在执行其他操作，请稍候。')
     this.busy.add(account.id)
     try {
-      const session = await this.browser.acquire(account, { headless: true })
+      // 扫码窗口还开着时复用那个可见会话做检测：acquire({headless:true}) 在存在
+      // 可见会话时会先 close 掉它（换头逻辑），正在扫码的窗口就被毁掉了。
+      const existing = this.browser?.sessions?.get?.(account.id) || null
+      const visibleOpen = Boolean(existing && existing.headless === false && existing.context && !existing.context.__closed)
+      const session = await this.browser.acquire(account, { headless: !visibleOpen })
       const page = await this.browser.page(session)
-      const loggedIn = await adapter.isLoggedIn(page)
-      this.browser.touch(account.id)
-      if (!loggedIn) {
-        const updated = await this.store.patchAccountState(account.id, {
-          status: 'expired', lastCheckedAt: this.now(), lastError: '未能确认登录状态，请确认已在窗口中完成扫码。',
-        })
-        return { ...updated, loggedIn: false, message: '仍未检测到登录。请确认已在窗口中完成扫码，再点一次「检测登录」。' }
+      // 一次读不到不定生死：扫码落地、页面跳转中读到的 false/异常都不可靠。
+      // 最多 3 次短重试（每次重读会重新导航一次）：
+      //   · 任一次读到已登录 → 成功；
+      //   · 三次都读到明确的未登录证据（登录墙文案 / 登录页 URL）才写 expired；
+      //   · 全是异常/读不到 → 「暂未确认」，保留原状态，绝不写 expired。
+      let confirmed = null
+      let lastError = null
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          const result = await adapter.isLoggedIn(page)
+          this.browser.touch(account.id)
+          if (result === true) { confirmed = true; break }
+          confirmed = false
+        } catch (error) {
+          lastError = error
+          confirmed = null
+        }
+        if (attempt < 3) await new Promise((resolvePromise) => setTimeout(resolvePromise, 1500))
       }
-      const identity = await adapter.readIdentity(page).catch(() => ({ nickname: null, handle: null }))
+      if (confirmed === true) {
+        const identity = await adapter.readIdentity(page).catch(() => ({ nickname: null, handle: null }))
+        const updated = await this.store.patchAccountState(account.id, {
+          status: 'active',
+          nickname: identity.nickname,
+          handle: identity.handle,
+          lastCheckedAt: this.now(),
+          lastLoginAt: this.now(),
+          lastError: null,
+          loginCheck: 'active',
+        })
+        this.onLog('login', `账号已就绪：${identity.nickname || updated.label}`)
+        return { ...updated, loggedIn: true, loginCheck: 'active', message: `登录成功${identity.nickname ? `：${identity.nickname}` : ''}` }
+      }
+      if (confirmed === false) {
+        // 三轮都读到明确的未登录证据（登录墙文案 / 登录页 URL）：确实没登录。
+        // 只给原因句，下一步引导交给 UI 客户端；绝不写 unreadable。
+        const updated = await this.store.patchAccountState(account.id, {
+          status: 'expired', lastCheckedAt: this.now(), lastError: '扫码后仍未检测到登录', loginCheck: 'expired',
+        })
+        return { ...updated, loggedIn: false, loginCheck: 'expired', message: '扫码后仍未检测到登录' }
+      }
+      // 暂未确认：读不到 / 抛错。结构化标记 unreadable，绝不写 expired（UI 据此显示
+      // 灰色「状态未确认」，不催扫码、不用红色失效样式）。
+      const detail = lastError?.message || String(lastError || '页面读取失败')
       const updated = await this.store.patchAccountState(account.id, {
-        status: 'active',
-        nickname: identity.nickname,
-        handle: identity.handle,
+        status: account.status,
         lastCheckedAt: this.now(),
-        lastLoginAt: this.now(),
-        lastError: null,
+        lastError: `暂未确认登录状态（${detail.slice(0, 300)}）；已保留原状态，请稍后再试。`,
+        loginCheck: 'unreadable',
       })
-      this.onLog('login', `账号已就绪：${identity.nickname || updated.label}`)
-      return { ...updated, loggedIn: true, message: `登录成功${identity.nickname ? `：${identity.nickname}` : ''}` }
+      this.onLog('login', `登录状态暂未确认：${detail}`)
+      return { ...updated, loggedIn: null, unreachable: true, loginCheck: 'unreadable', message: '暂未确认登录状态：页面可能还在跳转，或读取失败。请稍候再点一次「检测登录」；若扫码窗口还开着，等页面跳转完成后再检测。' }
     } finally {
       this.busy.delete(account.id)
     }
@@ -222,23 +265,25 @@ export class PublisherHost {
             status: account.status,
             lastCheckedAt: this.now(),
             lastError: `账号状态暂无法确认（${error?.message || String(error)}）；不影响当前状态，下次巡检再试。`,
+            loginCheck: 'unreadable',
           })
-          return { ...updated, loggedIn: null, unreachable: true }
+          return { ...updated, loggedIn: null, unreachable: true, loginCheck: 'unreadable' }
         }
         throw error
       }
       this.browser.touch(account.id)
       if (!loggedIn) {
         const updated = await this.store.patchAccountState(account.id, {
-          status: 'expired', lastCheckedAt: this.now(), lastError: '登录态已失效，请重新扫码登录。',
+          status: 'expired', lastCheckedAt: this.now(), lastError: '登录态已失效。', loginCheck: 'expired',
         })
-        return { ...updated, loggedIn: false }
+        return { ...updated, loggedIn: false, loginCheck: 'expired' }
       }
       const identity = await adapter.readIdentity(page).catch(() => ({ nickname: null, handle: null }))
       const updated = await this.store.patchAccountState(account.id, {
         status: 'active', nickname: identity.nickname, handle: identity.handle, lastCheckedAt: this.now(), lastError: null,
+        loginCheck: 'active',
       })
-      return { ...updated, loggedIn: true }
+      return { ...updated, loggedIn: true, loginCheck: 'active' }
     } finally {
       this.busy.delete(account.id)
     }
@@ -591,6 +636,7 @@ export class PublisherHost {
     let checked = 0
     let active = 0
     let expired = 0
+    let unreadable = 0
     for (const account of accounts) {
       if (account.status !== 'active') continue
       // 正在登录/发布/被用户操作的账号不碰，避免抢同一个 Chrome profile。
@@ -598,8 +644,9 @@ export class PublisherHost {
       checked += 1
       try {
         const result = await this.checkAccount(account.id)
-        // 不可达（网络抖动 / 页面异常）不是「未登录」，不动状态，也不计入 expired。
-        if (result?.unreachable) continue
+        // 不可达（网络抖动 / 页面异常）不是「未登录」，不动状态、不计入 expired，
+        // 但本轮要数出来，UI 才能说出「本轮有 N 个没读到」。
+        if (result?.unreachable) { unreadable += 1; continue }
         if (result?.loggedIn) active += 1
         else expired += 1
       } catch (error) {
@@ -608,9 +655,12 @@ export class PublisherHost {
       }
     }
     if (checked > 0) {
-      this.onLog('keepalive', `登录态巡检完成：${active} 个在线${expired ? `，${expired} 个需要重新登录` : ''}。`)
+      this.onLog('keepalive', `登录态巡检完成：${active} 个在线${expired ? `，${expired} 个需要重新登录` : ''}${unreadable ? `，${unreadable} 个状态未确认` : ''}。`)
     }
-    return { checked, active, expired }
+    // 记在 host 上，status() 带出去，界面才有「本轮有 N 个没读到」可说（巡检本身是
+    // 定时器触发的，返回值没人收）。
+    this.lastKeepAlive = { checked, active, expired, unreadable, at: this.now() }
+    return { checked, active, expired, unreadable }
   }
 }
 

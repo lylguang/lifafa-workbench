@@ -526,6 +526,13 @@ window.__ModuleLoader__.load({
       }
 
       const accounts = state?.accounts || [];
+      // 「可用」按 status 数，而不是按 loginStateOf 数：status 就是发布链路的门槛（host:375
+      // 用 status !== 'active' 直接拒绝派发），本轮读不到的账号状态被原样保留，它确实还会被
+      // 派去发布。按 loginStateOf 数会谎报「这几个账号不能用」，跟实际行为相反。
+      const activeCount = accounts.filter((item) => item.status === 'active').length;
+      // 灰色「状态未确认」的数量，用跟卡片完全相同的 loginStateOf 数出来（含没有 loginCheck
+      // 的老记录），这样头部计数和卡片色标永远不会互相矛盾。
+      const unknownCount = accounts.filter((item) => loginStateOf(item) === 'unknown').length;
       const status = state?.status || null;
       const browser = status?.browser || null;
       const liveJobs = useJobs(2000);
@@ -534,7 +541,7 @@ window.__ModuleLoader__.load({
         h(RunBanner, { jobs: liveJobs.jobs, onOpenRecords: () => openPackMenu?.('records') }),
         h(PageTop, {
           title: '平台账号',
-          copy: '这里管理要发布到的平台账号。登录使用本机 Chrome 的真实登录态：点「登录」会打开一个窗口显示平台二维码，用手机扫码即可，登录状态长期有效。',
+          copy: '这里管理要发布到的平台账号。登录使用本机 Chrome 的真实登录态：点「登录」会打开一个窗口显示平台二维码，用手机扫码即可。平台侧的登录态会过期（通常几天到几周），过期后重新点「登录」扫码就能恢复，历史项目与发布记录不受影响。',
         }, h('div', { className: 'pb-actions' },
           h('button', { type: 'button', className: 'lwb-plain-button', disabled: Boolean(busy), onClick: () => { void act('reload', async () => null); } }, '刷新'),
         )),
@@ -594,7 +601,14 @@ window.__ModuleLoader__.load({
         h('div', { className: 'pb-section' },
           h('div', { className: 'pb-section-head' },
             h('h3', null, '账号列表'),
-            h('span', null, accounts.length ? `可用 ${accounts.filter((item) => item.status === 'active').length} 个` : ''),
+            h('span', null, accounts.length ? `可用 ${activeCount} 个` : ''),
+            // 用「其中」而不是「另有」：本轮读不到的账号状态被原样保留，本来就还在「可用」里，
+            // 两行是同一批账号的子集而不是互斥集合。计数按界面上同一套判断（loginStateOf）数，
+            // 跟灰色 pill 一一对应；不读 status.counts.unreadable（后端不数没有 loginCheck 的
+            // 老记录，两个数会打架）。计数为 0 时整段不出现。「可用 0 个」时不写「其中」。
+            unknownCount ? h('span', null, activeCount > 0
+              ? `其中 ${unknownCount} 个本轮没读到（状态保留）`
+              : `本轮没读到 ${unknownCount} 个（状态保留）`) : null,
           ),
           accounts.length === 0 ? h(EmptyState, { text: '还没有平台账号。先在上方添加一个，再扫码登录。' })
             : h('div', { className: 'pb-list' }, accounts.map((account) => h(AccountCard, {
@@ -603,10 +617,24 @@ window.__ModuleLoader__.load({
                 await remote('startLogin', { id: account.id });
                 return '登录窗口已打开。扫码完成后，点该账号的「检测登录」。';
               }); },
-              onConfirm: () => { void act(`confirm-${account.id}`, async () => (await remote('confirmLogin', { id: account.id })).message); },
+              onConfirm: () => { void act(`confirm-${account.id}`, async () => {
+                const result = await remote('confirmLogin', { id: account.id });
+                // 服务端已按「成功 / 明确未登录 / 暂未确认」分别给文案；这里只兜底，
+                // 别让一句空 message 变成没头没尾的提示。
+                return result.message || (result.loggedIn
+                  ? `「${account.label}」登录成功。`
+                  : result.loggedIn === false
+                    ? `「${account.label}」仍未检测到登录。请确认已在窗口中完成扫码，再点一次「检测登录」。`
+                    : `「${account.label}」暂未确认登录状态，请稍候再点一次「检测登录」。`);
+              }); },
               onCheck: () => { void act(`check-${account.id}`, async () => {
                 const result = await remote('checkAccount', { id: account.id });
-                return result.loggedIn ? `「${account.label}」登录正常。` : `「${account.label}」登录态已失效，请重新登录。`;
+                // 「本轮没读到」不是「失效」：不可达时后端保留原状态，界面也不能催人重新扫码。
+                if (result.unreachable || result.loggedIn === null) {
+                  return `「${account.label}」本轮没读到登录状态，已保留原状态，下次巡检会再试。`;
+                }
+                if (result.loggedIn) return `「${account.label}」登录正常。`;
+                return `「${account.label}」登录态已失效。下一步：点「登录」重新扫码，扫码完成后点「检测登录」确认。`;
               }); },
               onClose: () => { void act(`close-${account.id}`, async () => { await remote('closeSession', { id: account.id }); return '已关闭浏览器窗口。'; }); },
               onEdit: () => { setEditing(account); setError(null); },
@@ -652,8 +680,50 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /**
+     * 登录态分三类，措辞与样式都要分开——把「本轮没读到」显示成「已失效」会让人
+     * 白白重扫一次码，还可能触发平台风控：
+     *   active  —— 读到已登录；
+     *   expired —— 平台明确判定未登录，要重新扫码；
+     *   unknown —— 网络抖动 / 页面跳转 / 验证码页导致读不到，原状态被保留。
+     */
+    function loginStateOf(account) {
+      // 后端把本轮检测结果结构化写进 loginCheck，优先读它——靠 lastError 的中文前缀
+      // 嗅探的话，后端改一句措辞就把「本轮没读到」退化成红色失效。老记录没有这个
+      // 字段（null），才退回前缀判断。
+      if (account.loginCheck === 'unreadable') return 'unknown'
+      if (account.loginCheck === 'expired') return 'expired'
+      if (account.loginCheck === 'active') return 'active'
+      // 先判「本轮没读到」：不可达时后端保留原状态，但界面不能沿用上一次的绿点，
+      // 也不能催人重扫码——它既不是失效，也没被确认。
+      const reason = String(account.lastError || '');
+      if (reason.startsWith('账号状态暂无法确认') || reason.startsWith('暂未确认登录状态')) return 'unknown'
+      return account.status === 'active' ? 'active' : 'expired'
+    }
+    /**
+     * 距上次登录的天数；没登录过（null / 空串）返回 null。
+     * 注意 new Date(null) 会解析成 1970，所以先判空再解析——否则界面会写出
+     * 「已经 20757 天没重新登录」这种荒谬数字（2026-10-31 隔离实例实测）。
+     */
+    function daysSince(value) {
+      if (typeof value !== 'string' || !value) return null;
+      const stamp = new Date(value).getTime();
+      if (!Number.isFinite(stamp)) return null;
+      return Math.floor((Date.now() - stamp) / 86400000);
+    }
+
     function AccountCard({ account, busy, onLogin, onConfirm, onCheck, onClose, onEdit, onRemove }) {
-      const active = account.status === 'active';
+      const state = loginStateOf(account);
+      const active = state === 'active';
+      const loginDays = daysSince(account.lastLoginAt);
+      // 一行引导，只给判为过期的账号：说清是「从没扫过码」还是「自然过期」，并给出下一步。
+      // 绿色正常账号不加引导（最近登录时间本来就在下面的 KV 行里，不丢信息）；
+      // 「本轮没读到」也不催扫码（后端那行 info 已经写了下次巡检再试），
+      // 免得用户白重扫一次码、还可能触发平台风控。
+      const loginHint = state !== 'expired' ? null
+        : loginDays == null ? '这个账号还没登录过：点「登录」打开扫码窗口，用手机扫码即可。'
+          : loginDays >= 14 ? `已经 ${loginDays} 天没重新登录，平台侧登录态通常几天到几周就会失效——点「登录」重新扫码即可，不用先删账号；扫码完成后点「检测登录」确认。`
+            : `上次登录是 ${loginDays} 天前，平台侧登录态已失效。下一步：点「登录」重新扫码，扫码完成后点「检测登录」确认。`;
       return h('article', { className: 'pb-account' },
         h('div', { className: 'pb-avatar', style: { background: `hsl(${hueOf(account.label)}deg 58% 52%)` } }, String(account.label || '?').slice(0, 1)),
         h('div', { style: { display: 'grid', gap: '8px', minWidth: 0 } },
@@ -668,15 +738,29 @@ window.__ModuleLoader__.load({
               ),
             ),
             h('div', { className: 'pb-actions' },
-              h(Pill, { tone: active ? 'green' : 'red' }, active ? '登录正常' : '未登录'),
+              h(Pill, { tone: state === 'active' ? 'green' : state === 'unknown' ? 'muted' : 'red' },
+                state === 'active' ? '登录正常' : state === 'unknown' ? '状态未确认' : '未登录'),
               !account.adapterReady ? h(Pill, { tone: 'orange' }, '待适配') : null,
             ),
           ),
           h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap' } },
             h('div', { className: 'pb-kv' }, '最近检测', h('b', null, relativeTime(account.lastCheckedAt))),
-            h('div', { className: 'pb-kv' }, '最近登录', h('b', null, relativeTime(account.lastLoginAt))),
+            h('div', { className: 'pb-kv' }, '最近登录', h('b', null, account.lastLoginAt ? relativeTime(account.lastLoginAt) : '尚未登录')),
           ),
-          account.lastError ? h('p', { className: 'pb-warn' }, account.lastError) : null,
+          // 失效是 warning，「本轮没读到」是 info——同一种橙色会让人以为又要扫码。
+          // 后端那行只给原因（读不到的详情 + 下次巡检再试）；界面补一句事实：本轮读不到不会改动
+          // 它现在的状态——原状态是 active 的仍按原状态算可用（status 保留，host:375 只按 status
+          // 决定能不能派发），原状态本来就被标为未登录的仍然不派去发布。真跑到平台时如果登录确实
+          // 掉了会明确报错、不会静默失败。这句不提「已失效」，也不催重扫码。
+          account.lastError ? h('p', {
+            className: state === 'unknown' ? 'pb-note' : 'pb-warn',
+          }, state === 'unknown'
+            ? `${account.lastError}（本轮没读到不会改动它现在的状态：${account.status === 'active'
+              ? '这个账号仍按原状态算可用'
+              : '这个账号原来就被标为未登录，仍然不派去发布'
+            }；真跑到平台时如果登录确实掉了会明确报错，不会静默失败。）`
+            : account.lastError) : null,
+          loginHint ? h('p', { className: 'pb-meta' }, loginHint) : null,
           h('div', { className: 'pb-actions' },
             h('button', { type: 'button', className: 'lwb-primary-button', disabled: Boolean(busy), onClick: onLogin },
               busy === `login-${account.id}` ? '打开中…' : (active ? '重新登录' : '登录')),

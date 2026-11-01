@@ -28,7 +28,14 @@ export async function apply(ctx, config = {}) {
   const scope = ctx.lwbPackServices.forPack(manifest.id)
   const context = await scope.context()
 
-  const store = new PublisherStore({ workspacePath: context.workspacePath })
+  // 账号库坏行的提示与日志都走这条通道：onNotice 给界面一条可见提示，onLog 给日志面板
+  // 留痕（含被丢弃的行数）。两者先经过控制台，UI 订阅同一通道，无需改 client.js。
+  const onPublisherLog = (kind, message) => console.log(`[publisher:${kind}] ${message}`)
+  const store = new PublisherStore({
+    workspacePath: context.workspacePath,
+    onLog: onPublisherLog,
+    onNotice: onPublisherLog,
+  })
   const settings = await store.settings().catch(() => ({ headless: false }))
   const browser = new PublisherBrowserPool({
     dataRoot: store.dataRoot,
@@ -57,7 +64,7 @@ export async function apply(ctx, config = {}) {
     spokenVideo,
     workspacePath: context.workspacePath,
     background: scope.background,
-    onLog: (kind, message) => console.log(`[publisher:${kind}] ${message}`),
+    onLog: onPublisherLog,
   })
 
   await host.recoverInterrupted().catch(() => {})

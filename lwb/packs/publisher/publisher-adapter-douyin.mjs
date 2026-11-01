@@ -26,7 +26,9 @@ const SELECTORS = {
   loggedOut: [
     'text=扫码登录',
     'text=验证码登录',
-    '[class*="login"]',
+    // 不加「class 含 login 的宽选择器」：已登录页面上任何 class 含 login 的元素（如「退出登录」
+    // 按钮、登录弹窗残留节点）都会被误判成未登录，把在线账号标成 expired。
+    // 未登录判定只信登录墙文案 + URL 命中登录路径（见 isLoggedIn 的 /login|passport|sso/）。
   ],
   nickname: [
     '[data-e2e="user-info-name"]',

@@ -26,6 +26,13 @@ export const PLATFORM_LABELS = Object.freeze({
 export const ADAPTER_PLATFORMS = Object.freeze(['douyin', 'bilibili', 'kuaishou', 'wechat'])
 
 export const ACCOUNT_STATES = Object.freeze(['active', 'expired'])
+/**
+ * Outcome of the most recent login check, kept on the account record so the UI
+ * can tell "could not read this round" apart from "definitely not logged in"
+ * without sniffing the wording of lastError. null means no check was recorded
+ * (accounts stored before this field existed).
+ */
+export const LOGIN_CHECKS = Object.freeze(['active', 'expired', 'unreadable'])
 export const JOB_STATUSES = Object.freeze(['queued', 'running', 'awaiting-confirm', 'succeeded', 'failed', 'cancelled'])
 export const SUBMIT_MODES = Object.freeze(['confirm', 'auto'])
 
@@ -132,6 +139,9 @@ function accountRecord(value, profileDirOf) {
     lastCheckedAt: optionalText(input.lastCheckedAt, '最近检测时间', 64) || null,
     lastLoginAt: optionalText(input.lastLoginAt, '最近登录时间', 64) || null,
     lastError: optionalText(input.lastError, '最近错误', 600) || null,
+    // Older accounts.json files have no loginCheck; an invalid value degrades to
+    // null (UI falls back to reading lastError) rather than rejecting the row.
+    loginCheck: LOGIN_CHECKS.includes(input.loginCheck) ? input.loginCheck : null,
     createdAt: text(input.createdAt, '创建时间', 64),
     updatedAt: text(input.updatedAt, '更新时间', 64),
   }
@@ -202,11 +212,13 @@ export function defaultProfileDir(id) {
  * encryption instead of copying them into a plain file.
  */
 export class PublisherStore {
-  constructor({ workspacePath, now = () => new Date().toISOString() } = {}) {
+  constructor({ workspacePath, now = () => new Date().toISOString(), onLog = () => {}, onNotice = () => {} } = {}) {
     if (typeof workspacePath !== 'string' || !workspacePath) throw new Error('PublisherStore requires a workspace path.')
     this.workspacePath = workspacePath
     this.dataRoot = join(workspacePath, 'data')
     this.now = now
+    this.onLog = onLog
+    this.onNotice = onNotice
     this.writes = new Map()
   }
 
@@ -234,8 +246,22 @@ export class PublisherStore {
     const raw = await readJson(this.accountsFile, { schemaVersion: ACCOUNTS_SCHEMA_VERSION, accounts: [] }, '账号库')
     const list = Array.isArray(raw?.accounts) ? raw.accounts : []
     const accounts = []
+    const discarded = []
     for (const item of list) {
-      try { accounts.push(accountRecord(item, defaultProfileDir)) } catch { /* a broken row must not hide the rest */ }
+      try {
+        accounts.push(accountRecord(item, defaultProfileDir))
+      } catch (error) {
+        // 坏行（非 UUID 标识、字段非法等）绝不能再静默吞掉：用户会看到「还没有平台账号」
+        // 而零报错，账号被悄悄丢掉。收集起来，最后给一条可见提示 + 一条日志（含行数）。
+        discarded.push({ id: item && typeof item.id === 'string' ? item.id : '(无标识)', reason: error?.message || String(error) })
+      }
+    }
+    if (discarded.length) {
+      const ids = discarded.map((entry) => entry.id).join('、')
+      // 用户可见提示：让界面能说出「有 N 条账号记录损坏被忽略」，而不是静默空列表。
+      this.onNotice('accounts', `账号库里有 ${discarded.length} 条记录已损坏（标识：${ids}），已忽略，不会出现在账号列表中。请检查账号数据文件后重新保存。`)
+      // 日志：保留被丢弃的标识与原因，便于排查到底吞了哪些行。
+      this.onLog('storage', `已忽略 ${discarded.length} 条损坏的账号记录（标识：${ids}）；这些账号不会出现在列表里，但其 Chrome 登录态目录可能仍残留在 data 下。`)
     }
     return accounts
   }
@@ -313,6 +339,10 @@ export class PublisherStore {
       if (patch.lastError !== undefined) next.lastError = patch.lastError === null ? null : text(patch.lastError, '最近错误', 600)
       if (patch.lastCheckedAt !== undefined) next.lastCheckedAt = patch.lastCheckedAt
       if (patch.lastLoginAt !== undefined) next.lastLoginAt = patch.lastLoginAt
+      if (patch.loginCheck !== undefined) {
+        if (!LOGIN_CHECKS.includes(patch.loginCheck)) fail('PUBLISHER_INVALID_INPUT', '登录检测结果无效。')
+        next.loginCheck = patch.loginCheck
+      }
       next.updatedAt = this.now()
       accounts[index] = next
       await writeJson(this.accountsFile, { schemaVersion: ACCOUNTS_SCHEMA_VERSION, accounts })
