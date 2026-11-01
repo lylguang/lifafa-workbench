@@ -23,6 +23,13 @@ import { fileURLToPath } from 'node:url'
 import { prepareStoryVideoProject, renderStoryVideo, probeStoryVideo, storyRemotionAvailable, buildStoryBeats } from '../story-account-render.mjs'
 import { buildTechnicalReport } from '../story-account-qc.mjs'
 import { buildProportionalCues } from '../story-account-voice.mjs'
+import { useRoomyTempScratch } from '../../../test-utils/scratch-temp.mjs'
+
+// 这条走的是真实渲染：Remotion 的工程目录与帧缓存在 os.tmpdir() 下建（成片本身写到
+// lwb/local/verification/，在别的盘上）。`node --test` 不经过 lwb/dsh-launcher.mjs，
+// 系统盘快满的机器上真实渲染会在临时目录里失败。选址口径与 launcher 一致，理由见
+// ../../../test-utils/scratch-temp.mjs。
+useRoomyTempScratch()
 
 const run = promisify(execFile)
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..')

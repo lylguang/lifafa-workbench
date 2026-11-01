@@ -10,6 +10,11 @@ import { StoryAccountStore } from '../story-account-store.mjs'
 import { runStoryMediaPipeline } from '../story-account-pipeline.mjs'
 import { runIndependentReview } from '../story-account-qc.mjs'
 import { StoryAccountContent } from '../story-account-content.mjs'
+import { useRoomyTempScratch } from '../../../test-utils/scratch-temp.mjs'
+
+// 审片用例会用 ffmpeg 造真实成片再抽帧；系统盘快满的机器上并发写会崩掉编码器。
+// 选址口径与 launcher 一致，理由见 ../../../test-utils/scratch-temp.mjs。
+useRoomyTempScratch()
 
 const here = dirname(fileURLToPath(import.meta.url))
 const CONTENT_SRC = readFileSync(join(here, '..', 'story-account-content.mjs'), 'utf8')

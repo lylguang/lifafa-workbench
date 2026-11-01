@@ -5,6 +5,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { StoryAccountContent } from '../story-account-content.mjs'
 import * as cover from '../story-account-cover.mjs'
+import { useRoomyTempScratch } from '../../../test-utils/scratch-temp.mjs'
+
+// 封面渲染会往工作区写真实图片；系统盘快满的机器上这些写入会失败，门就红在环境上。
+// 选址口径与 launcher 一致，理由见 ../../../test-utils/scratch-temp.mjs。
+useRoomyTempScratch()
 
 async function withContent(run) {
   const dir = await mkdtemp(join(tmpdir(), 'story-cover-'))

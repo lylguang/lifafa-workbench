@@ -6,6 +6,11 @@ import { join } from 'node:path'
 
 import { StoryAccountStore } from '../story-account-store.mjs'
 import { runStoryMediaPipeline, STORY_PIPELINE_STEPS, formatStoryPackageText, readStoryCoverInfo } from '../story-account-pipeline.mjs'
+import { useRoomyTempScratch } from '../../../test-utils/scratch-temp.mjs'
+
+// 流水线集成用例会把封面与配音产物写进临时工作区；系统盘快满的机器上这些写入会失败，
+// 门就红在环境上。选址口径与 launcher 一致，理由见 ../../../test-utils/scratch-temp.mjs。
+useRoomyTempScratch()
 
 /**
  * 媒体流水线的集成测试。

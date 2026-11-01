@@ -2,15 +2,34 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import test from 'node:test'
+import test, { after } from 'node:test'
 import { WebSocketServer } from 'ws'
 import { buildTechnicalReport, DEFAULT_VIDEO_VISUAL_BRIEF, DEFAULT_VOICE_PROFILE, mediaServiceConfig, normalizeProbe, normalizeRenderRequest, normalizeSubtitleRequest, normalizeVoiceoverRequest, subtitleResult } from '../spoken-video-media.mjs'
 import { SpokenVideoProjectStore, SpokenVideoStoreError } from '../spoken-video-store.mjs'
 import { SpokenVideoMediaHost, parseRemotionRenderProgress, parseSceneSpans, reviewTimestamps, REVIEW_FRAME_LIMIT, REVIEW_FRAME_HARD_LIMIT, REVIEW_MAX_GAP_SECONDS } from '../spoken-video-media-host.mjs'
 import { remotionEncodingSettings, remotionRendererAvailable } from '../spoken-video-remotion.mjs'
 import { buildLineArtPlanPrompt, composeLineArtPrompt, LINE_ART_PLAN_SCHEMA, lineArtSeed, normalizeLineArtPlan } from '../spoken-video-whiteboard-art.mjs'
+import { useProcessScratch } from '../../../test-utils/scratch-temp.mjs'
+
+// 本文件的用例会真的走渲染路径，而渲染前的磁盘预检连临时盘一起查（见
+// ../spoken-video-remotion.mjs 的 assertRenderDiskSpace）。`node --test` 不经过
+// lwb/dsh-launcher.mjs，裸 os.tmpdir() 停在系统盘上：系统盘只剩几百 MB 的机器上，
+// 门会红在机器状态上而不是被测代码上（本机实测：C 盘 0.2 GB 空闲时 4 个用例报
+// 「磁盘空间不足，无法开始渲染」）。选址口径与 launcher 一致，理由见
+// ../../../test-utils/scratch-temp.mjs。生产的预检没被削弱：它照样查输出盘与 tmpdir()。
+// mkdtemp 直接用解析出的目录，不绕 os.tmpdir()；同时把 TEMP/TMP/TMPDIR 指过去，
+// 生产侧 assertRenderDiskSpace 读到的 tmpdir() 也跟着落在空闲盘。一台空闲非系统盘
+// 都没有时退回系统盘，让预检按原逻辑报错——那种情况该红就红。
+// 按进程隔离：共享 scratch 目录会让并发跑的两份测试互删工作区（实测到 ffmpeg
+// `Command failed` 与「媒体任务记录丢失」，看着像被测代码坏了，其实是对方进程清理掉了
+// 我方正在用的目录）。本进程独占 `unit-<pid>` 子目录，退出前只清自己那份。
+const SCRATCH_TEMP = useProcessScratch()
+
+// 兜底清理：渲染进程（Remotion / Chrome profile）可能在单个用例的 t.after 抢删时仍握着
+// 文件句柄，那一次删除被锁失败会留下残目录。整体退出前清掉本进程的 scratch 子目录，
+// 避免空闲盘堆积垃圾——只扫 `unit-<pid>`，不扫父目录，所以不会碰到别的进程。
+after(() => rm(SCRATCH_TEMP, { recursive: true, force: true }).catch(() => {}))
 
 function agent(cwd) { return { session: { header: { cwd } } } }
 
@@ -104,7 +123,7 @@ async function removeWorkspaceTree(root) {
 }
 
 async function workspace(t) {
-  const root = await mkdtemp(join(tmpdir(), 'lwb-spoken-video-media-'))
+  const root = await mkdtemp(join(SCRATCH_TEMP, 'lwb-spoken-video-media-'))
   t.after(() => removeWorkspaceTree(root))
   const cwd = join(root, 'workspace')
   await mkdir(cwd)
@@ -1915,8 +1934,7 @@ test('the guard corrects a subtitle track that lags the speech', async (t) => {
   // 滞后数秒。断言它判 corrected 并把 cue 拉回真实发声位置。
   const { guardSubtitleTimeline, parseSrt } = await import('../spoken-video-subtitle-align.mjs')
   const { mkdtemp: mk, writeFile: wf, rm: rmrf } = await import('node:fs/promises')
-  const { tmpdir: td } = await import('node:os')
-  const dir = await mk(join(td(), 'lwb-align-'))
+  const dir = await mk(join(SCRATCH_TEMP, 'lwb-align-'))
   t.after(() => rmrf(dir, { recursive: true, force: true }))
   const audioPath = join(dir, 'voice.wav')
   await wf(audioPath, 'placeholder')

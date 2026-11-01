@@ -7,6 +7,12 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
+import { useRoomyTempScratch } from '../../../test-utils/scratch-temp.mjs'
+
+// 真实抽帧用例会用 ffmpeg 造成片并抽帧，工作区建在 os.tmpdir() 上。`node --test` 不经过
+// lwb/dsh-launcher.mjs，系统盘快满的机器上并发写会直接把 ffmpeg 崩掉（本机实测退出码
+// 0xDFABA7BB）。选址口径与 launcher 一致，理由见 ../../../test-utils/scratch-temp.mjs。
+useRoomyTempScratch()
 
 function ffmpegAvailable() {
   try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); return true } catch { return false }

@@ -8,6 +8,11 @@ import { storyCoverLayout, wrapStoryHeadline, escapeDrawText, STORY_COVER_SIZE, 
 import { buildProportionalCues, checkScriptForVoice, normalizeStoryVoiceRequest, STORY_VOICE_DEFAULT, STORY_TTS_MAX_CHARS } from '../story-account-voice.mjs'
 import { requestStoryVoiceover, requestStoryVoicePreview, STORY_VOICE_RECIPES, STORY_BUILTIN_VOICES, STORY_VOICE_DEFAULT_RECIPE_ID } from '../story-account-voice.mjs'
 import { buildStoryBeats, normalizeStoryPalette, STORY_PALETTES, STORY_RENDER_SPEC } from '../story-account-render.mjs'
+import { useRoomyTempScratch } from '../../../test-utils/scratch-temp.mjs'
+
+// 配音预览与封面合成会写真实字节；系统盘快满的机器上这些写入会失败，门就红在环境上。
+// 选址口径与 launcher 一致，理由见 ../../../test-utils/scratch-temp.mjs。
+useRoomyTempScratch()
 
 /* --------------------------------- 封面 --------------------------------- */
 
