@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
 
 import { inspectAgentProject } from './spoken-video-preflight.mjs'
+import { normalizeNarrationLoudness } from './spoken-video-loudness.mjs'
 import { parseSceneSpans, readCreativeSource, sceneSamplePlan } from './spoken-video-scene-table.mjs'
 
 const execFileAsync = promisify(execFile)
@@ -416,8 +417,17 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
   await ensureAgentDependencies(projectDir)
 
   const audioFileName = `narration${extname(audioPath) || '.wav'}`
-  await copyFile(audioPath, join(publicDir, audioFileName))
   await copyFile(audioPath, join(inputsDir, audioFileName))
+  // 渲染用的是 public/ 下的副本，它必须过一道响度归一化：
+  // 实测 TTS 旁白只有 -21.4 LUFS，平台目标是 -14，差 7dB——原样渲染出去的成片
+  // 听起来就是「声音偏小」。inputs/ 那份保持原样不动，它是字幕对齐（VAD）的事实源，
+  // 改响度虽然不改时间轴，但保留原文件能避免以后对不上号。
+  // 归一化失败不阻断渲染：回退成原文件，原因写进 inputs/narration-loudness.json。
+  const normalizedFileName = 'narration.wav'
+  const loudness = await normalizeNarrationLoudness(audioPath, join(publicDir, normalizedFileName)).catch((error) => ({ ok: false, applied: false, reason: String(error?.message || error) }))
+  const mixFileName = loudness.applied ? normalizedFileName : audioFileName
+  if (!loudness.applied) await copyFile(audioPath, join(publicDir, mixFileName))
+  await writeFile(join(inputsDir, 'narration-loudness.json'), json(loudness), { encoding: 'utf8', mode: 0o600 })
   await writeSfxKit(publicDir)
   const bgmFileName = bgmPath ? `background-music${extname(bgmPath) || '.mp3'}` : null
   if (bgmPath) {
@@ -435,7 +445,7 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
     orientation: orientation === 'landscape' ? 'landscape' : 'portrait',
     subtitleEnabled,
     subtitles: subtitleEnabled ? subtitles : [],
-    audioFileName,
+    audioFileName: mixFileName,
     bgmFileName,
     bgmVolume: bgmFileName ? Math.max(0, Math.min(0.5, Number(bgmVolume ?? 0.12))) : null,
   }
@@ -465,6 +475,7 @@ export async function prepareSpokenVideoAgentProject({ projectRoot, runId, title
       // 字幕时间轴始终可用：它是画面分节的唯一依据，与「是否把字幕条烧进画面」无关。
       subtitles: 'inputs/subtitles.srt',
       narration: `inputs/${audioFileName}`,
+      narrationLoudness: 'inputs/narration-loudness.json',
       backgroundMusic: bgmFileName ? { file: `inputs/${bgmFileName}`, name: backgroundMusic?.name || bgmFileName, volume: props.bgmVolume } : null,
     },
     skillPaths: { remotionBestPractices: 'skills/remotion-best-practices/SKILL.md', contentVideo: 'skills/content-video/SKILL.md' },

@@ -109,6 +109,101 @@ const VOICE_PAGE = async () => {
   return { source, page: source.slice(start, end) }
 }
 
+test('the audio script box scrolls inside a capped height instead of stretching the page', async () => {
+  // 2026-11-02 反馈：往「文本内容」里粘贴一篇长稿，整页被拉长到几千像素，
+  // 底下的音色、语速和「生成配音」按钮全被顶到屏幕外。
+  // 真因是这个框同时做了两件事：CSS 写 `overflow:hidden`（内容多出来不滚动，
+  // 直接被裁掉），JS 又逐字把 height 撑到 scrollHeight（于是框无限长高）。
+  // 两个动作叠起来，框既不封顶也不滚动，只会把整页撑长。
+  const { source, page } = await VOICE_PAGE()
+
+  // 取真正的样式表本体（css 基础块 + productCss 追加块），避免拿整份源码当 CSS 匹配。
+  const cssStart = source.indexOf('const css = `')
+  const productStart = source.indexOf('const productCss')
+  const cssEnd = source.indexOf('`;', productStart)
+  assert.ok(cssStart > 0 && productStart > cssStart && cssEnd > productStart, 'client must define its product CSS')
+  const css = source.slice(cssStart, cssEnd)
+
+  // 框必须封顶：不给 max-height，overflow:auto 就等于没有滚动条（永远不溢出）。
+  const rule = css.match(/\.sv-audio-script \{([^}]*)\}/u)
+  assert.ok(rule, 'the audio script box must have its own style rule')
+  assert.match(rule[1], /max-height:\s*min\(420px,46vh\)/u, 'the audio script box must cap its height')
+  // 内容超出时在框内滚动，而不是被裁掉或把页面撑长。
+  assert.match(rule[1], /overflow:\s*auto/u, 'the audio script box must scroll its own overflow')
+  // 反向钉死：不能再靠「裁掉溢出」来假装没溢出。
+  assert.doesNotMatch(rule[1], /overflow:\s*hidden/u, 'the audio script box must not clip its overflow')
+
+  // 自动长高仍在（短稿要贴住内容，不留一大块空白），但必须被封顶线夹住。
+  assert.match(source, /function svFitTextAreaHeight\(node\) \{/u)
+  const fit = source.slice(source.indexOf('function svFitTextAreaHeight('), source.indexOf('function svInsertAudioTag('))
+  // 高度取自**计算样式**的 max-height，CSS 改了这里自动跟着改，不写死数值。
+  assert.match(fit, /getComputedStyle\(node\)/u)
+  assert.match(fit, /const cap = computed \? parseFloat\(computed\.maxHeight\)/u)
+  // 真正的封顶：算出 wanted 之后必须和 ceiling 取小。
+  assert.match(fit, /Math\.min\(wanted, ceiling\)/u, 'the fitted height must never exceed the capped ceiling')
+  // 反向钉死：不能再回到「无脑撑到 scrollHeight」。
+  assert.doesNotMatch(fit, /style\.height = `\$\{[^}]*scrollHeight[^}]*\}`/u, 'the box must not grow past its cap')
+  // 两处自动长高的入口都改用同一个助手，别各写一份而走偏。
+  assert.match(page, /svFitTextAreaHeight\(textRef\.current\)/u)
+  assert.match(page, /onInput: \(event\) => svFitTextAreaHeight\(event\.currentTarget\)/u)
+
+  // 文本框本身还在原地，读写与标签插入都没被改坏。
+  assert.match(page, /className: 'sv-textarea sv-audio-script'/u)
+  assert.match(page, /ref: textRef/u)
+  assert.match(page, /onInsert: \(tag\) => svInsertAudioTag\(textRef\.current, tag, setText\)/u)
+})
+
+test('the audio script box fits its content to the cap instead of the raw content height', async () => {
+  // 把 svFitTextAreaHeight 真跑一遍，而不是只做文本匹配：
+  // 短文要长到刚好放得下，长文涨到封顶线就停，绝不越线。
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function svFitTextAreaHeight(')
+  const end = source.indexOf('\n    function svInsertAudioTag(', start)
+  assert.ok(start >= 0 && end > start, 'svFitTextAreaHeight must stay extractable')
+
+  // 假节点：scrollHeight 是内容高度，getComputedStyle 回填上下限。
+  const makeNode = (scrollHeight, minHeight, maxHeight) => {
+    const node = { scrollHeight, style: {} }
+    node.getBoundingClientRect = () => ({ height: 0 })
+    return { node, styles: { minHeight: `${minHeight}px`, maxHeight: maxHeight } }
+  }
+
+  const sandbox = {
+    window: {
+      getComputedStyle: () => ({ minHeight: '136px', maxHeight: '331.2px' }),
+    },
+  }
+  const fit = vm.runInNewContext(`${source.slice(start, end)}; svFitTextAreaHeight`, sandbox)
+
+  // 短文：贴住内容，长度介于下限与内容高度之间。
+  const short = makeNode(90);
+  short.styles = { minHeight: '136px', maxHeight: '331.2px' };
+  sandbox.window.getComputedStyle = () => short.styles;
+  fit(short.node);
+  assert.equal(short.node.style.height, '136px', 'a short script still grows to the minimum height')
+
+  // 中等长度：刚好够放下内容。
+  const mid = makeNode(220);
+  mid.styles = { minHeight: '136px', maxHeight: '331.2px' };
+  sandbox.window.getComputedStyle = () => mid.styles;
+  fit(mid.node);
+  assert.equal(mid.node.style.height, '220px', 'a medium script fits its content exactly')
+
+  // 超长内容：停在封顶线上，绝不越线。
+  const long = makeNode(2706);
+  long.styles = { minHeight: '136px', maxHeight: '331.2px' };
+  sandbox.window.getComputedStyle = () => long.styles;
+  fit(long.node);
+  assert.equal(long.node.style.height, '331.2px', 'a long script stops at the capped ceiling')
+
+  // 没有 max-height 的一方（max-height:none 时 parseFloat 得到 NaN）时退回「不设上限」。
+  const noCap = makeNode(2706);
+  noCap.styles = { minHeight: '136px', maxHeight: 'none' };
+  sandbox.window.getComputedStyle = () => noCap.styles;
+  fit(noCap.node);
+  assert.equal(noCap.node.style.height, '2706px', 'without a cap the box follows its content')
+})
+
 test('audio workbench retries a failed voiceover from its frozen task input', async () => {
   const { page } = await VOICE_PAGE()
 

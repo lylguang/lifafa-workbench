@@ -42,6 +42,14 @@ export const DEFAULT_LOCAL_QC_THRESHOLDS = Object.freeze({
   silenceNoiseDb: -45,
   clipPeakDb: -0.1,
   clipRatioLimit: 0.001,
+  // 成片响度：平台（抖音/视频号/YouTube/Reels）都在 -14 LUFS 附近。
+  // 分两档，避免把风格差异当成缺陷：
+  //   -16 ~ -13 是正常带，超出只警告（有些内容本来就想做轻声、深沉的听感）；
+  //   -18 ~ -11 之外才否决——那是真的「听不见」或「压爆」了。
+  // 实测事故：2026-11-01 一条已发布成片 I = -21.3 LUFS，比目标低 7dB，
+  // 而整条链路当时没有任何响度测量，这个偏差一直无人发现。
+  loudnessWarnLufs: [-16, -13],
+  loudnessDefectLufs: [-18, -11],
 })
 
 /**
@@ -155,6 +163,7 @@ export function judgeLocalQc({
   freezeSpans = [],
   silenceSpans = [],
   volume = {},
+  loudness = {},
   durationSeconds = null,
   thresholds = DEFAULT_LOCAL_QC_THRESHOLDS,
 } = {}) {
@@ -207,6 +216,23 @@ export function judgeLocalQc({
     warnings.push('未能读取音频峰值（volumedetect 无输出），该项未参与判定。')
   }
 
+  // 响度：平台按响度归一化播放，偏离目标 7dB 就是可听的缺陷。
+  // 测不出来不判定（与其它项一致：不拿 0 冒充缺失数据）。
+  const integrated = Number.isFinite(loudness?.integratedLufs) ? loudness.integratedLufs : null
+  if (integrated !== null) {
+    const [warnLow, warnHigh] = thresholds.loudnessWarnLufs
+    const [defectLow, defectHigh] = thresholds.loudnessDefectLufs
+    const detail = `（实测 ${integrated.toFixed(1)} LUFS，目标约 -14）`
+    if (integrated < defectLow || integrated > defectHigh) {
+      defects.push({ kind: 'loudness', count: 1, worst: { integratedLufs: integrated } })
+      issues.push(`成片响度 ${integrated.toFixed(1)} LUFS 偏离目标过大${detail}：低于 ${defectLow} 时观众会觉得声音很小，高于 ${defectHigh} 则动态被压平。`)
+    } else if (integrated < warnLow || integrated > warnHigh) {
+      warnings.push(`成片响度 ${integrated.toFixed(1)} LUFS 不在建议带 ${warnLow} ~ ${warnHigh}${detail}。`)
+    }
+  } else {
+    warnings.push('未能读取成片响度（ebur128 无输出），该项未参与判定。')
+  }
+
   return {
     passed: issues.length === 0,
     issues,
@@ -217,6 +243,7 @@ export function judgeLocalQc({
       freezeSpans,
       silenceSpans,
       volume,
+      loudness,
       durationSeconds,
     },
   }

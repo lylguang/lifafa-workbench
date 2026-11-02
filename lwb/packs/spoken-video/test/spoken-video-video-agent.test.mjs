@@ -325,3 +325,12 @@ test('creator prompt carries the expanded sound kit and the motion grammar it ca
   assert.match(prompt, /Stagger/u)
   assert.match(prompt, /整屏淡入/u, '必须显式禁止整幕整体淡入')
 })
+
+test('creator prompt tells the director the narration is already loudness-normalised', () => {
+  // 旁白从 -21.4 归一化到 -14 LUFS 之后，音效的相对关系变了：
+  // 旧提示词里的 0.3–0.4 会偏弱、0.6–0.8 又会与语音抢。这条规则必须跟着响度改动一起走。
+  const prompt = buildVideoCreatorPrompt({ runDir: '/tmp/video-agent/run-3' })
+  assert.match(prompt, /旁白响度已经归一化/u)
+  assert.match(prompt, /-14 LUFS/u)
+  assert.match(prompt, /0\.35–0\.5/u, '普通音效音量带必须与归一化后的旁白匹配')
+})

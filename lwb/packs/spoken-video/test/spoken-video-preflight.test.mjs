@@ -764,3 +764,38 @@ test('动效基元文件随任务下发：过渡与入场分层不需要 Agent �
   const referenced = [...text.matchAll(/sfx\/([\w.-]+)\.wav/gu)].map((m) => m[1] + '.wav')
   for (const name of referenced) assert.ok(kit.includes(name), `基元引用的 ${name} 必须真的在音效包里`)
 })
+
+test('渲染准备：旁白过响度归一化，失败时回退原文件并留下可解释记录', async (t) => {
+  // 2026-11-01：实测 TTS 旁白只有 -21.4 LUFS，平台目标 -14，差 7dB。
+  // 归一化必须发生在渲染前（public/ 副本），且失败不能阻断渲染。
+  const dir = await mkdtemp(join(tmpdir(), 'loudness-prepare-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+
+  // 情况一：不是真音频 → 归一化必然失败 → 回退原文件，记录里写明原因，音频名保持原扩展名
+  const fake = join(dir, 'fake.mp3'); await writeFile(fake, 'not audio at all')
+  const fallback = await prepareSpokenVideoAgentProject({ projectRoot: dir, runId: 'loud-bad', audioPath: fake, title: 't', script: 's', durationSeconds: 2, subtitles: [], subtitleEnabled: false })
+  const badRecord = JSON.parse(await readFile(join(fallback.projectDir, 'inputs', 'narration-loudness.json'), 'utf8'))
+  assert.equal(badRecord.ok, false, '不是真音频时必须如实记录失败')
+  assert.equal(typeof badRecord.reason, 'string')
+  assert.ok(existsSync(join(fallback.projectDir, 'public', 'narration.mp3')), '失败时回退到原文件，不能没有音频')
+  const badProps = JSON.parse(await readFile(join(fallback.projectDir, 'public', 'task-props.json'), 'utf8'))
+  assert.equal(badProps.audioFileName, 'narration.mp3', '回退时音频名必须与实际文件一致，否则渲染读不到')
+
+  // 情况二：真音频且偏轻 → 归一化成功，渲染用归一化后的 wav，并复测达标
+  let ffmpegReady = true
+  try { execFileSync('ffmpeg', ['-version'], { stdio: 'pipe' }) } catch { ffmpegReady = false }
+  if (!ffmpegReady) return
+  const quiet = join(dir, 'quiet.mp3')
+  execFileSync('ffmpeg', ['-hide_banner', '-nostats', '-y', '-f', 'lavfi', '-i', 'sine=frequency=300:duration=4',
+    '-af', 'volume=-18dB', '-ar', '48000', '-ac', '1', quiet], { stdio: 'pipe' })
+  const ok = await prepareSpokenVideoAgentProject({ projectRoot: dir, runId: 'loud-ok', audioPath: quiet, title: 't', script: 's', durationSeconds: 4, subtitles: [], subtitleEnabled: false })
+  const record = JSON.parse(await readFile(join(ok.projectDir, 'inputs', 'narration-loudness.json'), 'utf8'))
+  assert.equal(record.ok, true, `归一化应当成功：${record.reason || ''}`)
+  assert.equal(record.applied, true)
+  assert.ok(Math.abs(record.after.integratedLufs - (-14)) <= 0.5, `复测响度 ${record.after.integratedLufs} 应当在 -14 ±0.5`)
+  const props = JSON.parse(await readFile(join(ok.projectDir, 'public', 'task-props.json'), 'utf8'))
+  assert.equal(props.audioFileName, 'narration.wav', '成功后渲染使用归一化后的 wav')
+  assert.ok(existsSync(join(ok.projectDir, 'public', 'narration.wav')))
+  // inputs/ 那份保持原样：它是字幕对齐（VAD）的事实源，不该被改写。
+  assert.ok(existsSync(join(ok.projectDir, 'inputs', 'narration.mp3')))
+})

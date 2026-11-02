@@ -44,6 +44,7 @@ import {
 import { cueChars, splitLongCues, validateSrt } from './spoken-video-subtitles.mjs'
 import { buildVideoCreatorPrompt, buildVideoCreatorRepairPrompt, buildVideoEditorialRepairPrompt, buildVideoReviewerPrompt, normalizeVideoReview, subtitleSamplesAt, VIDEO_REVIEW_SCHEMA } from './spoken-video-video-agent.mjs'
 import { DEFAULT_LOCAL_QC_THRESHOLDS, judgeLocalQc, parseBlackDetect, parseFreezeDetect, parseSilenceDetect, parseVolumeDetect } from './spoken-video-local-qc.mjs'
+import { parseEbur128 } from './spoken-video-loudness.mjs'
 
 const execFilePromise = promisify(execFile)
 
@@ -4622,19 +4623,22 @@ async #mimoReferenceDataUrl(root, input) {
       }
     }
     const thresholds = DEFAULT_LOCAL_QC_THRESHOLDS
-    const [blackLog, freezeLog, silenceLog, volumeLog] = await Promise.all([
+    const [blackLog, freezeLog, silenceLog, volumeLog, loudnessLog] = await Promise.all([
       run(['-i', videoPath, '-vf', `blackdetect=d=${thresholds.blackMinSeconds}:pic_th=${thresholds.blackPixelThreshold}:pix_th=0.10`, '-an'], 'blackdetect'),
       // 冻结检测只作记录（见 spoken-video-local-qc.mjs 的阈值说明），
       // 仍跑一遍以便把「哪里特别久没动」报给人工与模型审片参考。
       run(['-i', videoPath, '-vf', 'freezedetect=n=-60dB:d=3.0', '-an'], 'freezedetect'),
       run(['-i', videoPath, '-vn', '-af', `silencedetect=n=${thresholds.silenceNoiseDb}dB:d=${thresholds.silenceMinSeconds}`], 'silencedetect'),
       run(['-i', videoPath, '-vn', '-af', 'volumedetect'], 'volumedetect'),
+      // 响度（EBU R128）：平台按响度归一化播放，-21 LUFS 的母版听感就是「声音小」。
+      run(['-i', videoPath, '-af', 'ebur128=peak=true'], 'ebur128'),
     ])
     const measured = {
       blackSpans: blackLog === null ? [] : parseBlackDetect(blackLog),
       freezeSpans: freezeLog === null ? [] : parseFreezeDetect(freezeLog, durationSeconds),
       silenceSpans: silenceLog === null ? [] : parseSilenceDetect(silenceLog, durationSeconds),
       volume: volumeLog === null ? {} : parseVolumeDetect(volumeLog),
+      loudness: loudnessLog === null ? {} : parseEbur128(loudnessLog),
       durationSeconds: durationSeconds || null,
     }
     const judged = judgeLocalQc({ ...measured, thresholds })
@@ -4644,6 +4648,7 @@ async #mimoReferenceDataUrl(root, input) {
       freezeLog === null ? '冻结' : null,
       silenceLog === null ? '静音' : null,
       volumeLog === null ? '峰值' : null,
+      loudnessLog === null ? '响度' : null,
     ].filter(Boolean)
     if (unmeasured.length) judged.warnings.push(`全片解码检测未完成：${unmeasured.join('、')}（该项未参与判定）。`)
     return judged

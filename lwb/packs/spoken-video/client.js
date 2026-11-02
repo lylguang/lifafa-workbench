@@ -814,7 +814,15 @@ window.__ModuleLoader__.load({
       body[data-ds-dark-theme] .sv-video-source-item:hover,body[data-ds-dark-theme] .sv-video-source-item[data-active="true"] { border-color:#2c8a61; background:rgba(22,134,95,.12); }
       @media (max-width:780px) { .sv-video-workbench { grid-template-columns:minmax(0,1fr); grid-template-areas:'sources' 'tasks'; } }
       .sv-audio-config { align-content:start; }
-      .sv-audio-script { min-height:136px; overflow:hidden; resize:none; color:var(--lwb-ink); background:var(--lwb-page); }
+      /*
+       * 文本内容框：内容再长也不该把整页撑长。
+       *
+       * 原来这里写的是 overflow:hidden + JS 逐字把 height 撑到 scrollHeight，
+       * 于是粘贴一篇长稿就把页面拉到几千像素，底部的音色、语速、生成按钮全被推到
+       * 屏幕外。现在框本身封顶（视口高的 46%，不超过 420px），超出部分在框内滚动。
+       * resize 保留为 vertical：用户想看更多时可以往下拉一点，只是拉不过封顶线。
+       */
+      .sv-audio-script { min-height:136px; max-height:min(420px,46vh); overflow:auto; resize:vertical; color:var(--lwb-ink); background:var(--lwb-page); }
       .sv-audio-project { display:grid; gap:5px; padding:10px 11px; border:1px solid var(--lwb-line); border-radius:8px; background:var(--lwb-page); }
       .sv-audio-project strong { overflow:hidden; color:var(--lwb-ink); font-size:var(--lwb-text-base,14px); text-overflow:ellipsis; white-space:nowrap; }
       .sv-audio-project span { color:var(--lwb-muted); font-size:var(--lwb-text-sm,13px); }
@@ -3747,6 +3755,28 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 让文本框贴着内容长高，但不许长过封顶线。
+     *
+     * 原实现是 `height = scrollHeight`，内容越多框越高，于是粘贴一篇长稿就把
+     * 整页拉到几千像素，底下的音色、语速、生成按钮全被顶到屏幕外。
+     *
+     * 现在改成：短文照样长到刚好放得下（不浪费空白），长文涨到封顶线就停，
+     * 多出来的部分在框内滚动（CSS 里 `.sv-audio-script` 的 max-height 兜底）。
+     * 封顶高度从**计算样式**读，不写死数值——CSS 改了这里自动跟着改。
+     */
+    function svFitTextAreaHeight(node) {
+      if (!node) return;
+      const computed = typeof window !== 'undefined' && window.getComputedStyle ? window.getComputedStyle(node) : null;
+      const cap = computed ? parseFloat(computed.maxHeight) : Number.NaN;
+      const ceiling = Number.isFinite(cap) && cap > 0 ? cap : Number.POSITIVE_INFINITY;
+      const floor = parseFloat(computed?.minHeight) || 0;
+      node.style.height = 'auto';
+      // scrollHeight 含内边距，min-height 也含内边距，两个基准要一致，直接取大值。
+      const wanted = Math.max(node.scrollHeight, floor);
+      node.style.height = `${Math.min(wanted, ceiling)}px`;
+    }
+
+    /**
      * 把方括号标签插进正文的光标处，并重新聚焦回文本框。
      *
      * 追加到末尾会让「[叹气]放在这段前面」变成「放在全文最前面」，语气完全不是
@@ -5777,11 +5807,8 @@ window.__ModuleLoader__.load({
       }, [packId, setError]);
       React.useEffect(() => { setTaskPage(0); }, [activeTab, taskQuery, taskFilter]);
       React.useEffect(() => { setPickerPage(0); }, [activeTab, pickerQuery]);
-      React.useEffect(() => {
-        const node = textRef.current;
-        if (!node) return;
-        node.style.height = 'auto'; node.style.height = `${Math.max(node.scrollHeight, 136)}px`;
-      }, [text]);
+      // 短稿要让框贴住内容，长稿涨到封顶线就停（见 svFitTextAreaHeight）。
+      React.useEffect(() => { svFitTextAreaHeight(textRef.current); }, [text]);
       // 渠道固定为白名单里的唯一 provider；「已连接」只看它自己的凭据。
       const providerEntries = SV_VOICE_PROVIDERS.filter((id) => service?.providers?.[id]?.configured && service.providers[id].credential?.configured);
       React.useEffect(() => {
@@ -6019,7 +6046,7 @@ window.__ModuleLoader__.load({
       const newTaskPanel = h('section', { className: 'sv-form sv-audio-config' },
         h('div', { className: 'sv-section-head' }, h('h3', null, '新建配音任务'), h('span', null, source ? '已载入稿件' : '可直接输入文稿')),
         h('div', { className: 'sv-audio-source-row' }, source ? h('div', { className: 'sv-audio-project' }, h('strong', null, source.title), h('span', null, `当前稿件 · ${charCount(text)} 字 · 可继续修改`)) : h('p', { className: 'sv-note' }, '稿件为可选项。也可以直接输入自己的口播内容。'), h('div', { className: 'sv-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => { setPickerPage(0); setPickerOpen(true); } }, source ? '更换稿件' : '选择稿件'), source ? h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSource(null) }, '改为手动输入') : null)),
-        h('label', { className: 'sv-media-field' }, h('span', null, '文本内容'), h('textarea', { ref: textRef, className: 'sv-textarea sv-audio-script', value: text, maxLength: 60000, placeholder: '输入或粘贴需要配音的口播文稿', onChange: (event) => setText(event.target.value), onInput: (event) => { event.currentTarget.style.height = 'auto'; event.currentTarget.style.height = `${Math.max(event.currentTarget.scrollHeight, 136)}px`; } })),
+        h('label', { className: 'sv-media-field' }, h('span', null, '文本内容'), h('textarea', { ref: textRef, className: 'sv-textarea sv-audio-script', value: text, maxLength: 60000, placeholder: '输入或粘贴需要配音的口播文稿', onChange: (event) => setText(event.target.value), onInput: (event) => svFitTextAreaHeight(event.currentTarget) })),
         // 标签是写进正文里的，所以这一组紧贴着文本框，并且把计数摆在旁边——
         // 上限 8 个是后端的硬校验，超了直接在这里拦住，别让用户提交完才吃 400。
         svAudioTagPicker({
