@@ -618,10 +618,10 @@ test('depth packaging runs the whole chain and records a full lifeline', async (
   assert.equal(fake.created.length, 1)
   assert.equal(fake.created[0].meta.agentPreset, 'standard')
   assert.equal(fake.created[0].meta.cwd, currentAgent.session.header.cwd, 'the identity gets the task workspace, not process.cwd()')
-  // The pack pins the AI director model explicitly instead of trusting the
-  // runtime default: glm-5.3-flash reads frames most accurately, and a single
-  // runtime default was a single point of failure today.
-  assert.deepEqual(fake.created[0].agentOptions, { provider: 'magpie', model: 'workbuddy-ai/glm-5.3-flash' })
+  // 2026-11-02 起 AI 导演跟随默认模型（agent-default-model），不再钉死某个模型名。
+  // 历史：这里曾经钉死 workbuddy-ai/glm-5.3-flash（读图最准），代价是手动跑
+  // 与定时跑用不同模型、UI 里换默认模型影响不到自动化。
+  assert.equal(fake.created[0].agentOptions, undefined, '不传 agentOptions 才会落到 DSH 的默认模型')
 })
 
 test('the AI director model honors explicit environment overrides', async (t) => {
@@ -649,7 +649,7 @@ test('an empty AI director model fails loudly instead of silently falling back',
   const { runId } = await host.runSchedule(currentAgent, { scheduleId: created.id })
   const run = await settleRun(host, currentAgent, runId)
   assert.equal(run.status, 'failed')
-  assert.match(String(run.error), /AI 导演模型未指定/u)
+  assert.match(String(run.error), /AI 导演模型被显式设为空字符串/u)
 })
 
 test('a stored voice preset rides the voiceover request and stages uploaded references', async (t) => {

@@ -327,13 +327,14 @@ test('续写 followup 不能在 session/event 回调里同步执行（DSH 有重
   assert.match(micro, /child\.followup\(/u, 'followup 必须在延后回调里调用')
 })
 
-test('视频导演用专用模型，且模型/预算必须走 agentOptions', async () => {
-  // 2026-10-25 失败日志分析：33 次工具调用里 31 次是 read/glob，零次 write，
-  // src/CreativeVideo.tsx 只落下 1KB。路由到的 step-5-preview 在这类长任务上
-  // 收敛不了，所以视频导演单独指定 deepseek-v4.1-flash（同条件实测 13.1s 写出
-  // 12615 字符的完整 Remotion 组件）。
+test('视频导演跟随默认模型，且模型/预算必须走 agentOptions', async () => {
+  // 2026-10-25 曾经钉死 deepseek-v4.1-flash：那次 33 次工具调用里 31 次是
+  // read/glob、零次 write，src/CreativeVideo.tsx 只落下 1KB，路由到的
+  // step-5-preview 在这类长任务上收敛不了。
+  // 2026-11-02 改成跟随默认模型（钉死会让 UI 选模型失效，也屏蔽额度兜底重试），
+  // 所以这里不再断言某个具体模型名，而是断言「取值来自 creatorModel()」。
   const source = await readFile(new URL('../index.mjs', import.meta.url), 'utf8')
-  assert.match(source, /model: 'workbuddy-ai\/deepseek-v4\.1-flash'/u, '视频导演必须指定专用模型')
+  assert.match(source, /model: creatorModel\(\)/u, '视频导演的模型必须来自 creatorModel()（默认跟随默认模型）')
 
   // 关键结构约束：SubagentStartRequest 没有顶层 model / maxTokens，写错了不报错，
   // 只会被静默忽略（等于修复完全没生效）。必须放进 agentOptions。
@@ -360,12 +361,16 @@ test('视频导演用专用模型，且模型/预算必须走 agentOptions', asy
  *   3. 丢掉原文会连带误分类：额度耗尽被报成 code.defect（内部缺陷），
  *      而正确的分类是 credential.model_quota（模型额度耗尽）。
  */
-test('审片 Agent 显式指定模型，不再继承可能额度耗尽的默认路由', async () => {
+test('审片 Agent 跟随默认模型，模型经 reviewerModel() 透传给结构化执行器', async () => {
+  // 2026-10-26 这里曾经钉死 deepseek-v4.1-flash：默认路由组 group/smart-split
+  // 额度包耗尽（HTTP 429 Credits exhausted），审片整条链路失败。
+  // 2026-11-02 改成跟随默认模型——额度耗尽现在有专门的一次性兜底换模型，而那条
+  // 兜底只在没有显式指定模型时才生效，钉死反而把它屏蔽了。
   const source = await readFile(new URL('../index.mjs', import.meta.url), 'utf8')
   const reviewer = source.slice(source.indexOf('videoReviewer:'), source.indexOf('publishConnectionSettings'))
   assert.match(reviewer, /videoReviewer/u, '审片执行器必须存在')
-  assert.match(reviewer, /model: 'workbuddy-ai\/deepseek-v4\.1-flash'/u,
-    '审片必须显式指定模型——它要逐帧看图，模型必须支持图片输入')
+  assert.match(reviewer, /model: reviewerModel\(\)/u,
+    '审片的模型必须来自 reviewerModel()（默认跟随默认模型，可用环境变量覆盖）')
   // 审片用的是结构化执行器，模型必须能透传下去。
   assert.match(reviewer, /createStructuredExecutor\([^)]*,\s*\{[\s\S]*model:/u,
     '审片的模型必须通过 options 传给结构化执行器')

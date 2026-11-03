@@ -63,6 +63,26 @@ const FAILURE_LIMIT = 500
 const MAX_RESUMES = 3
 
 function fail(code, message) { throw new SpokenVideoScheduleError(code, message) }
+
+/**
+ * 定时任务里「视觉导演」用哪个模型：默认跟随 agent-default-model。
+ *
+ * 返回 null 表示不传 agentOptions，让 DSH 用默认模型建父会话。
+ *
+ * 2026-11-02 改：这里曾经钉死 workbuddy-ai/glm-5.3-flash（它读图最准，能读出
+ * 字幕条完整内容；2026-10-26 默认路由组额度耗尽时整轮自动化连带失败过）。
+ * 代价是**手动跑和定时跑用不同模型**，同一个选题出的片子风格不一致，用户在
+ * UI 里换默认模型也影响不到自动化。现在统一跟随默认，需要时用环境变量指定。
+ */
+export function scheduleAgentOptions(environment = {}) {
+  const raw = environment.LWB_SPOKEN_VIDEO_AGENT_MODEL
+  // 显式设为空字符串报错，而不是静默回落到默认——否则用户以为设了其实没生效。
+  if (raw === '') {
+    fail('SPOKEN_VIDEO_AGENT_MODEL_INVALID', 'AI 导演模型被显式设为空字符串。要跟随默认模型请删除该环境变量；要指定模型请填模型名，例如 workbuddy/deepseek-v4.1-flash。')
+  }
+  if (!raw) return null
+  return { provider: environment.LWB_SPOKEN_VIDEO_AGENT_PROVIDER || 'magpie', model: raw }
+}
 function invalid(message) { fail('SPOKEN_VIDEO_SCHEDULE_INVALID_INPUT', message) }
 function stamp() { return new Date().toISOString() }
 function elapsed(start, end) {
@@ -752,19 +772,8 @@ export class SpokenVideoScheduleHost {
     if (!agentDefaultModel || typeof agentDefaultModel.currentSelection !== 'function') {
       fail('SPOKEN_VIDEO_SCHEDULE_UNAVAILABLE', '当前运行环境不提供默认模型服务，无法执行自动化任务。')
     }
-    // 视觉导演（以及所有 pack 子 agent）需要真能读图做帧自检，所以 pack 在这里
-    // 显式指定模型，不再依赖运行时的默认选择（agentDefaultModel.currentSelection()）。
-    // 实测 workbuddy-ai/glm-5.3-flash 读图最准（能读出字幕条完整内容）；今天 minimax
-    // 的 provider 间歇性故障让整轮端到端失败，证明单一运行时默认是单点，故默认用
-    // glm-5.3-flash。环境变量可覆盖；但若 LWB_SPOKEN_VIDEO_AGENT_MODEL 被显式设为
-    // 空字符串，则报错而不是静默回落到默认——否则用户以为设了其实没生效。
-    const rawAgentModel = this.environment.LWB_SPOKEN_VIDEO_AGENT_MODEL
-    if (rawAgentModel === '') {
-      fail('SPOKEN_VIDEO_AGENT_MODEL_INVALID', 'AI 导演模型未指定（LWB_SPOKEN_VIDEO_AGENT_MODEL 为空），请设置可用的模型，例如 workbuddy-ai/glm-5.3-flash。')
-    }
-    const agentModel = rawAgentModel || 'workbuddy-ai/glm-5.3-flash'
-    const agentProvider = this.environment.LWB_SPOKEN_VIDEO_AGENT_PROVIDER || 'magpie'
-    const agentOptions = { provider: agentProvider, model: agentModel }
+    // 跟随默认模型（agent-default-model），需要时用环境变量覆盖——见 scheduleAgentOptions()。
+    const agentOptions = scheduleAgentOptions(this.environment)
     const preset = await agentPresets.resolve(this.presetId)
     const setup = async (agentCtx) => { await agentPresets.mount(agentCtx, preset.id) }
     // One identity per task, reused across rounds, so the sidebar gains a
@@ -772,9 +781,9 @@ export class SpokenVideoScheduleHost {
     const sessionId = `sv-auto-${schedule.id}`
     let handle
     try {
-      handle = await agents.resume({ resumeSessionId: sessionId, agentOptions, setup, signal })
+      handle = await agents.resume({ resumeSessionId: sessionId, ...(agentOptions ? { agentOptions } : {}), setup, signal })
     } catch {
-      handle = await agents.create({ sessionId, meta: { cwd: workspace, agentPreset: preset.id }, agentOptions, setup, signal })
+      handle = await agents.create({ sessionId, meta: { cwd: workspace, agentPreset: preset.id }, ...(agentOptions ? { agentOptions } : {}), setup, signal })
     }
     try {
       this.#service('sessionTitle')?.rename(handle.agent.session, `自动化 · ${schedule.name}`)

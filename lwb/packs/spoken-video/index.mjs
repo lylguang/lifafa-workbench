@@ -98,6 +98,30 @@ export function reviewerTimeBudget(env = process.env) {
 }
 
 /**
+ * 视频导演 / 审片用哪个模型：默认跟随 agent-default-model（UI 里选的默认模型）。
+ *
+ * 2026-11-02 改：这两个环节原来各自钉死 workbuddy-ai/deepseek-v4.1-flash。
+ * 钉死是当时为了绕开两个具体故障：
+ *   · 2026-10-25 默认路由组会路由到 step-5-preview，在「一次写出 84KB
+ *     CreativeVideo.tsx」这类长任务上收敛不了（33 次工具调用 31 次 read/glob，
+ *     13.5 分钟只落下 1KB 骨架）；
+ *   · 2026-10-26 默认路由组 group/smart-split 的额度包耗尽，审片报
+ *     HTTP 429 Credits exhausted。
+ * 但钉死有两个副作用：① 用户在 UI 里换默认模型时，这两个环节不跟着变；
+ * ② 下面的额度兜底重试只在**没有显式指定模型**时才生效，钉死后它反而
+ * 对这两个环节彻底失效了。所以现在改回跟随默认，需要时再显式覆盖。
+ *
+ * 需要临时指定时用环境变量，不设就返回 null（= 跟随默认路由）。
+ */
+export function creatorModel(env = process.env) {
+  return String(env.LWB_SPOKEN_VIDEO_CREATOR_MODEL || '').trim() || null
+}
+
+export function reviewerModel(env = process.env) {
+  return String(env.LWB_SPOKEN_VIDEO_REVIEWER_MODEL || '').trim() || null
+}
+
+/**
  * 从子会话快照里捞出「为什么 stopReason 不是 completed」的可用线索。
  *
  * 为什么需要：2026-10-25 实测，模型网关额度耗尽时它直接回 429
@@ -176,7 +200,13 @@ function isModelQuotaExhausted(text) {
 //   2. 在实测里持续 200——hy3 与 deepseek-v4.1-flash 在默认路由组额度耗尽后
 //      仍可用（2026-10-26 实测）；
 //   3. 输出预算够写稿——它本身就是 128k 输出的模型。
-const QUOTA_FALLBACK_MODEL = 'workbuddy-ai/deepseek-v4.1-flash'
+//
+// 它是一层应急兜底，不是任何环节的默认模型（默认一律跟随 agent-default-model）。
+// 可用 LWB_SPOKEN_VIDEO_QUOTA_FALLBACK_MODEL 覆盖：网关的模型清单会变，写死的名字
+// 迟早会失效，那时不需要改代码就能换一个。
+function quotaFallbackModel(env = process.env) {
+  return String(env.LWB_SPOKEN_VIDEO_QUOTA_FALLBACK_MODEL || '').trim() || 'workbuddy-ai/deepseek-v4.1-flash'
+}
 
 function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinuations = 0, continuationPrompt, maxTokens = 128_000, model = null, modelProvider = null, timeBudget = null, budgetLabel = null, budgetEnvHint = null } = {}) {
   // 网关 provider 名。所有可用模型都由 magpie 网关提供（settings.yaml 的
@@ -403,12 +433,13 @@ function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinua
         // 修好之后能读到上游原文，才谈得上自动换模型。
         //
         // 只给一次机会，且仅在**没有显式指定模型**时换——显式指定意味着用户/
-        // 上层对这个环节的模型有明确要求，不能悄悄替换。审片与视频导演都显式
-        // 指定了模型（它们各自的形态都绑定过具体模型），所以它们本来就不会
-        // 走到这条分支；走这条分支的是选题/写稿/账号这类跟随默认路由的执行器。
+        // 上层对这个环节的模型有明确要求，不能悄悄替换。
+        // 2026-11-02 起视频导演与审片也跟随默认模型（见 creatorModel /
+        // reviewerModel 的说明），因此它们现在同样能吃到这层兜底；只有通过
+        // 环境变量显式钉死模型的环节才会跳过它。
         if (!route.quotaRetried && !effectiveModel && isModelQuotaExhausted(detail)) {
           route.quotaRetried = true
-          const fallback = QUOTA_FALLBACK_MODEL
+          const fallback = quotaFallbackModel()
           await onDshEvent?.({
             type: 'quota/fallback',
             data: { reason: { kind: 'quota-fallback', message: `当前模型额度已耗尽，改用 ${fallback} 重试一次` } },
@@ -532,45 +563,33 @@ export async function apply(ctx, config = {}) {
       // 允许分几次写完，2 次续写对它的体量明显不够。上限仍是有限的 4 次。
       maxTokenContinuations: 4,
       continuationPrompt: buildVideoCreatorContinuationPrompt,
-      // 视频导演**单独指定模型**，不跟随默认的 group/smart-split。
+      // 跟随默认模型（agent-default-model），需要时用 LWB_SPOKEN_VIDEO_CREATOR_MODEL 覆盖。
       //
-      // 2026-10-25 失败日志分析：那次 33 次工具调用里 31 次是 read/glob，
-      // 一次 write 都没有——13.5 分钟全在读 skill 文档，src 只落下 1KB 骨架，
-      // 最后一条 assistant 消息文本 0、工具 0（被截断）。说明真正的问题不是
-      // 额度不够，而是路由到的 step-5-preview 在这类长任务上收敛不了。
-      //
-      // 选 deepseek-v4.1-flash 的依据是同条件实测（写一个含 5 场景、带
-      // useCurrentFrame/interpolate 的完整 Remotion 组件）：
+      // 这里曾经钉死 deepseek-v4.1-flash，依据是 2026-10-25 的同条件实测
+      // （写一个含 5 场景、带 useCurrentFrame/interpolate 的完整 Remotion 组件）：
       //   deepseek-v4.1-flash  13.1s / 12615 字符 / finish=stop  ✅
       //   zcode/GLM-5.3        20.4s /  6947 字符 / finish=stop
       //   workbuddy-ai/hy3     12.3s /     0 字符               ✗
-      //   workbuddy-ai/gpt-6-luna             429 额度耗尽        ✗
-      // 用它还有一个好处：它本身就是 128k 输出的模型，不再被 step-5-preview
-      // 的 64k 上限卡住。
-      model: 'workbuddy-ai/deepseek-v4.1-flash',
+      // 那次失败的形态是：33 次工具调用里 31 次 read/glob、一次 write 都没有，
+      // 13.5 分钟全在读 skill 文档，src 只落下 1KB 骨架——路由到的 step-5-preview
+      // 在这类长任务上收敛不了。2026-11-02 改成跟随默认模型，理由见
+      // creatorModel() 的说明（钉死会让 UI 选模型失效，也会屏蔽额度兜底重试）。
+      model: creatorModel(),
     }),
     videoReviewer: config.videoReviewer || createStructuredExecutor(ctx, ctx.subagents, 'spoken-video-video-reviewer', {
-      // 审片 Agent **单独指定模型**，不跟随默认路由。
+      // 跟随默认模型（agent-default-model），需要时用 LWB_SPOKEN_VIDEO_REVIEWER_MODEL 覆盖。
       //
-      // 2026-10-26 实测根因：两条成片（鹤岗房、AI 数字人）渲染完全成功、
-      // 技术质检也过了，全都倒在审片这一步，报「子会话以 error 结束」。
-      // 挖到子会话后发现 LLM token 用量全是 0——模型压根没被调用成功。
-      // 直接打网关复现，得到上游原话：
-      //   HTTP 429 「WorkBuddy AI: Credits exhausted」
-      // 也就是说**默认模型 group/smart-split 的额度包已经用完**。同一个网关
-      // 下 hy3 / deepseek-v4.1-flash 仍然 200，所以这不是网关整体故障，是
-      // 默认路由组这一个模型没额度了。
+      // 这里曾经钉死 deepseek-v4.1-flash。背景：2026-10-26 两条成片渲染成功、
+      // 技术质检也过了，全倒在审片，报「子会话以 error 结束」；挖到子会话发现
+      // LLM token 用量全是 0——模型压根没被调用成功。直接打网关复现得到上游原文
+      // HTTP 429 「WorkBuddy AI: Credits exhausted」：默认路由组 group/smart-split
+      // 的额度包用完了，而同网关下 hy3 / deepseek-v4.1-flash 仍然 200。
+      // 2026-11-02 改成跟随默认：额度耗尽现在有专门的处理（isModelQuotaExhausted
+      // + 一次性兜底换模型），而那个兜底只在**没有显式指定模型**时才生效——
+      // 钉死模型恰恰把它屏蔽掉了。
       //
-      // 审片本来是继承父会话的模型（DSH 的 resolveChildAgentOptions 会把
-      // parent 的 provider/model 原样传给子会话），而父会话用的是默认路由
-      // 组 —— 于是审片跟着一起挂。审片是纯视觉判断任务、输出很小，用不着
-      // 路由组那套「难题给强模型」的能力，所以这里钉死到一个确定还有额度、
-      // 且支持图片输入（审片要逐帧看图）的模型。
-      //
-      // 注意 model 必须写成 provider 限定的全名，且和上面 creator 用同一个
-      // 模型：它在 2026-10-25 的实测里已经证明能稳定跑完审片形态，且
-      // 2026-10-26 这次实测它依然 200。
-      model: 'workbuddy-ai/deepseek-v4.1-flash',
+      // 审片要逐帧看图，所以默认模型必须支持图片输入；换默认模型时请确认这点。
+      model: reviewerModel(),
       // 审片的时间预算。原先结构化任务一律不设限（`structured ? 0`），
       // 导致审片跑成长尾：实测 10/36 个会话 >50 步（最长 221 步），
       // 吃掉 84% 的 token；一轮任务里首审 56 分钟 + 复审 82 分钟，
