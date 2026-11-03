@@ -51,3 +51,6 @@ test-run*.log
 *.log
 *.partial.*
 review-frames/
+
+# 交付包构建产物（体积大，不入库）
+dist/

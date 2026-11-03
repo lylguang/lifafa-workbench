@@ -102,15 +102,38 @@ function corepackEntry() {
   return { command: 'corepack', prefix: [] }
 }
 
-function runPnpm(args, cwd, label) {
+function runPnpm(args, cwd, label, env = process.env) {
   const { command, prefix } = corepackEntry()
-  run(command, [...prefix, 'pnpm', ...args], cwd, label)
+  run(command, [...prefix, 'pnpm', ...args], cwd, label, env)
 }
 
-function run(command, commandArgs, cwd, label) {
+/**
+ * 给上游构建用的 PATH：临时造一个 pnpm 垫片。
+ *
+ * 上游的 `pnpm run build` 内部会再 spawn `pnpm`（scripts/build.ts → build:lib →
+ * `pnpm run build:lib:host`），而子进程只认 PATH，看不到我们用 corepack.js
+ * 直接调起来的那个 pnpm。2026-11-03 实测报：
+ *   'pnpm' 不是内部或外部命令（build:lib exited with 1）
+ * 开启 corepack 全局垫片（corepack enable）要写 Node 安装目录（Program Files），
+ * 需要管理员权限且会改开发机环境；在临时目录里造一个垫片加进 PATH 更干净。
+ */
+function pnpmShimEnv() {
+  const shimDir = join(dirname(process.execPath), '..', '.lwb-build-bin')
+  const corepack = corepackEntry()
+  const corepackPath = corepack.prefix[0]
+  if (!corepackPath) return process.env
+  mkdirSync(shimDir, { recursive: true })
+  // .cmd 给 cmd.exe（上游用 shell 调脚本时走它），无扩展名的 sh 给 Git Bash。
+  writeFileSync(join(shimDir, 'pnpm.cmd'), `@echo off\r\n"${process.execPath}" "${corepackPath}" pnpm %*\r\n`, 'utf8')
+  writeFileSync(join(shimDir, 'pnpm'), `#!/bin/sh\nexec "${process.execPath.replace(/\\/g, '/')}" "${corepackPath.replace(/\\/g, '/')}" pnpm "$@"\n`, 'utf8')
+  const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH'
+  return { ...process.env, [pathKey]: `${shimDir};${process.env[pathKey] ?? ''}` }
+}
+
+function run(command, commandArgs, cwd, label, env = process.env) {
   const started = Date.now()
   process.stdout.write(`[..] ${label}\n`)
-  const result = spawnSync(command, commandArgs, { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: false })
+  const result = spawnSync(command, commandArgs, { cwd, stdio: ['ignore', 'pipe', 'pipe'], shell: false, env })
   const seconds = ((Date.now() - started) / 1000).toFixed(1)
   if (result.status !== 0) {
     const detail = `${result.stderr?.toString().slice(-2000) ?? ''}\n${result.stdout?.toString().slice(-2000) ?? ''}`
@@ -199,7 +222,7 @@ async function main() {
   writeFileSync(join(vendorDir, '.npmrc'), npmrc(NPM_REGISTRY), 'utf8')
   runNpm(['ci', '--no-audit', '--no-fund'], pkgDir, '安装工作台依赖')
   runPnpm(['install', '--frozen-lockfile'], vendorDir, '安装上游依赖')
-  runPnpm(['run', 'build'], vendorDir, '构建上游')
+  runPnpm(['run', 'build'], vendorDir, '构建上游', pnpmShimEnv())
 
   // 4) 包运行期符号链接。必须在依赖装好之后——链接目标在 vendor 里。
   run('node', ['lwb/link-packs.mjs'], pkgDir, '建立能力包运行期链接')
