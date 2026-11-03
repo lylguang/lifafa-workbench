@@ -17,6 +17,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, cpSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { zipDirectory } from './zip-utf8.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const VENDOR_NAME = 'deepseek-harness'
@@ -341,43 +342,33 @@ async function main() {
 async function compress(outDir, edition) {
   const zipPath = join(dirname(outDir), `李发发工作台-v1.0-${edition === 'local' ? '本地增强版' : '标准版'}.zip`)
   rmSync(zipPath, { force: true })
-  const script = [
-    'import os, stat, sys, zipfile',
-    'REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)',
-    'def is_link(path):',
-    '    # symlink 与 junction 都要跳过：前者跟着走会撞 .pnpm 的环，后者会被',
-    '    # 解压成实体目录副本。两者的重建方式见调用处注释。',
-    '    if os.path.islink(path):',
-    '        return True',
-    '    try:',
-    '        return bool(os.lstat(path).st_file_attributes & REPARSE)',
-    '    except OSError:',
-    '        return False',
-    'src, dst = sys.argv[1], sys.argv[2]',
-    'skipped = 0',
-    'with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:',
-    '    for root, dirs, files in os.walk(src, followlinks=False):',
-    '        kept = []',
-    '        for d in sorted(dirs):',
-    '            if is_link(os.path.join(root, d)):',
-    '                skipped += 1',
-    '            else:',
-    '                kept.append(d)',
-    '        dirs[:] = kept',
-    '        for name in sorted(files):',
-    '            full = os.path.join(root, name)',
-    '            if is_link(full):',
-    '                skipped += 1',
-    '                continue',
-    '            try:',
-    '                z.write(full, os.path.relpath(full, src))',
-    '            except OSError:',
-    '                skipped += 1',
-    'print("skipped %d links (rebuilt on first run)" % skipped)',
-  ].join('\n')
-  run('python', ['-c', script, outDir, zipPath], dirname(outDir), '压缩')
+  // 用 scripts/zip-utf8.mjs 而不是 Python 的 zipfile。
+  //
+  // 两者都能给非 ASCII 条目名置 UTF-8 标志位（0x800），区别是**依赖**：Python 不是
+  // 本项目的依赖，构建机上没有它就打不了包——一个隐藏的构建前置条件。2026-11-03
+  // 实测这台机器上 python / py / python3 全都没有，于是改成本地实现。
+  //
+  // 链接策略（两种都必须处理，缺一个客户机就起不来）：
+  //
+  // - **junction**（`islink()` 返回 False，但带 FILE_ATTRIBUTE_REPARSE_POINT）：
+  //   各能力包 `node_modules/@deepseek-ai/*` 指向 vendor。zip 存不了 junction，
+  //   解压会展开成完整实体目录副本——凭空多一份 vendor 代码，还把打包机的绝对
+  //   路径写死在客户机上。跳过，客户机上由 `npm run pack:link` 重建。
+  //
+  // - **pnpm 的 workspace symlink**（`islink()` 返回 True）：vendor 内部各包
+  //   node_modules 下指向兄弟包的链接，是 vendor 能构建的前提。zip 也存不了
+  //   symlink，跟着走会撞上 .pnpm 的环（实测递归 20 分钟不收敛）。
+  //   所以也跳过，但**在客户机上重跑一次 `pnpm install` 重建**——pnpm 用
+  //   lockfile 重建整个依赖图，十几秒，比在压缩期处理链接可靠得多。
+  //
+  // 于是 zip 里不含任何链接。交付包首次启动时 `启动工作台.cmd` 之前需要跑一次
+  // `pnpm install`，这一步已写进 安装说明.md 与 自检.ps1 的检查项。
+  process.stdout.write('[--] 压缩成zip\n')
+  const result = await zipDirectory(outDir, zipPath)
+  process.stdout.write(`[ok] 压缩完成（${result.files} 个文件，${(result.bytes / 1048576).toFixed(0)} MB）\n`)
   return zipPath
 }
+
 main().catch((error) => {
   process.stderr.write(`\n[ERR] ${error.message}\n`)
   process.exit(1)
