@@ -13,6 +13,7 @@
  *
  * 幂等：已经就绪时什么都不做，可以反复运行。
  */
+import { corepackEntry, pnpmShimEnv } from './pnpm-shim.mjs'
 import { spawnSync } from 'node:child_process'
 import { existsSync, lstatSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -21,17 +22,7 @@ import { fileURLToPath } from 'node:url'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const VENDOR = join(ROOT, 'vendor', 'deepseek-harness')
 
-function corepackEntry() {
-  const nodeDir = dirname(process.execPath)
-  const candidates = [
-    join(nodeDir, 'node_modules', 'corepack', 'dist', 'corepack.js'),
-    join(nodeDir, '..', 'lib', 'node_modules', 'corepack', 'dist', 'corepack.js'),
-  ]
-  const found = candidates.find((candidate) => existsSync(candidate))
-  return found ? { command: process.execPath, prefix: [found] } : { command: 'corepack', prefix: [] }
-}
-
-function run(command, args, cwd, label) {
+function run(command, args, cwd, label, env = process.env) {
   const started = Date.now()
   process.stdout.write(`[..] ${label}\n`)
   // CI=true 让 pnpm 敢在无 TTY 下清空 node_modules：交付包里那份被 zip 拆散过
@@ -41,7 +32,9 @@ function run(command, args, cwd, label) {
     cwd,
     stdio: 'inherit',
     shell: false,
-    env: { ...process.env, CI: 'true' },
+    // CI=true 让 pnpm 敢在无 TTY 下清空 node_modules；调用方传的 env 用来注入
+    // pnpm 垫片（构建上游时必需，见 pnpm-shim.mjs 的说明）。
+    env: { ...(env ?? process.env), CI: 'true' },
   })
   if (result.status !== 0) {
     process.stderr.write(`\n[ERR] ${label} 失败。请检查网络（国内应走交付包内置的 .npmrc 镜像）。\n`)
@@ -77,7 +70,9 @@ function main() {
   } else {
     const { command, prefix } = corepackEntry()
     run(command, [...prefix, 'pnpm', 'install', '--frozen-lockfile'], VENDOR, '重建上游依赖链接')
-    run(command, [...prefix, 'pnpm', 'run', 'build'], VENDOR, '构建上游')
+    // 构建上游必须把 pnpm 垫片放进 PATH：上游的 `pnpm run build` 内部还会再
+    // spawn pnpm，而交付包里不带 pnpm——2026-11-03 实测客户机首次运行必炸。
+    run(command, [...prefix, 'pnpm', 'run', 'build'], VENDOR, '构建上游', pnpmShimEnv())
   }
 
   run(process.execPath, [join(ROOT, 'lwb', 'link-packs.mjs')], ROOT, '建立能力包运行期链接')

@@ -21,6 +21,10 @@ import { join, relative, sep } from 'node:path'
 const SIG_LOCAL = 0x04034b50
 const SIG_CENTRAL = 0x02014b50
 const SIG_EOCD = 0x06054b50
+const SIG_EOCD64 = 0x06064b50
+const SIG_EOCD64_LOCATOR = 0x07064b50
+const U16_MAX = 0xFFFF
+const U32_MAX = 0xFFFFFFFF
 const FLAG_UTF8 = 0x0800
 const METHOD_STORE = 0
 const METHOD_DEFLATE = 8
@@ -102,7 +106,7 @@ export async function zipDirectory(srcDir, zipPath, { exclude = () => false, com
 
       const local = Buffer.alloc(30)
       local.writeUInt32LE(SIG_LOCAL, 0)
-      local.writeUInt16LE(20, 4)              // version needed
+      local.writeUInt16LE(45, 4)              // version needed（45 = 具备 ZIP64 能力）
       local.writeUInt16LE(FLAG_UTF8, 6)       // ← 中文文件名不乱码的关键
       local.writeUInt16LE(method, 8)
       local.writeUInt16LE(time, 10)
@@ -122,37 +126,78 @@ export async function zipDirectory(srcDir, zipPath, { exclude = () => false, com
 
     const centralStart = offset
     for (const entry of central) {
+      // ZIP64 扩展字段：只有单个文件的大小/偏移超出 32 位时才需要。交付包总大小
+      // 在 3GB 量级、没有超过 4GB 的单文件，所以通常为空；但结构必须写对，
+      // 否则严格的解压端会拒绝。
+      const needsZip64 = entry.compressed > U32_MAX || entry.uncompressed > U32_MAX || entry.offset > U32_MAX
+      let extra = Buffer.alloc(0)
+      if (needsZip64) {
+        extra = Buffer.alloc(20)
+        extra.writeUInt16LE(0x0001, 0)        // ZIP64 extended information
+        extra.writeUInt16LE(16, 2)
+        extra.writeBigUInt64LE(BigInt(entry.uncompressed), 4)
+        extra.writeBigUInt64LE(BigInt(entry.compressed), 12)
+      }
       const header = Buffer.alloc(46)
       header.writeUInt32LE(SIG_CENTRAL, 0)
-      header.writeUInt16LE(20, 4)             // version made by
-      header.writeUInt16LE(20, 6)             // version needed
+      header.writeUInt16LE(45, 4)             // version made by
+      header.writeUInt16LE(45, 6)             // version needed
       header.writeUInt16LE(FLAG_UTF8, 8)
       header.writeUInt16LE(entry.method, 10)
       header.writeUInt16LE(entry.time, 12)
       header.writeUInt16LE(entry.date, 14)
       header.writeUInt32LE(entry.crc, 16)
-      header.writeUInt32LE(entry.compressed, 20)
-      header.writeUInt32LE(entry.uncompressed, 24)
+      header.writeUInt32LE(needsZip64 ? U32_MAX : entry.compressed, 20)
+      header.writeUInt32LE(needsZip64 ? U32_MAX : entry.uncompressed, 24)
       header.writeUInt16LE(entry.nameBytes.length, 28)
-      header.writeUInt16LE(0, 30)
+      header.writeUInt16LE(extra.length, 30)
       header.writeUInt16LE(0, 32)
       header.writeUInt16LE(0, 34)
       header.writeUInt16LE(0, 36)
       header.writeUInt32LE(0x20, 38)          // 普通文件属性
-      header.writeUInt32LE(entry.offset, 42)
+      header.writeUInt32LE(needsZip64 ? U32_MAX : entry.offset, 42)
       await handle.write(header, 0, 46, offset)
       await handle.write(entry.nameBytes, 0, entry.nameBytes.length, offset + 46)
-      offset += 46 + entry.nameBytes.length
+      if (extra.length) await handle.write(extra, 0, extra.length, offset + 46 + entry.nameBytes.length)
+      offset += 46 + entry.nameBytes.length + extra.length
+    }
+
+    // 条目数超过 65535 时必须写 ZIP64 EOCD：交付包的 node_modules 实测 10 万+
+    // 个文件，不写会直接报 "value out of range: 103370"（2026-11-03 实测）。
+    let zip64Tail = 0
+    if (central.length > U16_MAX || centralStart > U32_MAX) {
+      const eocd64Offset = offset
+      const eocd64 = Buffer.alloc(56)
+      eocd64.writeUInt32LE(SIG_EOCD64, 0)
+      eocd64.writeBigUInt64LE(44n, 4)                    // 本记录除前 12 字节外的长度
+      eocd64.writeUInt16LE(45, 12)
+      eocd64.writeUInt16LE(45, 14)
+      eocd64.writeUInt32LE(0, 16)                        // 本盘号
+      eocd64.writeUInt32LE(0, 20)                        // 中央目录所在盘
+      eocd64.writeBigUInt64LE(BigInt(central.length), 24)
+      eocd64.writeBigUInt64LE(BigInt(central.length), 32)
+      eocd64.writeBigUInt64LE(BigInt(offset - centralStart), 40)
+      eocd64.writeBigUInt64LE(BigInt(centralStart), 48)
+      await handle.write(eocd64, 0, 56, offset)
+      offset += 56
+      const locator = Buffer.alloc(20)
+      locator.writeUInt32LE(SIG_EOCD64_LOCATOR, 0)
+      locator.writeUInt32LE(0, 4)
+      locator.writeBigUInt64LE(BigInt(eocd64Offset), 8)
+      locator.writeUInt32LE(1, 16)
+      await handle.write(locator, 0, 20, offset)
+      offset += 20
+      zip64Tail = 76
     }
 
     const eocd = Buffer.alloc(22)
     eocd.writeUInt32LE(SIG_EOCD, 0)
     eocd.writeUInt16LE(0, 4)
     eocd.writeUInt16LE(0, 6)
-    eocd.writeUInt16LE(central.length, 8)
-    eocd.writeUInt16LE(central.length, 10)
-    eocd.writeUInt32LE(offset - centralStart, 12)
-    eocd.writeUInt32LE(centralStart, 16)
+    eocd.writeUInt16LE(Math.min(central.length, U16_MAX), 8)
+    eocd.writeUInt16LE(Math.min(central.length, U16_MAX), 10)
+    eocd.writeUInt32LE(centralStart > U32_MAX ? U32_MAX : offset - centralStart - zip64Tail, 12)
+    eocd.writeUInt32LE(centralStart > U32_MAX ? U32_MAX : centralStart, 16)
     eocd.writeUInt16LE(0, 20)
     await handle.write(eocd, 0, 22, offset)
     offset += 22

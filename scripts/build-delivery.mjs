@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, cpSync } fr
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { zipDirectory } from './zip-utf8.mjs'
+import { corepackEntry, pnpmShimEnv } from './pnpm-shim.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const VENDOR_NAME = 'deepseek-harness'
@@ -88,46 +89,9 @@ function runNpm(args, cwd, label) {
   run(process.execPath, [npmEntry(), ...args], cwd, label)
 }
 
-/**
- * corepack 的 JS 入口，与 npm 同理：直接 spawn `corepack.cmd` 在 Windows 上拿不到退出码。
- * 找不到时回退到普通 spawn，让脚本自己报错。
- */
-function corepackEntry() {
-  const candidates = [
-    join(dirname(process.execPath), 'node_modules', 'corepack', 'dist', 'corepack.js'),
-    join(dirname(process.execPath), '..', 'lib', 'node_modules', 'corepack', 'dist', 'corepack.js'),
-  ]
-  const found = candidates.find((candidate) => existsSync(candidate))
-  if (found) return { command: process.execPath, prefix: [found] }
-  return { command: 'corepack', prefix: [] }
-}
-
 function runPnpm(args, cwd, label, env = process.env) {
   const { command, prefix } = corepackEntry()
   run(command, [...prefix, 'pnpm', ...args], cwd, label, env)
-}
-
-/**
- * 给上游构建用的 PATH：临时造一个 pnpm 垫片。
- *
- * 上游的 `pnpm run build` 内部会再 spawn `pnpm`（scripts/build.ts → build:lib →
- * `pnpm run build:lib:host`），而子进程只认 PATH，看不到我们用 corepack.js
- * 直接调起来的那个 pnpm。2026-11-03 实测报：
- *   'pnpm' 不是内部或外部命令（build:lib exited with 1）
- * 开启 corepack 全局垫片（corepack enable）要写 Node 安装目录（Program Files），
- * 需要管理员权限且会改开发机环境；在临时目录里造一个垫片加进 PATH 更干净。
- */
-function pnpmShimEnv() {
-  const shimDir = join(dirname(process.execPath), '..', '.lwb-build-bin')
-  const corepack = corepackEntry()
-  const corepackPath = corepack.prefix[0]
-  if (!corepackPath) return process.env
-  mkdirSync(shimDir, { recursive: true })
-  // .cmd 给 cmd.exe（上游用 shell 调脚本时走它），无扩展名的 sh 给 Git Bash。
-  writeFileSync(join(shimDir, 'pnpm.cmd'), `@echo off\r\n"${process.execPath}" "${corepackPath}" pnpm %*\r\n`, 'utf8')
-  writeFileSync(join(shimDir, 'pnpm'), `#!/bin/sh\nexec "${process.execPath.replace(/\\/g, '/')}" "${corepackPath.replace(/\\/g, '/')}" pnpm "$@"\n`, 'utf8')
-  const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH'
-  return { ...process.env, [pathKey]: `${shimDir};${process.env[pathKey] ?? ''}` }
 }
 
 function run(command, commandArgs, cwd, label, env = process.env) {

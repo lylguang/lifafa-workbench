@@ -117,3 +117,17 @@ test('打包：已压缩的二进制不会被无谓地再压一遍', async (t) =
   assert.deepEqual(readEntry(buf, entries[0]), noise, 'store 的内容也必须原样还原')
   assert.ok((await stat(zipPath)).size > noise.length, 'zip 至少要有头部开销')
 })
+
+test('pnpm 垫片写进临时目录，PATH 首段可用（不能写 Node 安装目录）', async (t) => {
+  // 2026-11-03 实测：垫片原本写在 dirname(node.exe)/.. —— 开发机上那是
+  // C:\Program Files，非管理员直接写失败；客户机上才是包内目录。改到系统临时目录。
+  const { pnpmShimEnv } = await import('../../../scripts/pnpm-shim.mjs')
+  const env = pnpmShimEnv({ PATH: 'C:\original' })
+  const [first] = env.PATH.split(';')
+  assert.ok(first.startsWith(tmpdir()), `垫片目录必须在临时目录内，实际 ${first}`)
+  assert.ok(!/Program Files/i.test(first), '不得写 Node 安装目录')
+  const { existsSync } = await import('node:fs')
+  assert.ok(existsSync(join(first, 'pnpm.cmd')), 'cmd.exe 用的垫片必须存在')
+  assert.ok(existsSync(join(first, 'pnpm')), 'Git Bash 用的垫片必须存在')
+  assert.ok(env.PATH.endsWith('C:\original'), '原有 PATH 必须保留在后面')
+})
