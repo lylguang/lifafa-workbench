@@ -44,9 +44,25 @@ export function pnpmShimEnv(env = process.env) {
   if (!corepackPath) return env
   const shimDir = join(tmpdir(), 'lwb-build-bin')
   mkdirSync(shimDir, { recursive: true })
-  // .cmd 给 cmd.exe（上游用 shell 调脚本时走它），无扩展名的 sh 给 Git Bash。
-  writeFileSync(join(shimDir, 'pnpm.cmd'), `@echo off\r\n"${process.execPath}" "${corepackPath}" pnpm %*\r\n`, 'utf8')
-  writeFileSync(join(shimDir, 'pnpm'), `#!/bin/sh\nexec "${process.execPath.replace(/\\/g, '/')}" "${corepackPath.replace(/\\/g, '/')}" pnpm "$@"\n`, 'utf8')
+  // 垫片内容必须是**纯 ASCII**。
+  //
+  // 2026-11-03 实测：一开始把 node.exe 的绝对路径直接写进 pnpm.cmd，而交付包里那
+  // 个路径是 `<包>\运行环境\node\node.exe`。cmd.exe 按系统 ANSI 编码（中文系统是
+  // GBK）读 .cmd 文本，而我们写的是 UTF-8，于是路径被读成一堆乱码，报
+  // 「系统找不到指定的路径」——比直接说“找不到 pnpm”更难查。
+  // 所以 .cmd 里只出现 `node "%~dp0pnpm.js"`（全 ASCII），真正的路径交给
+  // pnpm.js（Node 读 UTF-8，不会乱码）。node 本身由调用方放进 PATH。
+  writeFileSync(join(shimDir, 'pnpm.cmd'), '@echo off\r\nnode "%~dp0pnpm.js" %*\r\n', 'utf8')
+  writeFileSync(join(shimDir, 'pnpm.js'), [
+    '// 由 pnpm.cmd 调用：转交 corepack 执行 pnpm。路径写在 JS 里避免 cmd 的编码问题。',
+    `const CORE = ${JSON.stringify(corepackPath)}`,
+    "const { spawnSync } = require('node:child_process')",
+    'const result = spawnSync(process.execPath, [CORE, \'pnpm\', ...process.argv.slice(2)], { stdio: \'inherit\', env: process.env })',
+    'if (result.error) { console.error(result.error.message); process.exit(1) }',
+    'process.exit(result.status ?? 1)',
+  ].join('\n'), 'utf8')
+  // Git Bash 用的同名脚本：sh 按 UTF-8 读，路径可以直接写。
+  writeFileSync(join(shimDir, 'pnpm'), `#!/bin/sh\nexec node "${join(shimDir, 'pnpm.js').replace(/\\/g, '/')}" "$@"\n`, 'utf8')
   const pathKey = Object.keys(env).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH'
   return { ...env, [pathKey]: `${shimDir};${env[pathKey] ?? ''}` }
 }
