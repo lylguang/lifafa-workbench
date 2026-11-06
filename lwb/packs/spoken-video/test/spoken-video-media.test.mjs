@@ -1633,6 +1633,62 @@ test('marks media runs interrupted by a host restart as resumable instead of dea
   assert.match(run.error, /断点续跑/u, '文案要告诉用户能续跑，而不是让人重新提交')
 })
 
+// 2026-11-06 回归：interrupted 曾经根本存不住。
+//
+// runs.json 的落盘有一道状态白名单（MEDIA_OPERATION_STATES），而 'interrupted'
+// 不在里面。于是 #recoverInterruptedRuns 把一条 running 改成 interrupted 之后，
+// writeRuns 落盘时把这条记录当作「非法状态」直接过滤掉——任务记录凭空消失。
+// 现场表现是：用户点重跑，任务在界面上跑着（导演阶段有真实进度），可 runs.json
+// 里找不到它；进程一停，界面上就彻底没有这条任务了，只剩磁盘上的半成品。
+//
+// 这条测试钉住「改完状态必须还留在磁盘上」，白名单再被改窄就会红。
+test('an interrupted run survives on disk instead of being filtered out by the state whitelist', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await store.create(currentAgent, { title: '中断任务要留住' })
+  const mediaRoot = join(cwd, 'data', 'projects', project.id, 'media')
+  await mkdir(mediaRoot, { recursive: true })
+  await writeFile(join(mediaRoot, 'runs.json'), `${JSON.stringify({ schemaVersion: 1, runs: [{ id: 'interrupted-2', type: 'video', status: 'running', projectId: project.id, expectedRevision: project.revision, createdAt: new Date(Date.now() - 5_000).toISOString() }] })}\n`)
+  const host = new SpokenVideoMediaHost({ projectsStore: store })
+  const [run] = await host.operations(currentAgent, { projectId: project.id })
+  assert.equal(run.status, 'interrupted', '内存里应返回 interrupted')
+  const onDisk = JSON.parse(await readFile(join(mediaRoot, 'runs.json'), 'utf8'))
+  assert.equal(onDisk.runs.length, 1, '中断的任务必须留在磁盘上，否则进程一停这条任务就没了')
+  assert.equal(onDisk.runs[0].status, 'interrupted', '磁盘上的状态必须是 interrupted')
+  assert.equal(onDisk.runs[0].id, 'interrupted-2', '留下的必须是这一条，不能是别的')
+})
+
+// 2026-11-06 回归：新提交任务时对 runs.json 的读改写曾经绕开了串行链。
+//
+// 正在跑的任务每几秒要写一次进度（#mutateRun），而新提交任务（#start）自己
+// read→write 一次。两边没有互相等待时，后写的那份会把对方的改动整条盖掉：
+// 新提交的任务把「正在跑的那条」从文件里挤掉（或者反过来），表现出来就是
+// 「任务在跑，界面上却找不到它」。
+//
+// 现在两条路径都走 #mutateRunsFile 这同一条串行链。这条测试钉住并发提交时
+// 两条任务都必须留在文件里。
+test('concurrent submissions and progress writes do not clobber each other in runs.json', async (t) => {
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  const project = await store.create(currentAgent, { title: '并发提交' })
+  const mediaRoot = join(cwd, 'data', 'projects', project.id, 'media')
+  await mkdir(mediaRoot, { recursive: true })
+  const host = new SpokenVideoMediaHost({ projectsStore: store })
+  const request = { projectId: project.id, expectedRevision: project.revision }
+  // 两条不同类型的任务同时提交：voiceover 与 subtitles 各写一次 runs.json。
+  const [first, second] = await Promise.all([
+    host.startVoiceover(currentAgent, request),
+    host.startSubtitles(currentAgent, request),
+  ])
+  assert.notEqual(first.id, second.id, '两条任务必须是不同的记录')
+  const onDisk = JSON.parse(await readFile(join(mediaRoot, 'runs.json'), 'utf8'))
+  const ids = onDisk.runs.map((run) => run.id)
+  assert.ok(ids.includes(first.id), '第一条任务必须还在文件里，不能被并发写覆盖掉')
+  assert.ok(ids.includes(second.id), '第二条任务必须还在文件里，不能被并发写覆盖掉')
+})
+
 test('refuses preview media reached through a symlinked project directory', async (t) => {
   const cwd = await workspace(t)
   const store = new SpokenVideoProjectStore()
@@ -1815,6 +1871,42 @@ test('fails a Remotion task without a creator and does not commit a fallback vid
   const finished = await waitForOperation(host, currentAgent, project.id, started.id)
   assert.equal(finished.status, 'failed')
   assert.match(finished.error, /视频创作 Agent/u)
+  assert.equal((await store.get(currentAgent, { projectId: project.id })).artifacts.video, undefined)
+})
+
+test('a model-caused video failure carries an actionable Chinese remedy and reaches the task card', async (t) => {
+  if (!mediaBinariesAvailable() || !await remotionRendererAvailable()) { t.skip('ffmpeg, ffprobe, or Remotion is unavailable in this environment'); return }
+  // 2026-11-05 23:15 用户截图上的那条真实报文，一字不改地搬进来当输入。
+  // 它同时踩到三条规则的字面：429 / frequency limit / reset at 时间戳。
+  // 用户要的是「模型问题导致失败时给准确的中文提示」，所以这里断言的不是
+  // 「报了错」，而是「这条视频任务的失败被分成了模型限流，并给出了能照做的修法」。
+  const upstreamMessage = 'WorkBuddy AI: usage exceeds frequency limit, but don\'t worry, your usage will reset at 2026-11-05 23:57:25 UTC+8, alternatively, you can switch to the other models to continue using it. (429: you can retry your request)'
+  const cwd = await workspace(t)
+  const store = new SpokenVideoProjectStore()
+  const currentAgent = agent(cwd)
+  let project = await projectWithApprovedSavedScript(currentAgent, store)
+  project = await withTestVoiceover(cwd, store, currentAgent, project, 'model-fault', 'model-fault-voice-0001')
+  project = await withTestSubtitles(store, currentAgent, project, 'model-fault', 'model-fault-voice-0001-subtitles')
+  const host = new SpokenVideoMediaHost({
+    projectsStore: store,
+    // 视觉导演这一轮真的被模型网关限流了——这是整条视频路径上最常见的
+    // 「模型原因失败」，也是用户最需要看懂的一类。
+    videoCreator: async () => { throw new Error(`生成未正常结束（error）：429: {"message":"${upstreamMessage}"}`) },
+    videoReviewer: passingVideoReviewer,
+  })
+  const started = await host.startVideoRender(currentAgent, { projectId: project.id, expectedRevision: project.revision, renderer: 'remotion', subtitleEnabled: true })
+  const finished = await waitForOperation(host, currentAgent, project.id, started.id)
+
+  assert.equal(finished.status, 'failed')
+  // 分类：模型网关限流，而不是笼统的「内部缺陷」或「画面质量问题」。
+  assert.equal(finished.failureCategory, 'model.rate_limit')
+  // 修法必须可执行：说清这是网关限流、限额什么时候解除、以及去哪儿换模型。
+  assert.match(finished.remedy, /频率限制/u)
+  assert.match(finished.remedy, /2026-11-05 23:57:25/u, '上游报文里的解除时间必须出现在修法里')
+  assert.match(finished.remedy, /设置 → 模型/u, '修法必须指到用户真正能动的地方')
+  assert.match(finished.remedy, /workbuddy-ai\/hy3/u, '修法要给出可换的具体模型，不能只说「换一个」')
+  // 原始报文仍保留在 error 里，便于排查——修法是追加，不是替换。
+  assert.match(finished.error, /usage exceeds frequency limit/u)
   assert.equal((await store.get(currentAgent, { projectId: project.id })).artifacts.video, undefined)
 })
 

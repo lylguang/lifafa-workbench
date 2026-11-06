@@ -45,6 +45,7 @@ import { cueChars, splitLongCues, validateSrt } from './spoken-video-subtitles.m
 import { buildVideoCreatorPrompt, buildVideoCreatorRepairPrompt, buildVideoEditorialRepairPrompt, buildVideoReviewerPrompt, normalizeVideoReview, subtitleSamplesAt, VIDEO_REVIEW_SCHEMA } from './spoken-video-video-agent.mjs'
 import { DEFAULT_LOCAL_QC_THRESHOLDS, judgeLocalQc, parseBlackDetect, parseFreezeDetect, parseSilenceDetect, parseVolumeDetect } from './spoken-video-local-qc.mjs'
 import { parseEbur128 } from './spoken-video-loudness.mjs'
+import { classifyFailure } from './spoken-video-failure.mjs'
 
 const execFilePromise = promisify(execFile)
 
@@ -811,6 +812,24 @@ async function writeRuns(root, value) {
   await writeJson(join(root, 'media', 'runs.json'), runsFile(value))
 }
 
+/**
+ * 这条 run 是不是「同一条任务已经在排队/在跑」，也就是新提交应当复用它而不是再起一条。
+ *
+ * 视频任务额外比对了画面形态相关的输入：同一项目里横屏与竖屏、带不带字幕、
+ * 带不带 BGM 是四种不同的成片，参数不同就不能算同一条。
+ */
+function reusableRun(run, type, revision, data) {
+  if (run.type !== type || !['queued', 'running'].includes(run.status)) return false
+  if (run.expectedRevision !== revision) return false
+  if (type !== 'video') return true
+  return (run.input?.orientation === 'landscape' ? 'landscape' : 'portrait') === data.orientation
+    && run.input?.renderer === data.renderer
+    && (run.input?.subtitleEnabled !== false) === data.subtitleEnabled
+    && (run.input?.backgroundMusic?.file || null) === (data.backgroundMusic?.file || null)
+    && (run.input?.bgmVolume ?? null) === data.bgmVolume
+    && run.input?.visualBrief === data.visualBrief
+}
+
 function audioTasksFile(value) {
   if (!value || value.schemaVersion !== 1 || !Array.isArray(value.tasks)) return { schemaVersion: 1, tasks: [] }
   return { schemaVersion: 1, tasks: value.tasks.filter((task) => task && typeof task === 'object' && typeof task.id === 'string').slice(-AUDIO_TASK_LIMIT) }
@@ -897,6 +916,11 @@ function runSummary(run) {
     completedAt: run.completedAt || null,
     phase: run.phase || null,
     error: run.error || null,
+    // 失败分类与可执行修法。视频/配音任务失败时由 classifyFailure 落下，
+    // 界面优先显示 remedy——「该做什么」比「错在哪」有用（例如模型限流要
+    // 去设置 → 模型换模型，而不是只甩一句 429 报文）。
+    remedy: run.remedy || null,
+    failureCategory: run.failureCategory || null,
     resumeFrom: run.resumeFrom || null,
     resumedAt: run.resumedAt || null,
     result: run.result || null,
@@ -972,6 +996,10 @@ function audioTaskSummary(task) {
     startedAt: task.startedAt || null,
     completedAt: task.completedAt || null,
     error: task.error || null,
+    // 失败分类与可执行修法（见 #run 的 catch）：界面上「该做什么」优先于
+    // 「错在哪」——例如限流要说明是等窗口还是换模型。
+    remedy: task.remedy || null,
+    failureCategory: task.failureCategory || null,
     progress: task.progressInfo || null,
     projectSync: task.projectSync || null,
     projectSyncError: task.projectSyncError || null,
@@ -2763,12 +2791,19 @@ export class SpokenVideoMediaHost {
     })
   }
 
+  /**
+   * 串行化地改 runs.json。
+   *
+   * `mutate` 返回 null 表示「本次没有变化，不要落盘」——省掉无谓的写，
+   * 也让「复查一遍再决定要不要改」的调用点不必自己判断。
+   */
   async #mutateRunsFile(root, mutate) {
     const previous = this.runWrites.get(root) || Promise.resolve()
     const work = previous.then(async () => {
       const file = await readRuns(root)
-      const next = runsFile(mutate(file))
-      await writeRuns(root, next)
+      const next = mutate(file)
+      if (!next) return file
+      await writeRuns(root, runsFile(next))
       return next
     })
     const tail = work.catch(() => {})
@@ -3128,23 +3163,25 @@ export class SpokenVideoMediaHost {
     const detail = await this.projectsStore.get(agent, { projectId: id })
     if (detail.revision !== revision) fail('SPOKEN_VIDEO_REVISION_CONFLICT', '项目已被其他操作更新，请刷新后重试。')
     const data = await parseInput(input, { root, detail })
-    const runs = await readRuns(root)
-    const active = runs.runs.find((run) => run.type === type && ['queued', 'running'].includes(run.status) && run.expectedRevision === revision && (type !== 'video' || (
-      (run.input?.orientation === 'landscape' ? 'landscape' : 'portrait') === data.orientation
-      && run.input?.renderer === data.renderer
-      && (run.input?.subtitleEnabled !== false) === data.subtitleEnabled
-      && (run.input?.backgroundMusic?.file || null) === (data.backgroundMusic?.file || null)
-      && (run.input?.bgmVolume ?? null) === data.bgmVolume
-      && run.input?.visualBrief === data.visualBrief
-    )))
-    if (active) return { ...runSummary(active), reused: true }
-    const now = new Date().toISOString()
-    const run = {
-      id: requestId(), type, status: 'queued', projectId: id, expectedRevision: revision, createdAt: now, input: data,
-      source: videoSourceSnapshot(detail, data.subtitleEnabled),
+    // 复用检查与落盘必须走同一条串行链（#mutateRunsFile），否则会和正在跑的任务
+    // 的 #mutateRun 抢同一个 runs.json：两边各自 read→write，后写的那份把对方
+    // 的改动整条覆盖掉。实测就是「重跑的任务记录在跑的过程中凭空消失」。
+    let created = null
+    const file = await this.#mutateRunsFile(root, (current) => {
+      const active = current.runs.find((run) => reusableRun(run, type, revision, data))
+      if (active) return null
+      const now = new Date().toISOString()
+      created = {
+        id: requestId(), type, status: 'queued', projectId: id, expectedRevision: revision, createdAt: now, input: data,
+        source: videoSourceSnapshot(detail, data.subtitleEnabled),
+      }
+      return { ...current, runs: [...current.runs, created].slice(-80) }
+    })
+    if (!created) {
+      const active = file.runs.find((run) => reusableRun(run, type, revision, data))
+      return { ...runSummary(active), reused: true }
     }
-    runs.runs = [...runs.runs, run].slice(-80)
-    await writeRuns(root, runs)
+    const run = created
     // Mark before scheduling so an immediate status poll cannot mistake this process for a restart.
     this.activeRunIds.add(run.id)
     const queueKey = `${root}\u0000${type}`
@@ -3332,7 +3369,17 @@ export class SpokenVideoMediaHost {
       if (!task.autoAdoptProjectId) await this.#mutateAudioTask(root, task.id, (current) => ({ ...current, status: 'succeeded', completedAt: new Date().toISOString() }))
     } catch (error) {
       const message = mediaErrorMessage(error)
-      await this.#mutateAudioTask(root, taskId, (current) => ({ ...current, status: 'failed', completedAt: new Date().toISOString(), error: message.slice(0, 2000) }))
+      // 配音失败也要分类：限流（小米 TTS 按并发限流）与额度不足各有各的下一步，
+      // 裸报文只说一句「小米 TTS 请求过于频繁（429）」，用户不知道该等还是该换。
+      const failure = classifyFailure({ error, step: 'voiceover' })
+      const actionable = failure.category !== 'code.defect' ? failure : null
+      await this.#mutateAudioTask(root, taskId, (current) => ({
+        ...current,
+        status: 'failed',
+        completedAt: new Date().toISOString(),
+        error: message.slice(0, 2000),
+        ...(actionable ? { remedy: actionable.remedy, failureCategory: actionable.category } : {}),
+      }))
       return
     } finally { this.runSecrets.delete(taskId) }
     // 「生成后自动放进项目」：在状态落 succeeded 之前完成采纳——对用户这是一个
@@ -3506,21 +3553,18 @@ export class SpokenVideoMediaHost {
   }
 
   async #mutateRun(root, runId, mutator) {
-    const previous = this.runWrites.get(root) || Promise.resolve()
-    const work = previous.then(async () => {
-      const file = await readRuns(root)
+    let changed = null
+    await this.#mutateRunsFile(root, (file) => {
       const index = file.runs.findIndex((run) => run.id === runId)
       if (index < 0) throw new Error('媒体任务记录丢失。')
       const before = structuredClone(file.runs[index])
       const next = mutator(file.runs[index])
       executionTransition(before, next, next.type === 'voiceover' ? '配音服务' : next.type === 'subtitles' ? '字幕服务' : '本地制作')
       file.runs[index] = next
-      await writeRuns(root, file)
-      return next
+      changed = next
+      return file
     })
-    const tail = work.catch(() => {})
-    this.runWrites.set(root, tail)
-    try { return await work } finally { if (this.runWrites.get(root) === tail) this.runWrites.delete(root) }
+    return changed
   }
 
   async #audioEvent(root, id, label, detail = null) {
@@ -3654,6 +3698,21 @@ export class SpokenVideoMediaHost {
       const cancelled = abort.signal.aborted && !budget.aborted
       // 超时 ≠ 故障：产物还在，应该允许续跑而不是判死。
       const timedOut = budget.aborted
+      // 失败也要分类。这是 2026-11-06 的实测缺口：视频/配音任务的失败只把
+      // 原始异常写进 run.error，用户在界面上看到的是裸报文——例如
+      // 「生成未正常结束（error）：429: {"message":"WorkBuddy AI: usage exceeds
+      // frequency limit…"}」。分类器（spoken-video-failure.mjs）里已经写好了
+      // 「这是限流/额度/链路超时，请到设置 → 模型换模型」的准确中文修法，
+      // 但它只被自动化流水线（schedule-host）调用，视频这条路径压根没接，
+      // 于是那份修法永远显示不出来。
+      //
+      // 所以这里把同一个分类器接上：分类失败不改变原有 error 文案（原文仍
+      // 保留在 error 里，便于排查），只额外落下 remedy / failureCategory，
+      // 由界面优先显示 remedy——「该做什么」比「错在哪」更有用。
+      const failure = timedOut || cancelled ? null : classifyFailure({ error, step: run.type })
+      // code.defect 的修法是「请把错误反馈给开发者」——它对每个没归类的失败都
+      // 一样，等于噪声。界面上只在有**具体可执行动作**的分类上显示修法。
+      const actionable = failure && failure.category !== 'code.defect' ? failure : null
       await this.#mutateRun(root, run.id, (current) => {
         const completedAt = new Date().toISOString()
         const pipeline = current.type === 'video' && current.pipeline && typeof current.pipeline === 'object'
@@ -3667,6 +3726,8 @@ export class SpokenVideoMediaHost {
           phase: current.type === 'video' && !timedOut ? 'failed' : current.phase,
           completedAt,
           error: message.slice(0, 2000),
+          // 修法与分类：只有真的判失败时才落，取消/超时各有自己的语义。
+          ...(actionable ? { remedy: actionable.remedy, failureCategory: actionable.category } : {}),
           ...(pipeline ? { pipeline } : {}),
         }
       })
