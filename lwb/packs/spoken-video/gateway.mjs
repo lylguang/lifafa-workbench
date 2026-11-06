@@ -175,6 +175,18 @@ decorateRemote(SpokenVideoGateway.prototype, 'runSchedule', 'runSchedule')
 decorateRemote(SpokenVideoGateway.prototype, 'cancelScheduleRun', 'cancelScheduleRun')
 decorateRemote(SpokenVideoGateway.prototype, 'deleteScheduleRun', 'deleteScheduleRun')
 decorateRemote(SpokenVideoGateway.prototype, 'scheduleRun', 'scheduleRun')
+// 这四个方法在类里一直都有，但漏了 decorateRemote，所以 RPC 路由根本不认识它们，
+// 客户端一调就是 404。后果不是「少一个功能」这么轻：
+//   · scheduleQueue / listScheduleFailures —— 队列条与故障聚类面板永远拿不到数据，
+//     界面上这两块一直是空的（客户端 .catch(() => null) 把 404 吞掉了，看不出报错）。
+//     故障聚类里恰好带着 cluster.remedy，也就是「最近为什么失败、该改什么」的那句
+//     中文修法——用户最需要的那部分提示，就卡在这里。
+//   · resumeScheduleRun —— 「我刚把失效的 Key 换好了，现在就跑」那个按钮点了没反应。
+//   · schedulePreflight —— 保存任务前的开工体检报告取不到。
+decorateRemote(SpokenVideoGateway.prototype, 'scheduleQueue', 'scheduleQueue')
+decorateRemote(SpokenVideoGateway.prototype, 'listScheduleFailures', 'listScheduleFailures')
+decorateRemote(SpokenVideoGateway.prototype, 'resumeScheduleRun', 'resumeScheduleRun')
+decorateRemote(SpokenVideoGateway.prototype, 'schedulePreflight', 'schedulePreflight')
 decorateRemote(SpokenVideoGateway.prototype, 'getProfile', 'getProfile')
 decorateRemote(SpokenVideoGateway.prototype, 'setProfile', 'setProfile')
 decorateRemote(SpokenVideoGateway.prototype, 'listAccounts', 'listAccounts')
