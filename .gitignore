@@ -19,6 +19,16 @@ vendor/
 .dsh-tmp/
 .tmp-*.png
 
+# 根目录一次性调试脚本（点开头的 .tmp-*.cjs / .tmp-*.mjs）。
+# 上面的 **/.tmp-*/ 只匹配目录，匹配不到这些散落在仓库根的临时探针；
+# 它们不属于任何测试套件，也不该被 git add -A 收进去。
+/.tmp-*.cjs
+/.tmp-*.mjs
+
+# 名字里带全角冒号的临时探针（Windows 保留设备名类残留的变体）。
+# 该字符会让按目录递归的 grep / rg 直接报错中断，别让它混进版本库。
+*.tmpwatch-postman.mjs
+
 # 本地调试草稿目录（含浏览器 profile、Remotion 缓存、npm 缓存，实测 8.3GB）
 # 2026-10-27 补入：此前未忽略，git add -A 会试图收录全部运行时缓存。
 lifa-scratch/
