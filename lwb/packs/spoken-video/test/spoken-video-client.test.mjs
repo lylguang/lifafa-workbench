@@ -1115,6 +1115,23 @@ test('video task card shows the release button only for a failed cut that is not
   assert.match(page, /'这是我要的静态风格，直接采用'\) : null,/u)
 })
 
+test('a failed video task shows the actionable remedy above the raw error', async () => {
+  // 2026-11-06：视频任务失败时，服务端会落下分类器给出的中文修法
+  // （「模型限流了，去设置 → 模型换模型」之类）。界面上必须把它显示在
+  // 原始报文**之前**——用户看到一句裸的 429 报文是没法处理的，
+  // 「该做什么」才是他们要的那句话。
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function VideoPreviewPageV2(')
+  const end = source.indexOf('\n    function ', start + 40)
+  const page = source.slice(start, end)
+
+  const remedyIndex = page.indexOf('task.remedy ? h(\'p\', { className: \'sv-warn\' }, `该做什么：${task.remedy}`) : null')
+  const errorIndex = page.indexOf("task.error ? h('p', { className: 'sv-error' }, mediaErrorText(task.error)) : null")
+  assert.ok(remedyIndex >= 0, '视频任务卡必须渲染 task.remedy')
+  assert.ok(errorIndex >= 0, '视频任务卡必须保留原始错误文案')
+  assert.ok(remedyIndex < errorIndex, '「该做什么」必须排在原始错误之前')
+})
+
 test('release confirmation states the static-style escape and the blank-video risk', async () => {
   const source = await readFile(clientPath, 'utf8')
   const start = source.indexOf('function VideoPreviewPageV2(')

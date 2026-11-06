@@ -1959,7 +1959,7 @@ window.__ModuleLoader__.load({
             h('div', { className: 'sv-ex-header-actions' }, h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setWide((value) => !value), 'aria-label': wide ? '收起宽屏' : '展开宽屏' }, wide ? '收起' : '展开'), h('button', { type: 'button', className: 'lwb-plain-button', onClick: onClose }, '关闭'))),
           h('div', { className: 'sv-ex-toolbar' }, h('div', { role: 'tablist', 'aria-label': '执行详情视图', className: 'sv-ex-tabs' }, [['overview', '执行概览'], ['process', '执行过程'], ['results', '结果产物']].map(([id, label]) => h('button', { key: id, type: 'button', role: 'tab', 'aria-selected': tab === id, onClick: () => setTab(id) }, label))), h('span', { className: 'sv-ex-state', 'data-status': detail?.status, role: 'status' }, EX_STATUS[detail?.status] || '读取中')),
           h('div', { key: tab, className: 'sv-ex-body', role: 'tabpanel' }, error ? h('div', { className: 'sv-ex-alert' }, h('p', null, error), h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setRefresh((value) => value + 1) }, '重新读取')) : null,
-            detail?.record.error ? h('div', { className: 'sv-ex-alert' }, h('strong', null, '执行未完成'), h('p', null, ['audio', 'media'].includes(request.kind) ? mediaErrorText(detail.record.error) : detail.record.error)) : null,
+            detail?.record.error ? h('div', { className: 'sv-ex-alert' }, h('strong', null, '执行未完成'), detail.record.remedy ? h('p', null, `该做什么：${detail.record.remedy}`) : null, h('p', null, ['audio', 'media'].includes(request.kind) ? mediaErrorText(detail.record.error) : detail.record.error)) : null,
             detail && tab === 'overview' ? h(React.Fragment, null,
               h('div', { className: 'sv-ex-metrics' }, h('div', null, h('span', null, '执行状态'), h('strong', null, EX_STATUS[detail.status] || detail.status)), h('div', null, h('span', null, 'DSH 会话'), h('strong', null, detail.sessions.length ? `${detail.sessions.length} 个` : '无')), h('div', null, h('span', null, '用时'), h('strong', null, detail.completedAt && detail.createdAt ? `${Math.max(0, Math.round((Date.parse(detail.completedAt) - Date.parse(detail.createdAt)) / 1000))} 秒` : exLive(detail) ? '执行中' : '—'))),
               h(ExecutionFields, { label: '任务输入与配置', value: record.input || { mode: record.mode, tier: record.tier, instructions: record.instructions, prompt: record.prompt, imageProvider: record.imageProvider } }),
@@ -5588,6 +5588,7 @@ window.__ModuleLoader__.load({
           ),
           isVoice && audio ? h('div', { className: 'sv-audio-task-detail' }, h('span', null, `时长 ${formatMediaDuration(audio.durationSeconds)}`), h('span', null, audio.sampleRate ? `${audio.sampleRate} Hz` : '采样率待确认'), h('span', null, formatMediaBytes(audio.bytes))) : null,
           !isVoice && task.result?.cueCount != null ? h('div', { className: 'sv-audio-task-detail' }, h('span', null, `已对齐 ${task.result.cueCount} 条字幕`), task.result?.warnings?.length ? h('span', null, `${task.result.warnings.length} 条提示`) : null) : null,
+          task.remedy ? h('p', { className: 'sv-warn' }, `该做什么：${task.remedy}`) : null,
           task.error ? h('p', { className: 'sv-error' }, mediaErrorText(task.error)) : null,
           h('div', { className: 'sv-actions' },
             h('button', { type: 'button', className: 'lwb-plain-button', onClick: () => setSelectedId(task.projectId) }, task.projectId === selectedId ? '当前稿件' : '查看稿件'),
@@ -6126,6 +6127,7 @@ window.__ModuleLoader__.load({
             subtitleProgress.percent == null ? null : h('progress', { max: 100, value: subtitleProgress.percent, 'aria-label': '字幕识别进度' }),
           ) : null,
           task.status === 'succeeded' ? h(AudioTaskPreview, { packId, taskId: task.id, setError }) : null,
+          task.remedy ? h('p', { className: 'sv-warn' }, `该做什么：${task.remedy}`) : null,
           task.error ? h('p', { className: 'sv-error' }, mediaErrorText(task.error)) : null,
           subtitle.error ? h('p', { className: 'sv-error' }, `字幕生成失败，配音已保留：${mediaErrorText(subtitle.error)}`) : null,
           task.status === 'succeeded' && task.source?.projectId ? h('div', { className: 'sv-list' },
@@ -6510,6 +6512,10 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sv-video-task-head' }, h('div', null, h('p', { className: 'sv-video-task-title' }, task.projectTitle), h('p', { className: 'sv-video-task-meta' }, `${formatTime(task.createdAt)} · 稿件版本 ${task.expectedRevision} · ${task.input?.orientation === 'portrait' ? '竖屏' : '横屏'} · ${task.input?.subtitleEnabled === false ? '不含字幕' : '含字幕'} · ${task.input?.backgroundMusic ? `BGM：${task.input.backgroundMusic.name}` : '无 BGM'}`)), h('span', { className: `sv-tag ${statusClass}` }, liveStatus)),
           progress ? h(VideoTaskProgress, { progress, status: task.status, eta: task.status === 'running' && task.status !== 'succeeded' ? taskEta : null }) : null,
           task.status === 'succeeded' && task.result?.video ? h(React.Fragment, null, h(VideoTaskMediaPreview, { packId, task, stage: 'video', setError }), h('div', { className: 'sv-video-task-detail' }, h('span', null, `${task.result.video.width || '?'}x${task.result.video.height || '?'} · ${task.result.video.fps || '?'}fps`), h('span', null, `时长 ${formatMediaDuration(task.result.video.durationSeconds)}`), h('span', null, formatMediaBytes(task.result.video.bytes)))) : null,
+          // 「该做什么」优先于「错在哪」。分类器给出的修法（换模型 / 调预算 /
+          // 改浏览器…）比原始报文有用得多，所以单独一块放在错误原文之前。
+          // 只在分类器判出可执行动作时出现，不给用户添无意义的空块。
+          task.remedy ? h('p', { className: 'sv-warn' }, `该做什么：${task.remedy}`) : null,
           task.error ? h('p', { className: 'sv-error' }, mediaErrorText(task.error)) : null,
           // 三种下游缺失，分开说清，避免把「质检失败」误报成「没有记录」。
           // 1) 根本没有质检记录（缺 qc 产物）：引导去补做。

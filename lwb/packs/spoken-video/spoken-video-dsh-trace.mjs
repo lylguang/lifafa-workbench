@@ -84,7 +84,18 @@ export function projectDshSessionEvent(event, fallbackAt) {
     case 'turn/start': return { ...base, status: 'running', label: 'DSH 已接收生成任务' }
     case 'step/start': return { ...base, status: 'running', label: 'DSH 正在请求模型生成' }
     case 'llm/retry-started': return { ...base, status: 'running', label: '模型请求异常，DSH 正在重试' }
-    case 'llm/retry': return { ...base, status: 'done', label: '模型重试步骤结束' }
+    // 2026-11-06：这里原来只说「模型重试步骤结束」，把真实原因丢掉了。
+    // `llm/retry` 事件带 `failure: LlmFailure { message, code, status? }`
+    // （见 vendor/deepseek-harness/packages/llm/llm-retry/src/types.ts），
+    // 里面就是上游的原文——限流、额度耗尽、链路超时都写在那里。
+    // 用户在时间线上只看到"重试结束"，完全不知道到底在重试什么、为什么。
+    // 现在把失败原因显示出来（限长，避免把长报文塞进时间线）。
+    case 'llm/retry': {
+      const failure = event.data?.failure
+      const reason = typeof failure?.message === 'string' ? failure.message.trim() : ''
+      const label = reason ? `模型重试步骤结束：${reason}` : '模型重试步骤结束'
+      return { ...base, status: 'done', label, detail: reason ? reason.slice(0, 200) : null }
+    }
     // 额度耗尽后的换模型兜底：不是「同一个模型又试了一次」，而是换到另一个
     // 还有额度的模型重跑。必须说清楚，否则用户看到「模型重试步骤结束」会以为
     // 原地重试能解决（实际上原地重试永远不会恢复）。

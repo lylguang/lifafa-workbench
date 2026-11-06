@@ -49,6 +49,51 @@ test('额度兜底换模型的事件要说清是换模型，而不是原地重�
   assert.match(projected.label, /换/u, '必须说清是换模型重跑')
 })
 
+test('模型重试事件必须显示上游的真实失败原因', () => {
+  // 2026-11-05/06 实测：`llm/retry` 事件带 `failure: LlmFailure { message,
+  // code, status? }`（见 vendor/deepseek-harness/packages/llm/llm-retry/src/
+  // types.ts）——上游到底为什么失败一直都在事件里。以前这里只显示
+  // 「模型重试步骤结束」，把原因整个丢掉，用户在时间线上只看到"又在重试"，
+  // 完全不知道在重试什么、为什么失败。
+  const at = '2026-11-05T22:15:00.000Z'
+  const projected = projectDshSessionEvent({
+    seq: 12,
+    time: Date.parse(at),
+    type: 'llm/retry',
+    data: {
+      failure: { message: 'pi-ai stream idle timeout after 300000ms', code: 'TIMEOUT' },
+    },
+  }, at)
+  assert.equal(projected.status, 'done')
+  assert.match(projected.label, /pi-ai stream idle timeout after 300000ms/u, '必须显示上游真实原因')
+  assert.match(projected.detail, /stream idle timeout/u)
+
+  // 限流也要显示原文——里面带着「限额什么时候解除」这个用户最想知道的信息。
+  const limited = projectDshSessionEvent({
+    seq: 13,
+    time: Date.parse(at),
+    type: 'llm/retry',
+    data: {
+      failure: {
+        message: 'WorkBuddy AI: usage exceeds frequency limit, your usage will reset at 2026-11-05 23:57:25 UTC+8',
+        code: 'RATE_LIMIT',
+      },
+    },
+  }, at)
+  assert.match(limited.label, /frequency limit/u)
+  assert.match(limited.label, /23:57:25/u, '限额解除时间必须出现在时间线上')
+
+  // 没有 failure 字段时不能崩，也不能编出原因。
+  const bare = projectDshSessionEvent({
+    seq: 14,
+    time: Date.parse(at),
+    type: 'llm/retry',
+    data: {},
+  }, at)
+  assert.equal(bare.label, '模型重试步骤结束')
+  assert.equal(bare.detail, null)
+})
+
 test('repairs a legacy generation record with an empty DSH trace', () => {
   const record = {}
   const trace = ensureDshTrace(record)

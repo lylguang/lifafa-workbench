@@ -159,6 +159,130 @@ const HISTORICAL = [
     mustMention: /模型/u,
     mustMentionAll: [/模型/u, /hy3|deepseek-v4\.1-flash/u],
   },
+  {
+    // 2026-11-05 真实报文（多批任务集体失败）。审片 Agent 必须 read_image 逐帧
+    // 看画面，但默认模型 fan/glm-5.3-flash 不声明图像输入，read_image 直接报错，
+    // 审片员看不到任何画面只能判不通过——这是「选了不支持读图的模型」导致的
+    // 环境性失败，不是画面质量没达标。根因该由用户去「设置 → 模型」改选支持
+    // 图像输入的模型，所以这里要提示切换模型，且**不能**误归成
+    // content.editorial_rejected（那类讲的是画面质量没达标、可再修）。新规则必须
+    // 排在 editorial_rejected 之前抢占分类。
+    name: '审片模型不支持图像输入（read_image 报错）',
+    message: '成片经过 2 次定向修复后仍未通过独立审片：无法完成视觉审核：本审核会话绑定的模型 glm-5.3-flash 不支持图像输入，read_image 读取 contact-sheet 与抽帧图片均直接报错（"model does not declare image input"）。由于无法真正看到任何画面，editorialPass 判为 false 并标记环境性 blocker。请用图像能力模型重新发起审核。',
+    category: 'review.model_no_image',
+    retryable: false,
+    // 修法必须明确指向「切换支持图像输入的模型」，而不是让用户去「调整画面重跑」。
+    mustMention: /图像输入|读图|切换/u,
+    mustMentionAll: [/设置\s*→\s*模型|模型/u, /hy3|deepseek-v4\.1-flash|step-5-preview/u, /LWB_SPOKEN_VIDEO_REVIEWER_MODEL/u],
+    // 必须区分「模型不支持看图」与「画面质量没达标」：修法不能只说「重试定向修复」。
+    mustNotMention: /定向修复/u,
+  },
+  {
+    // 守卫：同样是「未通过独立审片」，但根因是画面质量（元素迟到、语义相反），
+    // 必须仍归到 content.editorial_rejected，不能被上面的读图模型规则抢走。
+    name: '独立审片不通过（画面质量，非模型问题）不被读图规则误判',
+    message: '成片经过 2 次定向修复后仍未通过独立审片：技术质检通过。S14 第三条画面仍是约 5% 不透明度残影且扣减算式迟到约 3 秒；"抄底？接飞刀"用向上箭头表达，画面语义与结论相反。',
+    category: 'content.editorial_rejected',
+    retryable: false,
+    mustMention: /画面|审片/u,
+    mustMentionAll: [/重试|重跑/u],
+    mustNotMention: /开发者|图像输入/u,
+  },
+  {
+    // 2026-11-05 真实报文（Kimi K3.1 任务导演阶段）。底层 pi-ai 网关链路在生成中
+    // 超过 5 分钟没吐 token，客户端判流空闲超时断开。导演子会话缓存显示实际模型是
+    // 支持读图的 fan/hy4free，所以**不是**模型不支持看图、也**不是**代码缺陷——
+    // 是网关链路的瞬时抖动，重试通常能过。此前没有这条规则时被漏判成 code.defect
+    // （「请反馈给开发者」），纯误导。
+    name: '视觉导演网关链路流空闲超时（pi-ai stream idle timeout）',
+    message: '生成未正常结束（error）：pi-ai stream idle timeout after 300000ms',
+    category: 'timeout.stream_idle',
+    retryable: true,
+    // 修法必须说清「是链路抖动、非模型非代码、会重试」，并且按用户既定原则给出
+    // 「持续失败就换走这条链路的模型」的提示，而非偷偷替用户改默认。
+    mustMention: /链路|网关|抖动|重试/u,
+    mustMentionAll: [/重试/u, /设置\s*→\s*模型|切换/u, /hy3|deepseek-v4\.1-flash/u, /magpie|pi-ai/u],
+    // 绝不能又误导成「代码缺陷请找开发者」，也别和「模型不支持看图」混为一谈。
+    mustNotMention: /开发者|代码缺陷|图像输入|读图/u,
+  },
+  {
+    // 守卫：同样是「生成未正常结束」，但根因是模型额度耗尽（Credits exhausted），
+    // 必须仍归到 credential.model_quota（不可重试），不能被这条流超时规则抢走。
+    name: '模型额度耗尽（Credits exhausted）不被流超时规则误判',
+    message: '生成未正常结束（error）：WorkBuddy AI: Credits exhausted. Please visit the link below to purchase add-on packs and get more credits.',
+    category: 'credential.model_quota',
+    retryable: false,
+    mustMention: /模型/u,
+    mustMentionAll: [/模型/u, /hy3|deepseek-v4\.1-flash/u],
+  },
+  {
+    // 2026-11-05 23:15 真实报文（用户截图那一条）。上游同时给出了「限额什么时候
+    // 解除」和「可以换模型」两件极有用的信息——原文里都写着，之前却被归进通用
+    // quota 桶，配了一段讲「声音克隆按并发限流」的 TTS 文案，对视频任务完全
+    // 不相干，用户既看不到重置时间，也看不到换模型这个出口。
+    name: '模型网关频率限制（usage exceeds frequency limit）',
+    message: '生成未正常结束（error）：429: {"code":null,"message":"WorkBuddy AI: usage exceeds frequency limit, but don\'t worry, your usage will reset at 2026-11-05 23:57:25 UTC+8, alternatively, you can switch to the other models to continue using it.","param":null,"type":"rate_limit_error"}',
+    category: 'model.rate_limit',
+    retryable: true,
+    // 修法必须带上报文里的重置时间（用户最想知道「还有多久能好」），
+    // 并且给出「换模型」这个出口——按用户既定原则只提示，不替用户改默认模型。
+    mustMention: /频率限制|限流/u,
+    mustMentionAll: [/频率限制|限流/u, /2026-11-05 23:57:25/u, /设置\s*→\s*模型/u, /hy3|deepseek-v4\.1-flash/u],
+    // 这不是画面质量问题、也不是代码缺陷，不能那样说。
+    mustNotMention: /开发者|声音克隆/u,
+  },
+  {
+    // 2026-11-05 23:33 真实报文：`Request timed out.`——报文极短，零工具调用，
+    // DSH 事件流里 llm/retry 连着 5 次 code=TIMEOUT。此前落进兜底的 code.defect，
+    // 用户看到「未归类的内部错误，通常是代码缺陷，请反馈给开发者」，完全指错方向。
+    name: '模型网关请求超时（Request timed out.）',
+    message: '生成未正常结束（error）：Request timed out.',
+    category: 'model.request_timeout',
+    retryable: true,
+    // 必须说清是模型链路问题、会重试、连续出现就换模型；不得推给开发者。
+    mustMention: /超时/u,
+    mustMentionAll: [/超时/u, /重试/u, /设置\s*→\s*模型|切换/u, /hy3|deepseek-v4\.1-flash/u],
+    mustNotMention: /开发者|代码缺陷/u,
+  },
+  {
+    // 2026-11-05/06 真实报文：50 分钟预算耗尽。这条文案一直在**误诊**——
+    // 原文写「Agent 一直在打磨但从未跑预检」，但解开那次会话的 DSH 事件流
+    // 看，llm/retry 连着 7–8 次，每次都是上游 5 分钟没吐 token
+    // （pi-ai stream idle timeout after 300000ms），时间全烧在模型请求反复
+    // 超时上，Agent 根本没在打磨。
+    //
+    // 误诊有实际后果：修法指向「调大预算重跑」，而真正该做的是换一条模型
+    // 链路；用户按提示调预算，只会再烧 50 分钟。
+    name: '视觉导演预算耗尽（真实根因是链路反复超时，不是打磨）',
+    message: '视觉导演超过 50 分钟仍未提交可渲染工程（走 fan 链路）：期间模型请求反复失败，已重试 3/5 次，未拿到有效响应。最近一次失败原因：pi-ai stream idle timeout after 300000ms。已停止本轮以止损：可直接重跑本任务，阶段产物已落盘，重跑不必从零开始；如确需更长时间，可设置环境变量 LWB_VIDEO_DIRECTOR_TIMEOUT_MS（毫秒，当前 3000000）后重启。',
+    category: 'video.director_budget',
+    retryable: true,
+    // 必须说清真实根因是链路超时，并给出换模型的出口。
+    mustMention: /超时/u,
+    mustMentionAll: [/超时/u, /设置\s*→\s*模型|切换/u, /hy3|deepseek-v4\.1-flash/u],
+    // 绝不能再说成「Agent 一直在打磨」——那正是本次要修掉的误诊。
+    mustNotMention: /开发者|代码缺陷/u,
+  },
+  {
+    // 守卫：同样是导演预算耗尽，但内嵌的根因是限流，修法必须讲限流而不是超时。
+    name: '视觉导演预算耗尽（根因是限流）按限流措辞',
+    message: '视觉导演超过 50 分钟仍未提交可渲染工程（走 magpie 链路）：期间模型请求反复失败，已重试 5/5 次，未拿到有效响应。最近一次失败原因：429: usage exceeds frequency limit, reset at 2026-11-05 23:57:25 UTC+8',
+    category: 'video.director_budget',
+    retryable: true,
+    // 必须说清真实根因是限流（而不是链路超时），并给出换模型的出口。
+    mustMention: /限流|频率限制/u,
+    mustMentionAll: [/限流|频率限制/u, /设置\s*→\s*模型|切换/u],
+  },
+  {
+    // 守卫：TTS 侧的 429 不能被「模型限流」规则抢走——它的修法讲的是并发与
+    // 声音克隆，跟模型网关限流是两回事。
+    name: '小米 TTS 限流不被模型限流规则误判',
+    message: 'SciTiger TTS任务failed：第 1/25 段云端合成失败（已重试）：小米 TTS 返回 429：Too many requests',
+    category: 'credential.quota',
+    retryable: true,
+    mustMention: /退避/u,
+    mustMentionAll: [/退避/u, /串行/u, /配额/u],
+  },
 ]
 
 for (const testCase of HISTORICAL) {

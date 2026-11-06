@@ -15,14 +15,14 @@ export const inject = ['lwbPackRegistry', 'lwbPackServices', 'subagents', 'tools
 
 // 配音渠道：小米 MiMo 是唯一启用的渠道。bailian/scitiger 仍留在枚举里，
 // 这样老设置文件能继续读出来（老任务也要能打开），只是新建任务时前端只给 mimo。
-const MediaConnectionSettings = z.object({
+export const MediaConnectionSettings = z.object({
   provider: z.union(['mimo', 'bailian', 'scitiger']).default('mimo'),
   bailianReferenceVoices: z.any().default({}),
 })
 
 // `enabled` is retained only so existing settings files remain readable. Cover
 // generation availability is derived from the selected provider's credential.
-const PublishConnectionSettings = z.object({
+export const PublishConnectionSettings = z.object({
   enabled: z.boolean().default(false),
   provider: z.union(['bailian', 'scitiger', 'custom']).default('bailian'),
   model: z.string().default(''),
@@ -62,12 +62,18 @@ const PublishConnectionSettings = z.object({
 // 止损，错误信息里写明可直接重跑（Agent 的阶段性产物已落盘，重跑不是
 // 从零开始）。
 //
+// 2026-11-05 从 35 提到 50：默认模型随用户默认路由走，2026-11-04 实测
+// minimax-m3.1-flash 的导演节奏明显更磨（历史模型 12-24 分钟，两条任务
+// 都在 34+ 分钟仍在认真收敛而非打转——58KB 组件已写出、还在修字幕入场），
+// 35 分钟会把正常的慢任务误杀。50 分钟仍留足止损意义（真打转的任务
+// 远超此限），且可用环境变量覆盖。
+//
 // 可用环境变量 LWB_VIDEO_DIRECTOR_TIMEOUT_MS 覆盖（毫秒）。设为 0 或负数
 // 表示不设限——留给确有特殊长片需求的场景，但默认必须有限。
 export function directorTimeBudget(env = process.env) {
   const raw = Number(env.LWB_VIDEO_DIRECTOR_TIMEOUT_MS)
   if (Number.isFinite(raw)) return raw > 0 ? raw : 0
-  return 35 * 60 * 1000
+  return 50 * 60 * 1000
 }
 
 /**
@@ -117,8 +123,61 @@ export function creatorModel(env = process.env) {
   return String(env.LWB_SPOKEN_VIDEO_CREATOR_MODEL || '').trim() || null
 }
 
+/**
+ * 钉导演模型时的 provider 覆盖。执行器默认把 provider 写死为 magpie（默认路由组），
+ * 但被钉的模型不一定挂在 magpie 下（2026-11-05 实测：minimax-m3.1-flash 挂在 fan，
+ * 不传 provider 直接报 `provider "magpie" has no configured model`）。
+ */
+export function creatorModelProvider(env = process.env) {
+  return String(env.LWB_SPOKEN_VIDEO_CREATOR_MODEL_PROVIDER || '').trim() || null
+}
+
 export function reviewerModel(env = process.env) {
   return String(env.LWB_SPOKEN_VIDEO_REVIEWER_MODEL || '').trim() || null
+}
+
+/**
+ * 从子会话事件流里捞出**最近一次模型请求的真实失败原因**。
+ *
+ * 2026-11-05/06 实测（这是本次改动最关键的一块）：DSH 的 `llm/retry` 事件
+ * 形状是 `{ retryId, turn, step, provider, retry, maxRetries, delayMs, failure }`，
+ * 其中 `failure` 就是 `LlmFailure { message, code, status? }`
+ * （见 vendor/deepseek-harness/packages/llm/llm-retry/src/types.ts）。
+ * 也就是说**上游到底为什么失败，一直都在事件流里**，只是没人读。
+ *
+ * 之前为什么读不到：`explainDshStop` 只看 `turn/end` 的 reason，而超时止损
+ * 是在 `run.result` 之前触发的——那时根本没有 `turn/end`，所以
+ * `explainDshStop` 什么都读不到，只能拼一句"Agent 一直在打磨但从未跑预检"。
+ * 那次会话的事件流里有 7–8 次 `llm/retry`，每次都是上游 5 分钟无响应
+ * （`pi-ai stream idle timeout after 300000ms`）——真实原因明明在，
+ * 却因为只读 turn/end 而整个丢了，于是把"网关链路不稳"说成了"打磨过头"。
+ *
+ * 这里补上这条读取路径，并同时给出**重试次数**，因为次数本身就有诊断价值：
+ * 连着 5 次同一原因超时，和偶发一次，处置完全不同。
+ */
+function latestUpstreamFailure(run) {
+  const events = run?.localAgent?.session?.snapshotEvents?.() || []
+  let latest = null
+  let retries = 0
+  for (const event of events) {
+    if (event?.type !== 'llm/retry') continue
+    const failure = event?.data?.failure
+    const message = typeof failure?.message === 'string' ? failure.message.trim() : ''
+    if (!message) continue
+    retries += 1
+    latest = {
+      message,
+      code: typeof failure?.code === 'string' ? failure.code : null,
+      status: Number.isFinite(failure?.status) ? failure.status : null,
+      provider: typeof event?.data?.provider === 'string' ? event.data.provider : null,
+      retry: Number.isFinite(event?.data?.retry) ? event.data.retry : null,
+      maxRetries: Number.isFinite(event?.data?.maxRetries) ? event.data.maxRetries : null,
+    }
+  }
+  if (!latest) return null
+  const provider = latest.provider ? `（链路 ${latest.provider}）` : ''
+  const attempts = latest.maxRetries ? `，已重试 ${latest.retry}/${latest.maxRetries} 次` : ''
+  return { ...latest, summary: `上游报错：${latest.message}${provider}${attempts}` }
 }
 
 /**
@@ -163,6 +222,16 @@ function explainDshStop(run, result) {
     if (text.trim()) return text.trim()
     if (typeof reason?.kind === 'string' && reason.kind !== 'completed') return `子会话以 ${reason.kind} 结束`
   }
+  // turn/end 里没有线索时，回退到 `llm/retry` 事件——那里存着每一次失败的
+  // 真实上游报文（LlmFailure.message）。
+  //
+  // 2026-11-06 实测：像 `Request timed out.` 这种失败，`turn/end` 的 reason
+  // 里其实也有；但更常见的是子会话根本没走到 turn/end（被 abort 取消），
+  // 于是只剩 `llm/retry` 里有真相。以前这里只能返回空串，pack 于是拼出
+  // 一句裸的「生成未正常结束（error）」，分类器把它归成 code.defect
+  // （内部缺陷）——把网关故障误报成代码 bug。
+  const upstream = latestUpstreamFailure(run)
+  if (upstream) return upstream.summary
   // 完全没有线索：至少把「模型请求阶段就断了」这个事实说出来，指向模型配置，
   // 因为这是该形态唯一有意义的排查方向。
   //
@@ -208,7 +277,13 @@ function quotaFallbackModel(env = process.env) {
   return String(env.LWB_SPOKEN_VIDEO_QUOTA_FALLBACK_MODEL || '').trim() || 'workbuddy-ai/deepseek-v4.1-flash'
 }
 
-function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinuations = 0, continuationPrompt, maxTokens = 128_000, model = null, modelProvider = null, timeBudget = null, budgetLabel = null, budgetEnvHint = null } = {}) {
+function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinuations = 0, continuationPrompt, maxTokens = 128_000, model = null, modelProvider = null, timeBudget = null, budgetLabel = null, budgetEnvHint = null, packId = null } = {}) {
+  // 执行器所属的能力包。默认是本包（spoken-video）；共享这份代码的包（如
+  // manual-script-video）必须显式传自己的 packId——下面的 withAgent 会用它
+  // 解析包工作区并作为子会话的 cwd 与沙箱边界。2026-11-04 实测：不传时导演
+  // 子会话被关进 spoken-video 工作区，而任务目录在 manual-script-video 工作区，
+  // 沙箱拒写（EPERM），导演把产物写到镜像路径并耗尽 35 分钟预算。
+  const ownerPackId = packId || manifest.id
   // 网关 provider 名。所有可用模型都由 magpie 网关提供（settings.yaml 的
   // agent-default-model.provider 就是它），所以模型覆盖默认用同一个 provider。
   const defaultModelProvider = 'magpie'
@@ -220,7 +295,7 @@ function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinua
       // withAgent 会用 DSH 的默认模型建一个父会话，子会话再继承它的模型。
       // 兜底重试时 route.model 必须一路带下去，否则换模型只换在这一层、
       // 真正 spawn 子会话时又被父会话的默认模型覆盖回去。
-      return ctx.lwbPackServices.forPack(manifest.id).withAgent((parent) => dshExecutor({ prompt, schema, agent: parent, onDshStarted, onDshEvent, onDshContinuation, validate, repairPrompt, onDshRepair, maxRepairs }, route))
+      return ctx.lwbPackServices.forPack(ownerPackId).withAgent((parent) => dshExecutor({ prompt, schema, agent: parent, onDshStarted, onDshEvent, onDshContinuation, validate, repairPrompt, onDshRepair, maxRepairs }, route))
     }
     if (!subagents || typeof subagents.start !== 'function') {
       throw new Error('当前环境不提供子代理执行接缝，无法执行生成任务。')
@@ -236,7 +311,7 @@ function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinua
       traceTail = traceTail.then(() => Promise.resolve(onDshEvent(event)).catch(() => {}))
     }
     let run
-    const runSignal = ctx.lwbPackServices ? AbortSignal.any([controller.signal, ctx.lwbPackServices.forPack(manifest.id).signal]) : controller.signal
+    const runSignal = ctx.lwbPackServices ? AbortSignal.any([controller.signal, ctx.lwbPackServices.forPack(ownerPackId).signal]) : controller.signal
     const cancelChild = () => run?.localAgent?.cancel?.({ kind: 'parent' })
     const observeEvent = (session, event) => {
       if (!childSessionId || session.id !== childSessionId) return
@@ -341,7 +416,32 @@ function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinua
       const budgetEnvHintText = budgetEnvHint || 'LWB_VIDEO_DIRECTOR_TIMEOUT_MS'
       // 导演的失败语义是「没提交可渲染工程」，审片的是「没提交审片结论」。
       // 各自说清卡在哪一步，比一句通用的「没提交结果」有用。
-      const budgetOutcomeText = budgetLabel ? '仍未提交结果（Agent 一直在打磨但从未收敛）' : '仍未提交可渲染工程（Agent 一直在打磨但从未跑预检）'
+      //
+      // 2026-11-06：这里原来无条件写「Agent 一直在打磨但从未跑预检」，那是
+      // **误诊**。把 2026-11-05 那次会话的 DSH 事件流解开看，真相是
+      // `llm/retry` 连着 7–8 次，每次上游都没响应（`pi-ai stream idle timeout
+      // after 300000ms`）——时间全烧在模型请求反复超时上，Agent 根本没在
+      // 打磨。这个误诊有实际后果：它把"网关链路不稳"说成"打磨过头"，
+      // 修法于是指向"调大预算重跑"，而真正该做的是换一条模型链路。
+      //
+      // 所以现在先看真实上游原因再措辞：链路超时就说链路超时，限流就说限流，
+      // 确实有工具调用进展但没提交，才说"一直在打磨"。
+      const describeBudgetOutcome = () => {
+        const upstream = latestUpstreamFailure(run)
+        const toolSteps = (run?.localAgent?.session?.snapshotEvents?.() || [])
+          .filter((event) => event?.type === 'tool/call').length
+        if (upstream) {
+          const retryText = upstream.maxRetries
+            ? `，期间模型请求连续失败并重试了 ${upstream.retry}/${upstream.maxRetries} 次`
+            : ''
+          const linkText = upstream.provider ? `（走 ${upstream.provider} 链路）` : ''
+          return { upstream, text: `${budgetLabelText}超过 ${directorBudgetText}仍未提交${budgetLabel ? '结果' : '可渲染工程'}${linkText}：期间模型请求反复失败${retryText}，未拿到有效响应。最近一次失败原因：${upstream.message}` }
+        }
+        if (toolSteps > 0) {
+          return { upstream: null, text: `${budgetLabelText}超过 ${directorBudgetText}仍未提交${budgetLabel ? '结果' : '可渲染工程'}（Agent 一直在打磨但从未收敛，共调用工具 ${toolSteps} 次）` }
+        }
+        return { upstream: null, text: `${budgetLabelText}超过 ${directorBudgetText}仍未提交${budgetLabel ? '结果' : '可渲染工程'}（期间既没有工具调用进展，也没有可用的模型响应）` }
+      }
       const directorTimeoutMs = typeof timeBudget === 'function'
         ? timeBudget()
         : (structured ? 0 : directorTimeBudget())
@@ -363,11 +463,9 @@ function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinua
         // 超时触发的取消，无论子会话以 reject 还是非 completed 收尾，都要把
         // 「为什么停、下一步做什么」讲清楚，而不是让用户看到一句裸的取消错误。
         if (directorDeadlineHit) {
-          throw new Error(
-            `${budgetLabelText}超过 ${directorBudgetText}${budgetOutcomeText}。`
-            + '已停止本轮以止损：可直接重跑本任务，阶段产物已落盘，重跑不必从零开始；'
-            + `如确需更长时间，可设置环境变量 ${budgetEnvHintText}（毫秒，当前 ${directorTimeoutMs}）后重启。`,
-          )
+          throw new Error(describeBudgetOutcome().text
+            + '。已停止本轮以止损：可直接重跑本任务，阶段产物已落盘，重跑不必从零开始；'
+            + `如确需更长时间，可设置环境变量 ${budgetEnvHintText}（毫秒，当前 ${directorTimeoutMs}）后重启。`)
         }
         throw error
       } finally {
@@ -376,11 +474,9 @@ function createDshExecutor(ctx, subagents, label, structured, { maxTokenContinua
       // 超时后子会话也可能「正常收尾」（cancel 的 turn/end 可能先于 abort 传播），
       // 那时 result 存在但 stopReason 不是 completed——同样要给出超时语境。
       if (directorDeadlineHit) {
-        throw new Error(
-          `${budgetLabelText}超过 ${directorBudgetText}${budgetOutcomeText}。`
-          + '已停止本轮以止损：可直接重跑本任务，阶段产物已落盘，重跑不必从零开始；'
-          + `如确需更长时间，可设置环境变量 ${budgetEnvHintText}（毫秒，当前 ${directorTimeoutMs}）后重启。`,
-        )
+        throw new Error(describeBudgetOutcome().text
+          + '。已停止本轮以止损：可直接重跑本任务，阶段产物已落盘，重跑不必从零开始；'
+          + `如确需更长时间，可设置环境变量 ${budgetEnvHintText}（毫秒，当前 ${directorTimeoutMs}）后重启。`)
       }
       await traceTail
       if (continuationFailure) throw continuationFailure
@@ -575,6 +671,7 @@ export async function apply(ctx, config = {}) {
       // 在这类长任务上收敛不了。2026-11-02 改成跟随默认模型，理由见
       // creatorModel() 的说明（钉死会让 UI 选模型失效，也会屏蔽额度兜底重试）。
       model: creatorModel(),
+      modelProvider: creatorModelProvider(),
     }),
     videoReviewer: config.videoReviewer || createStructuredExecutor(ctx, ctx.subagents, 'spoken-video-video-reviewer', {
       // 跟随默认模型（agent-default-model），需要时用 LWB_SPOKEN_VIDEO_REVIEWER_MODEL 覆盖。

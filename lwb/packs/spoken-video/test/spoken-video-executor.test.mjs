@@ -54,6 +54,16 @@ function executorHarness(reasons) {
       return () => { sessionListener = null }
     },
   }
+  // 往事件流里塞一条 llm/retry：真实形状见
+  // vendor/deepseek-harness/packages/llm/llm-retry/src/types.ts
+  // （`failure` 就是 LlmFailure { message, code, status? }——上游为什么失败一直
+  // 都在这里，只是以前没人读）。
+  const emitRetry = (data) => {
+    log.push({ seq: log.length, time: Date.now(), type: 'llm/retry', data })
+  }
+  const emitToolCall = (name) => {
+    log.push({ seq: log.length, time: Date.now(), type: 'tool/call', data: { name } })
+  }
   const subagents = {
     async start(_label, { signal } = {}) {
       started += 1
@@ -70,7 +80,7 @@ function executorHarness(reasons) {
       }
     },
   }
-  return { ctx, subagents, followups, counts: () => ({ disposed, started }) }
+  return { ctx, subagents, followups, emitRetry, emitToolCall, counts: () => ({ disposed, started }) }
 }
 
 /**
@@ -231,13 +241,13 @@ test('pack cancellation between preflight and repair prevents another model turn
  * 预检失败后的修复轮次，不管单轮打磨时长。
  */
 test('director time budget defaults to 35 minutes, is overridable, and 0 disables it', () => {
-  assert.equal(directorTimeBudget({}), 35 * 60 * 1000)
+  assert.equal(directorTimeBudget({}), 50 * 60 * 1000)
   assert.equal(directorTimeBudget({ LWB_VIDEO_DIRECTOR_TIMEOUT_MS: '60000' }), 60000)
   // 0 与负数都表示不设限——留给确有特殊长片需求的场景
   assert.equal(directorTimeBudget({ LWB_VIDEO_DIRECTOR_TIMEOUT_MS: '0' }), 0)
   assert.equal(directorTimeBudget({ LWB_VIDEO_DIRECTOR_TIMEOUT_MS: '-1' }), 0)
   // 非法值回落到默认预算，而不是把 NaN 传给 setTimeout（那会立刻触发）
-  assert.equal(directorTimeBudget({ LWB_VIDEO_DIRECTOR_TIMEOUT_MS: 'abc' }), 35 * 60 * 1000)
+  assert.equal(directorTimeBudget({ LWB_VIDEO_DIRECTOR_TIMEOUT_MS: 'abc' }), 50 * 60 * 1000)
 })
 
 test('a creator that never finishes is stopped at the deadline with an actionable message', async () => {
@@ -255,6 +265,70 @@ test('a creator that never finishes is stopped at the deadline with an actionabl
     else process.env.LWB_VIDEO_DIRECTOR_TIMEOUT_MS = previous
   }
   // 超时必须真的取消了子会话并释放资源——否则打磨循环只是换了个地方继续烧
+  assert.equal(harness.counts().disposed, 1)
+})
+
+test('the deadline message names the real upstream cause instead of blaming polishing', async () => {
+  // 2026-11-05/06 实测踩到的坑：超时文案原来无条件写「Agent 一直在打磨但从未
+  // 跑预检」。但把那次会话的 DSH 事件流解开看，真相是 `llm/retry` 连着 7–8
+  // 次、每次上游都没响应（`pi-ai stream idle timeout after 300000ms`）——
+  // 时间全烧在模型请求反复超时上，Agent 根本没在打磨。
+  //
+  // 这个误诊有实际后果：修法指向「调大预算重跑」，而真正该做的是换一条模型
+  // 链路。用户按提示调预算，只会再烧 50 分钟。
+  //
+  // 所以这里注入真实的 llm/retry 事件，锁住三件事：
+  //   1. 文案必须说出上游的真实原因；
+  //   2. 必须点明重试次数（连着 5 次和偶发一次，处置完全不同）；
+  //   3. 绝不能再出现「Agent 一直在打磨」这个误诊措辞。
+  const harness = executorHarness(null)
+  // 模拟真实事件流：连续 3 次 llm/retry，failure 是上游流空闲超时。
+  harness.emitRetry({
+    failure: { message: 'pi-ai stream idle timeout after 300000ms', code: 'TIMEOUT' },
+    provider: 'fan', retry: 3, maxRetries: 5,
+  })
+  const previous = process.env.LWB_VIDEO_DIRECTOR_TIMEOUT_MS
+  process.env.LWB_VIDEO_DIRECTOR_TIMEOUT_MS = '50'
+  try {
+    const executor = createAgentExecutor(harness.ctx, harness.subagents, 'video-creator')
+    await assert.rejects(executor({ prompt: 'create', agent: { id: 'parent' } }), (error) => {
+      // 真实上游原因必须出现
+      assert.match(error.message, /pi-ai stream idle timeout after 300000ms/u)
+      // 链路名必须出现（用户要知道是哪条链路不稳）
+      assert.match(error.message, /fan/u)
+      // 重试次数必须出现
+      assert.match(error.message, /3\/5/u)
+      // 核心守卫：不能再误诊成「打磨」
+      assert.doesNotMatch(error.message, /一直在打磨/u)
+      return true
+    })
+  } finally {
+    if (previous === undefined) delete process.env.LWB_VIDEO_DIRECTOR_TIMEOUT_MS
+    else process.env.LWB_VIDEO_DIRECTOR_TIMEOUT_MS = previous
+  }
+  assert.equal(harness.counts().disposed, 1)
+})
+
+test('the deadline message falls back to polling only when no tool call ever happened', async () => {
+  // 反向守卫：确实有工具调用进展（Agent 在改文件、跑预检）但始终没提交时，
+  // 才可以说「一直在打磨」。这条分支必须保留，否则真实的长片打磨任务会被
+  // 误说成「模型请求失败」，把用户引到换模型上去（而他真正需要的是等更久）。
+  const harness = executorHarness(null)
+  harness.emitToolCall('write_file')
+  harness.emitToolCall('write_file')
+  const previous = process.env.LWB_VIDEO_DIRECTOR_TIMEOUT_MS
+  process.env.LWB_VIDEO_DIRECTOR_TIMEOUT_MS = '50'
+  try {
+    const executor = createAgentExecutor(harness.ctx, harness.subagents, 'video-creator')
+    await assert.rejects(executor({ prompt: 'create', agent: { id: 'parent' } }), (error) => {
+      assert.match(error.message, /一直在打磨/u)
+      assert.match(error.message, /调用工具 2 次/u)
+      return true
+    })
+  } finally {
+    if (previous === undefined) delete process.env.LWB_VIDEO_DIRECTOR_TIMEOUT_MS
+    else process.env.LWB_VIDEO_DIRECTOR_TIMEOUT_MS = previous
+  }
   assert.equal(harness.counts().disposed, 1)
 })
 
