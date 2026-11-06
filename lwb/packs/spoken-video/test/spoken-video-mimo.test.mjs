@@ -903,9 +903,13 @@ test('并发合成保序：完成顺序打乱，结果仍按输入索引排列',
   // 取出 mapWithConcurrency 的实现体，在测试里独立求值，避免依赖宿主类。
   const start = source.indexOf('async function mapWithConcurrency(')
   assert.ok(start > 0, 'mapWithConcurrency 必须存在')
-  const end = source.indexOf('\n}\n', start)
+  // 先统一换行符再切片：仓库里 core.autocrlf=true，任何一次 checkout/stash
+  // 都可能把文件变成 CRLF，按 '\n}\n' 找函数结尾会直接找不到（2026-11-06 实测：
+  // 换行符一变，函数体切出来是空的，测试报「不是一个完整函数」）。
+  const body = source.replace(/\r\n/g, '\n')
+  const end = body.indexOf('\n}\n', start)
   assert.ok(end > start, 'mapWithConcurrency 必须是一个完整函数')
-  const factory = new Function(`${source.slice(start, end + 3)}\nreturn mapWithConcurrency`)
+  const factory = new Function(`${body.slice(start, end + 3)}\nreturn mapWithConcurrency`)
   const mapWithConcurrency = factory()
 
   const items = ['a', 'b', 'c', 'd', 'e', 'f']
@@ -920,8 +924,9 @@ test('并发合成保序：完成顺序打乱，结果仍按输入索引排列',
 test('并发合成失败语义：任一分支抛错即整体失败，且不再启动后续条目', async () => {
   const source = readFileSync(new URL('../spoken-video-media-host.mjs', import.meta.url), 'utf8')
   const start = source.indexOf('async function mapWithConcurrency(')
-  const end = source.indexOf('\n}\n', start)
-  const factory = new Function(`${source.slice(start, end + 3)}\nreturn mapWithConcurrency`)
+  const body = source.replace(/\r\n/g, '\n')
+  const end = body.indexOf('\n}\n', start)
+  const factory = new Function(`${body.slice(start, end + 3)}\nreturn mapWithConcurrency`)
   const mapWithConcurrency = factory()
 
   const started = []
