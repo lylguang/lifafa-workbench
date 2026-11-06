@@ -35,6 +35,22 @@ function pathInside(root, target) {
 }
 
 /**
+ * Cross-pack mirror of spoken-video-publish-host.mjs's qcReleased().
+ *
+ * The spoken-video pack lets a reviewer manually release a cut that failed
+ * technical qc (qc.data.userOverride === true) and then builds its publish
+ * copy from it. This host is the last gate before a real upload; checking only
+ * qc.data.passed here silently rejected exactly those cuts at the one point
+ * where nobody is watching: an automated publish. Keep the field contract in
+ * sync with the spoken-video pack — qc.data.passed || qc.data.userOverride.
+ * Legacy records without the field behave as before.
+ */
+function qcReleased(detail) {
+  const qc = detail?.artifacts?.qc
+  return qc?.data?.passed === true || qc?.data?.userOverride === true
+}
+
+/**
  * Publish orchestrator.
  *
  * It owns three things the browser and adapters must not: the gate that decides
@@ -316,9 +332,10 @@ export class PublisherHost {
     const projectId = String(input.projectId || '').trim()
     const detail = await projects.get(context, { projectId })
 
-    // The same gate the publish module enforces, restated here because this
-    // pack can also be triggered by automation, where nobody is watching.
-    if (detail.artifacts?.qc?.data?.passed !== true) fail('PUBLISHER_STAGE_BLOCKED', '只有质检通过的成片才能发布。')
+    // Same gate as the spoken-video publish module (see qcReleased above).
+    // This pack can also be triggered by automation, where nobody is watching,
+    // so a manually released cut must not be rejected at this last gate.
+    if (!qcReleased(detail)) fail('PUBLISHER_STAGE_BLOCKED', '只有质检通过或已人工放行的成片才能发布。')
     const content = detail.artifacts?.packaging?.data?.content
     if (!content) fail('PUBLISHER_STAGE_BLOCKED', '请先在「发布」页生成发布信息（标题、文案、标签、封面）。')
 

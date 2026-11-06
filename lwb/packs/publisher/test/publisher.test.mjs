@@ -310,6 +310,36 @@ test('the qc gate and the packaging gate both block a publish', async () => {
   })
 })
 
+test('a manually released cut crosses the publisher qc gate like it does in the publish module', async () => {
+  const projectId = '11111111-2222-3333-4444-555555555555'
+  const startWith = (qcData) => async (store) => {
+    const account = await store.createAccount({ platform: 'douyin', label: 'A' })
+    await store.patchAccountState(account.id, { status: 'active' })
+    const host = new PublisherHost({
+      store, browser: stubBrowser(), workspacePath: store.workspacePath,
+      spokenVideo: {
+        projects: { async get() { return { revision: 1, title: 't', artifacts: { qc: { data: qcData } } } } },
+        publish: { async listItems() { return { items: [] } } },
+        context: async () => ({ workspacePath: store.workspacePath }),
+      },
+    })
+    return host.startPublish({ accountId: account.id, projectId })
+  }
+  // qc failed, no manual release → still stopped at the qc gate.
+  await withStore(async (store) => {
+    await assert.rejects(startWith({ passed: false })(store), /质检通过/u)
+  })
+  // qc failed but a reviewer released it → must reach the NEXT gate (publish copy),
+  // not be rejected here. This is the cross-pack seam that used to drop these cuts.
+  await withStore(async (store) => {
+    await assert.rejects(startWith({ passed: false, userOverride: true })(store), /生成发布信息/u)
+  })
+  // Legacy records have no userOverride field; behaviour must not change.
+  await withStore(async (store) => {
+    await assert.rejects(startWith({ passed: false, note: 'legacy record' })(store), /质检通过/u)
+  })
+})
+
 test('auto submit requires an explicit second confirmation', async () => {
   const projectId = '11111111-2222-3333-4444-555555555555'
   await withStore(async (store) => {
