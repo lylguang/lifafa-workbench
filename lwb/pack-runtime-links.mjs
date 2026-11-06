@@ -8,6 +8,7 @@ const DSH_DIR = join(ROOT_DIR, 'vendor', 'deepseek-harness')
 const PROFILE_HOME = resolve(process.env.LWB_DSH_HOME || join(ROOT_DIR, 'lwb', 'local', 'dsh-home'))
 const PROFILE_NODE_MODULES = join(PROFILE_HOME, 'profiles', 'lwb', 'node_modules')
 const PACK_SDK_DIR = join(ROOT_DIR, 'lwb', 'pack-sdk')
+const PACK_BUNDLE_DIR = join(ROOT_DIR, 'lwb', 'dsh-bundle')
 const PACK_RUNTIME_PEERS = new Map([
   ['@deepseek-ai/cordis', join(DSH_DIR, 'vendor', 'cordis')],
   ['@deepseek-ai/dsh-typert-protocol', join(DSH_DIR, 'packages', 'typert', 'protocol')],
@@ -18,6 +19,7 @@ const PACK_RUNTIME_PEERS = new Map([
   ['@deepseek-ai/dsh-storage-domain', join(DSH_DIR, 'packages', 'storage', 'storage-domain')],
   ['@deepseek-ai/schemastery', join(DSH_DIR, 'vendor', 'schemastery')],
   ['@scitiger-ai/lwb-pack-sdk', PACK_SDK_DIR],
+  ['@scitiger-ai/lwb-dsh-bundle', PACK_BUNDLE_DIR],
 ])
 
 function packagePath(nodeModules, packageName) {

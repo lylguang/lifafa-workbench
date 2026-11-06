@@ -8,6 +8,7 @@
   "exports": {
     ".": "./index.mjs",
     "./client": "./client.js",
+    "./pack-workspaces.mjs": "./pack-workspaces.mjs",
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },

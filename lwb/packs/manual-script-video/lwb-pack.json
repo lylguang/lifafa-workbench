@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "id": "manual-script-video",
+  "packageName": "@scitiger-ai/lwb-manual-script-video",
+  "name": "手动稿件成片",
+  "version": "0.1.0",
+  "description": "把你写好的稿件直接做成成片：手动录入，可选 AI 润色，然后配音、字幕、做视频并整理发布资料。",
+  "market": {
+    "category": "内容创作",
+    "tags": [
+      "手动稿件",
+      "AI 润色",
+      "智能配音",
+      "视频制作",
+      "发布资料"
+    ],
+    "workflow": [
+      "录入稿件",
+      "AI 润色",
+      "配音与字幕",
+      "视频制作",
+      "发布资料"
+    ],
+    "icon": "稿",
+    "introduction": "稿子已经在手里了？从这里开始。粘贴你的口播稿，AI 可以只改表达不改内容地润色一遍，然后一路走到配音、字幕、成片和发布资料。没有热点采集和选题，你只管写。",
+    "workflowHint": "写稿页录入 → 润色 → 确认 → 配音字幕 → 视频预览 → 发布资料。",
+    "gettingStarted": [
+      "AI 润色使用「系统设置 → 模型」中的默认模型，请先完成模型配置。",
+      "配音、字幕需配置媒体服务；媒体密钥与「口播视频内容创作」共用同一份，填一次即可。",
+      "润色只在表达层面动稿：不新增事实、不改观点，篇幅与原稿相当。",
+      "稿件与成片保存在本能力包的专属工作区，卸载能力包会保留工作区和数据。",
+      "发布模块生成标题、文案、标签和封面等资料；需要直接投递到平台时，另行加载「发布与账号管理」能力包。"
+    ],
+    "features": [
+      {
+        "menuId": "scripts",
+        "title": "写稿",
+        "description": "手动录入稿件，可让 AI 只润色表达。",
+        "icon": "write"
+      },
+      {
+        "menuId": "audio-captions",
+        "title": "配音与字幕",
+        "description": "生成配音、识别语音并制作字幕。",
+        "icon": "audio"
+      },
+      {
+        "menuId": "video-preview",
+        "title": "视频制作",
+        "description": "生成画面、合成视频并预览检查。",
+        "icon": "video"
+      },
+      {
+        "menuId": "publish",
+        "title": "发布资料",
+        "description": "整理标题、文案、标签与封面。",
+        "icon": "publish"
+      }
+    ]
+  },
+  "menus": [
+    {
+      "id": "scripts",
+      "label": "写稿",
+      "glyph": "稿",
+      "tone": "violet"
+    },
+    {
+      "id": "audio-captions",
+      "label": "配音 / 字幕",
+      "glyph": "声",
+      "tone": "pink"
+    },
+    {
+      "id": "video-preview",
+      "label": "视频 / 预览",
+      "glyph": "视",
+      "tone": "green"
+    },
+    {
+      "id": "publish",
+      "label": "发布",
+      "glyph": "发",
+      "tone": "red"
+    }
+  ]
+}
