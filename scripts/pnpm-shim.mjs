@@ -14,8 +14,9 @@
  * 权限，还会改用户机器环境。这里改成在临时目录造一个 pnpm 垫片，只对这个
  * 子进程的 PATH 生效。
  */
+import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 /** corepack 的 JS 入口：Windows 上直接 spawn `corepack.cmd` 拿不到退出码。 */
@@ -64,5 +65,38 @@ export function pnpmShimEnv(env = process.env) {
   // Git Bash 用的同名脚本：sh 按 UTF-8 读，路径可以直接写。
   writeFileSync(join(shimDir, 'pnpm'), `#!/bin/sh\nexec node "${join(shimDir, 'pnpm.js').replace(/\\/g, '/')}" "$@"\n`, 'utf8')
   const pathKey = Object.keys(env).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH'
-  return { ...env, [pathKey]: `${shimDir};${env[pathKey] ?? ''}` }
+  // 用 path.delimiter 而不是硬编码 ';'：非 Windows 上分隔符是 ':'，
+  // 硬编码会把整条 PATH 变成一个坏掉的目录名。
+  return { ...env, [pathKey]: `${shimDir}${delimiter}${env[pathKey] ?? ''}` }
+}
+
+/**
+ * 用 corepack 跑一条 pnpm 命令，PATH 里带上 pnpm 垫片。
+ *
+ * install 与 build 必须走同一个入口，否则「首次安装的机器能跑、第二次不能跑」
+ * 这类差异会以极难复现的形式出现。三件必须一起做的事：
+ *   1. `corepackEntry()` 给出 corepack.js 的绝对路径、用 node 跑它
+ *      ——Windows 上 corepack 是 corepack.cmd，`shell:false` spawn 拿不到退出码；
+ *   2. `pnpmShimEnv()` 让嵌套 spawn（上游 build:lib 会再 spawn 一次 pnpm）
+ *      找得到 pnpm；
+ *   3. `CI=true` 让 pnpm 敢在无 TTY 下清空 node_modules（上游 build:lib 会重装）。
+ *
+ * @param cwd - pnpm 的工作目录。
+ * @param args - pnpm 参数，例如 `['run', 'build']`。
+ * @param label - 日志前缀。
+ * @returns the child's exit code.
+ */
+export function runPnpm(cwd, args, label = 'pnpm') {
+  const corepack = corepackEntry()
+  return new Promise((resolveRun, reject) => {
+    console.log(`=== [${label}] pnpm ${args.join(' ')}`)
+    const child = spawn(corepack.command, [...corepack.prefix, 'pnpm', ...args], {
+      cwd,
+      stdio: 'inherit',
+      shell: false,
+      env: { ...pnpmShimEnv(process.env), CI: 'true' },
+    })
+    child.once('error', reject)
+    child.once('exit', code => resolveRun(code ?? 1))
+  })
 }

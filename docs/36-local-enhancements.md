@@ -155,12 +155,19 @@
 
 ## 十一、升级边界
 
-`vendor/deepseek-harness` 保持锁定在 `dsh-v0.1.6-alpha.1` 且**无源码改动**，所有增强都在 `lwb/` 内，符合上游的升级约定。
+`vendor/deepseek-harness` 保持锁定在 `dsh-v0.1.6-alpha.2` 且**无源码改动**，所有增强都在 `lwb/` 内，符合上游的升级约定。
 
-如后续需要跟进 DSH 内核升级（上游已到 `dsh-v0.2.0-rc.2`，相差 3298 个提交），有两处已确认的阻塞点：
+如后续需要跟进 DSH 内核升级（上游已到 `dsh-v0.2.0-rc.2`），下面三处是**在 rc.2 上才出现的阻塞点**——在当前 alpha.2 基座上它们**都还不存在**，现在改代码属于无用功；等真正要升到 rc.2 时再按本文处理即可。三条均已在 rc.2 的 git 树上用只读查询（`git ls-tree` / `git show`）核实过，rc.2 对应的 tag commit 为 `639ed015397290b3745d163aafe02ffee4aa3f84`。
 
-1. **`packages/settings/settings-file` 被删除**——替换为 `dsh-settings` + `dsh-config-editor`，且 `settings.yaml` 的热加载能力不再存在。本仓库 `lwb/dsh-bundle/index.mjs` 使用了它的 `installSection` API（注册的 `lwb-workbench` 段目前只是占位，实际业务影响有限，但需改写）。
-2. **Session 日志格式 v3 → v4**——上游提供读取迁移，旧文件仍可加载，但内容结构有变化。
+距 rc.2 的提交数：**从 alpha.2 起 2411 个**（从 alpha.1 起则是 3298 个）。这个数要用**完整克隆**量——本仓库的 `vendor/deepseek-harness` 是 shallow clone（`.git/shallow` 里只有 alpha.1 和 alpha.2 两个边界），在它里面跑 `git rev-list --count` 会因为历史被截断而得到偏大的假值（本次实测在 shallow 克隆里得到 20467，在完整克隆里才得到 2411）。**不要直接引用 vendor 目录里的 rev-list 结果。**
+
+1. **`packages/settings/settings-file` 被删除**——rc.2 的 `packages/settings/` 下只剩 `settings`（`@deepseek-ai/dsh-settings`），`settings-file`（`@deepseek-ai/dsh-settings-file`）已不存在；配置持久化改由新增的 `packages/boot/config-editor`（`@deepseek-ai/dsh-config-editor`）负责，通过 profile patch 落盘。
+   对本仓库的影响：alpha.2 上 `packages/extensions/tool-cordis/src/api-catalog.ts:2250` 记录的 `settingsCtx.settings.installSection(...)` API 在 rc.2 上**已经没有了**——rc.2 同一文件里 `settings` 服务的方法变成 `configure` / `prepareDocument` / `describe` / `update` / `replace` / `mutate`。本仓库 `lwb/dsh-bundle/index.mjs:77` 用的正是 `ctx.settings.installSection(...)`，升到 rc.2 必须改写（注册的 `lwb-workbench` 段目前只是占位，实际业务影响有限）。alpha.2 的 `settings-file` 还带 `watch` 热加载（chokidar），rc.2 改为 Loader 的 `app-boot/config-reload` 事件驱动，没有了文件级热加载。
+
+2. **Session 日志格式 v3 → v4**——alpha.2 的 `packages/core/session/src/types.ts` 里 `SESSION_FORMAT_VERSION = 3`，rc.2 改成 `= 4`；rc.2 新增了迁移包 `packages/session/session-format-v3-to-v4`（alpha.2 只有 `v0-to-v1` / `v1-to-v2` / `v2-to-v3`）。日志文件名随之从 `session.v3.jsonl` 变成 `session.v4.jsonl`（`packages/session/session-format/src/filename.ts` 的 `sessionFormatLogFilename()` 按版本号拼 `.vN`），本机 `lwb/local/dsh-home/sessions/` 下现有的 `session.v3.jsonl.zstd` 在 rc.2 上属于上一代格式。上游提供读取迁移，旧文件仍可加载，但内容结构有变化。
+
+3. **`settings.yaml` 会被改名，首次拷贝逻辑每次启动都重复执行**——rc.2 的 `packages/settings/settings/src/index.ts` 的 `importLegacyDocument()` 在 Loader 加载完所有 entry 后，把 harness home 里的 `settings.yaml` **先改名为 `settings.yaml.imported`**（首次写入之前），再把各 section 导入对应 entry。
+   对本仓库的影响：`lwb/dsh-launcher.mjs:183-187` 把 `lwb/profile/settings.yaml` 拷到 `lwb/local/dsh-home/settings.yaml`，用的是「目标不存在才写」（`flag: 'wx'`）的逻辑。rc.2 一旦把这个文件改名为 `settings.yaml.imported`，目标就又「不存在」了，于是**每次启动都会重新拷贝一遍**，把 rc.2 已经导入并落盘到 profile patch 的设置覆盖回旧格式。升到 rc.2 时必须改掉这段首次拷贝逻辑（rc.2 上 harness home 的位置取自 `profile.home`，即 `resolveDshHome()`，与本仓库设置的 `DSH_HOME` 一致，指向的正是这个文件）。
 
 另有一处行为收紧需注意：Windows ACL 沙箱中，以前静默跳过的 Modify-only 目录授权现在会显式失败。
 
@@ -255,3 +262,41 @@ Error: Visited "http://localhost:3000/index.html" but got no response.
 **事后核实**：这条失控任务在重启前 10 分钟其实已经收敛——导演 61 分钟 → 渲染 371 秒成片 → 技术质检 `passed=True` → 独立审片 62 分指出**两处真实的事实性画面错误**（帕累托图把"更便宜"画成"更贵"、API 版本号缺失与稿件"同步切换"矛盾），正在修复轮被打断。即链路本身健康，缺的只是止损机制：35 分钟预算会在它烧掉 40 分钟无谓 token 之前拦住它。
 
 **经验**：Agent "还在动"不等于"在收敛"。对开放式创作任务，时间预算和修复轮次一样是必需的护栏——前者拦"永远差一点"，后者拦"总是差一点"。
+
+## 十三、搜索根、预检警告与零音效：三处根治（2026-11-09）
+
+夜间验收暴露的是三条各自独立的漏检链：模型用 `glob` 找不到任务工程里的音效文件；宿主把预检的结构化警告丢在报告之外；长片一个音效都不铺却仍能通过所有质量门。三者都不改 `vendor/deepseek-harness` 源码，只在 LWB 宿主与能力包边界根治。
+
+### 13.1 搜索工具按搜索根解析 glob
+
+**现象**：创作 Agent 用 `glob(pattern="public/sfx/*.wav", path="data/projects/p1/media/video-agent/r1")` 搜索任务工程，返回空列表，哪怕 `public/sfx/` 下确有 10 枚音效。模型于是误判音效包没生成，后续预检里的 `sfx-missing` 也失去可核对的文件清单。
+
+**根因**：上游 `tool-fs-search` 把模型给出的 `pattern` / `grep.include` 直接拼进 `--glob=`，却始终以会话 cwd 为 `rg` 的工作目录，把 `path` 放在 `--` 后面作为搜索根。ripgrep 的 glob 对 cwd 解析，不随显式搜索根重置：`public/sfx/*.wav` 在 cwd 下要求顶层 `public/`，而真实文件位于 `data/projects/p1/media/video-agent/r1/public/sfx/`。这是工具语义不一致，不是模型写错路径，也不是音效没生成。
+
+**修复**（`lwb/dsh-bundle/root-aware-search-tools.mjs`）：宿主在 `subprocess.spawn` 边界只识别上游 `glob` / `grep` 生成的 ripgrep argv，保留原始正向 `--glob`，再增加一条以显式搜索根为前缀的正向 `--glob`（root 在 cwd 内用 cwd 相对前缀，root 在 cwd 外用 `**/`；无斜杠、`**/` 开头、绝对 glob 及无 `path` 的搜索不改）。ripgrep 的多条正向 glob 是 OR 关系，因此旧的 cwd 相对写法继续命中，新的搜索根相对写法也能命中。负向排除、VCS 排除、`-- <path>`、返回路径、结果上限、超时、展示与溢写全部沿用上游。补丁作用于 Cordis 底层服务实例，按引用计数只安装一层，宿主卸载时恢复原方法；其他子进程调用不受影响。`glob.pattern` 和 `grep.include` 同时修复，且不改模型可见的 schema 或提示词。
+
+**验证**：纯函数覆盖斜杠、通配、Windows 分隔符、相对/绝对/越界搜索根、重复前缀与无路径；argv 单测覆盖原始 glob 保留、排除项不变、`-- <path>` 仍在末尾、非搜索 spawn 不改、重复安装与卸载恢复；用打包的 `rg.exe` 在临时工程里验证修复前 0 命中、修复后全部命中，并覆盖相对与绝对 `path`。测试纳入 `npm run check` 与 `npm run unit:test`。
+
+### 13.2 宿主保留预检警告
+
+**现象**：预检报出 `scene-table-unused`、`subtitle-audio-suspicion`、`sfx-missing` 等结构化线索，技术质检报告与工作台问题列表却看不到；用户只能看到通过/失败，无法解释成片听感和画面细节的偏差。
+
+**根因**：预检警告是 `{code, file, line, column, message}` 对象，技术质检报告与落库校验器只接受字符串；宿主此前只保留 `failures`，`warnings` 在阶段数据与产物汇总两头被丢弃或格式不兼容，甚至有过「一条警告让 store 拒收整份产物」的路径。
+
+**修复**（`spoken-video-media-host.mjs`、`spoken-video-store.mjs`）：宿主在初导预检、续跑复查、审片修复复查三处都把 `warnings` 写进阶段数据；技术质检报告把结构化警告统一摊平成 `[code] file:line message`，与本地质检、画面变化记录项合并。store 同时接受字符串和结构化警告，保留 code 与定位，最多 40 条，超限时明确报错而不是悄悄让整轮任务失败。客户端也把 `issues` 与 `warnings` 都列出，不再因空数组是真值而遮住警告。
+
+**验证**：单测覆盖结构化/字符串两种警告形态、code 与位置保留、条数上限、警告不变成否决项（只有 `issues` 决定拦截）、预检警告随 `technical-qc.json` 和 `pipeline` 产物进入 UI；此前 33/33 预检用例与全量单测作为回归基线。
+
+### 13.3 全片零音效做成硬拦截
+
+**现象**：一条 278 秒成片没有任何音效，预检报 `sfx-absent`，技术质检 `passed=true`，独立审片 82 分通过，三道门全部放行；用户拿到听感发干的成片，却看不到明确原因。
+
+**根因**：`inspectSfxUsage()` 把所有音效异常都放进 `warnings`，预检 `passed` 只看 `findings`。警告即使被保留也只是记录项，不触发修复轮，更不会阻止渲染。引用错名、密度偏高确实是风格/可顺手修的问题，但长片零音效是作品缺项，不该与它们同级。
+
+**修复**（`spoken-video-preflight.mjs`）：90 秒及以上、音效引用数为 0、且 `public/sfx/` 确有可用 wav 时，`sfx-absent` 从 `warnings` 升级为 `findings`，令预检 `passed=false` 并进入既有修复轮（最多 2 次），修复不了就判死；错误信息直接给出可用文件名和 `staticFile("sfx/<文件名>.wav")` 写法。短片、时长未知、音效包为空或目录读不出时仍只警告，避免让 ffmpeg 缺失这类宿主问题把整轮白跑成死循环。`sfx-missing`、`sfx-density` 继续是非阻断警告。
+
+**验证**：单测分别钉住长片零音效阻断、短片不报、音效包缺失/不可读不判死、合法引用无告警、错名与密度仍为警告；宿主阶段数据和技术质检报告保留这些线索，三道门不再同时放过同一条缺陷。
+
+### 13.4 边界
+
+这三项都是 LWB 宿主/能力包层的增量修复：**不修改 `vendor/deepseek-harness` 源码，不改模型参数、默认模型或上游工具 schema**。搜索补丁只作用于带 `--no-config` 且由打包 ripgrep 发起的工具 argv；其他 shell、LSP、SSH、Remotion 子进程原样通过。重启或卸载宿主后不残留全局状态。

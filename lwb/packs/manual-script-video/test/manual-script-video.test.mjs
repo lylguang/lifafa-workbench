@@ -232,6 +232,17 @@ test('视频任务进度：AI 导演环节的细进度取自 DSH 会话事件，
   assert.ok(client.includes('`AI 导演：${director.label}`'), '导演有实时动作时提示行必须显示它正在做什么')
 })
 
+test('AI 导演细进度与口播包同一把尺，事件心跳初值不能吞掉事件', async () => {
+  const manual = (await readFile(join(PACK_DIR, 'client.js'), 'utf8')).replace(/\r\n/g, '\n')
+  const spoken = (await readFile(join(PACK_DIR, '..', 'spoken-video', 'client.js'), 'utf8')).replace(/\r\n/g, '\n')
+  const cut = (source) => source.slice(source.indexOf('function videoTaskProgress('), source.indexOf('function videoTaskDurationSeconds('))
+  assert.ok(cut(manual).length > 1000, '进度计算必须仍可抽取')
+  assert.equal(cut(manual), cut(spoken), '两个包的视频任务进度计算必须逐字一致')
+  // reduce 的初值不能用 NaN：at > NaN 恒为 false，会让整条 DSH 事件心跳失效，
+  // 导演/审片阶段的「最后一次后台动作」又退回成只有渲染阶段才有。
+  assert.ok(manual.includes('}, -Infinity);'), '事件心跳的 reduce 初值必须是 -Infinity')
+})
+
 test('执行器的子会话落在声明的包工作区：packId 决定 withAgent 归属', async () => {
   // 2026-11-04 事故：手动稿包的导演子会话被关进口播包工作区（共享执行器
   // 工厂默认 forPack(口播包 id)），沙箱拒写任务目录（EPERM），导演白干 35 分钟。
@@ -273,4 +284,23 @@ test('媒体凭据与口播包共用同一份命名空间', () => {
   assert.equal(sharedCredentialRef('DASHSCOPE_API_KEY'), sharedCredentialRef('dashscope-api-key'))
   assert.match(sharedCredentialRef('XIAOMIMIMO_API_KEY'), /^LWB_PACK_12_SPOKEN_VIDEO_18_XIAOMIMIMO_API_KEY$/u)
   assert.throws(() => sharedCredentialRef(''), /凭据引用无效/u)
+})
+
+test('followExecution keeps the strict codec contract and guards the payload before dispatch', async () => {
+  const client = await readFile(join(PACK_DIR, 'client.js'), 'utf8')
+
+  // DSH alpha.2 起 Typert strict codec 的契约是 `create: () => TypertSchema`：
+  // registry 的 validateCodec() 与 loader 的 requireStrictCodec() 都会拒绝
+  // 只带 `schema` 的 strict codec，client entry 直接 failed（web boot: N entries did not activate）。
+  assert.match(client, /codec: \{ mode: 'strict', typeSymbol: '@scitiger-ai\/lwb-manual-script-video#ExecutionRequest', create: \(\) => executionRequestSchema\(\) \}/u)
+  assert.doesNotMatch(client, /codec: \{ mode: 'strict', typeSymbol: '@scitiger-ai\/lwb-manual-script-video#ExecutionRequest', schema:/u)
+
+  // alpha.2 的 Gateway client 面删掉了 parseInput()，浏览器侧不再有上游替我们校验入参。
+  // 因此调用点必须自己跑同一份 schema，保持「入参非法时调用前就失败」的业务行为。
+  assert.match(client, /executionRequestSchema\(\)\.parse\(sessionRequest\);/u)
+  assert.match(client, /executionRemote\.followExecution\(sessionRequest, signal\)/u)
+
+  // schema 工厂必须惰性物化并缓存：create() 契约要的是工厂，重复物化会得到不同对象。
+  assert.match(client, /let executionRequestSchemaValue = null/u)
+  assert.match(client, /if \(executionRequestSchemaValue === null\)/u)
 })

@@ -9,6 +9,7 @@ import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { LwbPackWorkspaces } from './pack-workspaces.mjs'
 import { LwbPackServices } from './pack-services.mjs'
+import { installRootAwareSearchTools } from './root-aware-search-tools.mjs'
 
 import z from '@deepseek-ai/schemastery'
 import LwbArchiveGateway from './archive-gateway.mjs'
@@ -87,4 +88,8 @@ export async function apply(ctx, config = {}) {
   // Start restoration on that transition, after the baseline pack dependencies
   // are available, and let the gateway await the resulting task.
   restoreEnabledPacks(ctx, packRuntime)
+  // DSH builds root-relative glob filters while spawning ripgrep from the
+  // session cwd; add the search-root fallback once the subprocess service is
+  // available. The injected fiber owns its cleanup.
+  installRootAwareSearchTools(ctx)
 }

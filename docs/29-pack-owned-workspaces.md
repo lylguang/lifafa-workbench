@@ -73,7 +73,7 @@ Host 声明 `lwbPackServices` 依赖，通过 `getLwbPackScope(ctx, manifest)` �
 
 ## 历史验证与集成记录
 
-以下是功能实现时的验收记录；其中的测试数量和一次性测试夹具不作为当前操作要求。专属工作区功能在独立 worktree 中开发，使用独立 vendor/依赖、DSH Home，之后合入 main。验收所用 vendor 精确版本为 `0a15e36e7f82b6ed45af6fa9759f29b40dcd965d`（0.1.6-alpha.1）。
+以下是功能实现时的验收记录；其中的测试数量和一次性测试夹具不作为当前操作要求。专属工作区功能在独立 worktree 中开发，使用独立 vendor/依赖、DSH Home，之后合入 main。验收所用 vendor 精确版本为 `0a15e36e7f82b6ed45af6fa9759f29b40dcd965d`（0.1.6-alpha.1）。基座此后已升级到 `dsh-v0.1.6-alpha.2`，本次升级的破坏性变更与验收证据见[DSH 0.1.6-alpha.2 升级记录](37-dsh-016-alpha2-upgrade.md)。
 
 回归入口：`npm test`。覆盖归属恢复、包隔离、业务凭据命名、无 Agent 数据 RPC、DSH 默认模型继承与更新、后台尾部写入、停止超时、Loader 释放及清空/解除注册分离。模型回归明确要求：未配置包级模型/凭据仍能创建内部 Agent，旧包级路由不影响 DSH 默认选择，原生认证错误完整传递。
 

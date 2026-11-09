@@ -501,7 +501,9 @@ window.__ModuleLoader__.load({
       if (page !== 'conversation') persist(productState);
     }
     function showConversation(sessionId) {
-      if (sessionId) services?.sessions?.open?.(sessionId);
+      // DSH v0.1.6-alpha.2 取消了 ISessions.open()，导航归视图所有者：
+      // 必须走 uiWorkspace.openSession 才会真正切换 DSH 会话视图。
+      if (sessionId) services?.uiWorkspace?.openSession?.(sessionId);
       updateProduct({ page: 'conversation', capabilityPage: null, mobileNavOpen: false, conversationPanelOpen: false }, false);
     }
     async function refreshRuntime() {
@@ -828,9 +830,11 @@ window.__ModuleLoader__.load({
       const isOrdinary = (id, item) => !!internal && !!item
         && !internal.sessionIds.includes(id) && !internal.workspacePaths.includes(item.cwd)
         && item.origin !== 'subagent';
-      const sessions = useObservable(services?.sessions?.list, { ids: [], byId: {}, current: undefined, phase: 'pending' });
+      // alpha.2 的 SessionListState 不再有 current/currentAddress；
+      // 当前会话要以 mainView 保留计数为准（与上游 tree.ts 的 mainSessionId 一致）。
+      const sessions = useObservable(services?.sessions?.list, { ids: [], byId: {}, phase: 'pending' });
       const workspaces = useObservable(services?.workspaces?.list, { items: [], archivedSessionIds: [] });
-      // DSH v0.1.2 exposes Workspace readiness as a stream phase.  Do not
+      // DSH exposes Workspace readiness as a stream phase.  Do not
       // gate these controls on the retired `baselinesReady` field: it is not
       // part of WorkspaceSnapshot and would leave every creation action
       // permanently disabled after the baseline has arrived.
@@ -854,11 +858,14 @@ window.__ModuleLoader__.load({
       }, []);
 
       const archivedSessionIdSet = new Set(workspaces.archivedSessionIds || []);
+      // 当前会话 = 以 mainView 保留的那一代会话；被 mainView 保留的空白会话才可见。
+      const currentSessionId = Object.values(sessions.byId || {})
+        .find((item) => (item?.retainedBy?.mainView ?? 0) > 0)?.id;
       const visibleSessionIds = (sessions.ids || []).filter((id) => {
         const item = sessions.byId[id];
         return isOrdinary(id, item) && !archivedSessionIdSet.has(id)
           && item.origin !== 'subagent'
-          && (!item.blank || sessions.current === id);
+          && (!item.blank || currentSessionId === id);
       });
       const visibleSessionIdSet = new Set(visibleSessionIds);
       const visibleWorkspaceIds = new Set();
@@ -886,9 +893,9 @@ window.__ModuleLoader__.load({
       const searchSessionIds = normalizedQuery
         ? visibleSessionIds.filter((id) => String(sessions.byId[id]?.displayTitle || id).toLowerCase().includes(normalizedQuery))
         : [];
-      const currentWorkspaceId = sessions.current === undefined
+      const currentWorkspaceId = currentSessionId === undefined
         ? undefined
-        : workspaceGroups.find((workspace) => workspace.sessionIds.includes(sessions.current))?.workspaceId;
+        : workspaceGroups.find((workspace) => workspace.sessionIds.includes(currentSessionId))?.workspaceId;
       React.useEffect(() => {
         if (!currentWorkspaceId) return;
         setExpandedWorkspaceIds((current) => current.includes(currentWorkspaceId) ? current : [...current, currentWorkspaceId]);
@@ -935,9 +942,19 @@ window.__ModuleLoader__.load({
             if (typeof services?.workspaces?.delete !== 'function') throw new Error('当前 DSH 运行时不支持删除工作区');
             await services.workspaces.delete(dialog.workspaceId);
           } else if (dialog.kind === 'rename-session') {
-            const session = services?.sessions?.binding?.(dialog.sessionId)?.session;
-            if (!session) throw new Error('未找到此会话');
-            const result = await session.rename(title);
+            // alpha.2 的 binding() 只返回已保留的一代会话，重命名必须先用
+            // sessions.using 取得引用（与上游 ui-workspace 的 renameSession 一致）。
+            if (typeof services?.sessions?.using !== 'function') throw new Error('当前 DSH 运行时不支持重命名会话');
+            let result;
+            try {
+              result = await services.sessions.using(
+                dialog.sessionId,
+                { source: 'workspaceOperation' },
+                (reference) => reference.binding.session.rename(title),
+              );
+            } catch (error) {
+              throw new Error(error?.message || '未找到此会话');
+            }
             if (!result?.ok) throw new Error(result?.error?.message || '无法重命名对话');
           } else if (dialog.kind === 'archive-session') {
             if (typeof services?.workspaces?.archiveSession !== 'function') throw new Error('当前 DSH 运行时不支持归档会话');
@@ -953,10 +970,17 @@ window.__ModuleLoader__.load({
       };
       const forkSession = async (sessionId) => {
         try {
+          // alpha.2 里分叉并选中子会话是视图所有者的动作：
+          // 优先走 uiWorkspace.forkSession，缺失时才退回 sessions.fork 并自行打开子会话。
+          if (typeof services?.uiWorkspace?.forkSession === 'function') {
+            await services.uiWorkspace.forkSession(sessionId);
+            showConversation();
+            return;
+          }
           if (typeof services?.sessions?.fork !== 'function') throw new Error('当前 DSH 运行时不支持分叉会话');
           const childSessionId = await services.sessions.fork({ sessionId, increaseTitle: true });
           if (!childSessionId) throw new Error('DSH 未返回分叉会话');
-          services.sessions.open?.(childSessionId);
+          services?.uiWorkspace?.openSession?.(childSessionId);
           showConversation();
         } catch (error) {
           window.alert(error?.message || '无法分叉会话');
@@ -1024,7 +1048,7 @@ window.__ModuleLoader__.load({
         return h('div', { key: id, className: 'lwb-session-item' },
           h('button', {
             type: 'button', className: 'lwb-session-row', title,
-            'data-active': sessions.current === id ? 'true' : 'false',
+            'data-active': currentSessionId === id ? 'true' : 'false',
             'data-running': item.running ? 'true' : 'false',
             onClick: () => showConversation(id),
           }, h('i', { className: 'lwb-session-dot' }), h('span', { className: 'lwb-session-copy' }, h('span', { className: 'lwb-session-title' }, title), workspaceTitle && h('small', { className: 'lwb-session-workspace' }, workspaceTitle))),

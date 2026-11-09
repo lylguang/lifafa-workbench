@@ -306,6 +306,30 @@ function messages(value, label, maximum) {
   return value.map((item, index) => text(item, `${label}[${index}]`, 400))
 }
 
+/**
+ * 把预检警告摊平成字符串行。
+ *
+ * 预检报告里的 warnings 是结构化对象 {code, file, line, column, message}，
+ * 而落库校验只收字符串（messages 会逐项走 text()）。此前宿主直接把这些对象
+ * 塞进产物，落库那一步抛「必须是文本」，整条视频任务被判失败——警告留住
+ * 的路被自己堵死了。这里把对象摊成 "[code] file:line message" 的纯文本，
+ * 字符串原样保留，两种形态都能进产物与 UI。
+ */
+function preflightWarningLines(value, label, maximum) {
+  if (value === undefined || value === null) return []
+  if (!Array.isArray(value) || value.length > maximum) throw failure('SPOKEN_VIDEO_INVALID_INPUT', `${label}最多包含 ${maximum} 项。`)
+  return value.map((item, index) => {
+    if (typeof item === 'string') return text(item, `${label}[${index}]`, 400)
+    const entry = object(item, `${label}[${index}]`)
+    const message = text(entry.message, `${label}[${index}] 的消息`, 400)
+    const code = typeof entry.code === 'string' && entry.code.trim() ? `[${entry.code.trim()}] ` : ''
+    const where = typeof entry.file === 'string' && entry.file.trim()
+      ? `${entry.file}${Number.isInteger(entry.line) ? `:${entry.line}` : ''} `
+      : ''
+    return text(`${code}${where}${message}`, `${label}[${index}]`, 400)
+  })
+}
+
 function productionSource(value) {
   const source = text(value, '自动产物来源', 120)
   if (!/^spoken-video\/[a-z0-9-]+$/u.test(source)) throw failure('SPOKEN_VIDEO_INVALID_INPUT', '自动产物来源无效。')
@@ -555,6 +579,9 @@ function producedStageData(stage, payload, source) {
     const remotion = input.remotion === undefined || input.remotion === null ? null : object(input.remotion, 'Remotion Agent 产物')
     const preflight = remotion?.preflight === undefined || remotion?.preflight === null ? null : object(remotion.preflight, 'Remotion 预检')
     const preflightFailures = preflight ? messages(preflight.failures, 'Remotion 预检问题', 20) : []
+    // 预检警告必须留在产物里：此前宿主与 store 两头都只取 failures/warnings 的
+    // 一部分，scene-table-unused、sfx-missing 这类线索既不进报告也不进 UI。
+    const preflightWarnings = preflight ? preflightWarningLines(preflight.warnings, 'Remotion 预检警告', 40) : []
     if (preflight && ((preflight.passed === true) !== (preflightFailures.length === 0))) throw failure('SPOKEN_VIDEO_INVALID_INPUT', 'Remotion 预检结论不一致。')
     const editorialRepair = remotion?.editorialRepair === undefined || remotion?.editorialRepair === null ? null : object(remotion.editorialRepair, 'Remotion 审片修复')
     const repairAttempts = editorialRepair ? optionalInteger(editorialRepair.attempts, 'Remotion 审片修复次数', 0, 2) : 0
@@ -585,7 +612,7 @@ function producedStageData(stage, payload, source) {
         propsFile: agentWorkspacePath(remotion.propsFile, 'Remotion 参数文件'),
         entryFile: agentWorkspacePath(remotion.entryFile, 'Remotion 入口文件'),
         ...(remotion.creativeFile ? { creativeFile: agentWorkspacePath(remotion.creativeFile, 'Remotion 创意源文件') } : {}),
-        ...(preflight ? { preflight: { passed: preflight.passed === true, failures: preflightFailures, creativeBytes: optionalInteger(preflight.creativeBytes, 'Remotion 创意源字节数', 1, 2_000_000) } } : {}),
+        ...(preflight ? { preflight: { passed: preflight.passed === true, failures: preflightFailures, ...(preflightWarnings.length ? { warnings: preflightWarnings } : {}), creativeBytes: optionalInteger(preflight.creativeBytes, 'Remotion 创意源字节数', 1, 2_000_000) } } : {}),
         ...(editorialRepair ? { editorialRepair: {
           attempts: repairAttempts,
           maxAttempts: repairMaximum,

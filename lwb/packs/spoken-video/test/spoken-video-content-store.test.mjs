@@ -550,6 +550,114 @@ test('recommended topic automatically enters the writing queue; other candidates
   assert.deepEqual((await projectsStore.listWritableTopics(currentAgent)).map((item) => item.title).sort(), ['备选候选', '推荐候选'])
 })
 
+test('the writing layer receives signal hot values and ranks instead of a title-only payload', async (t) => {
+  const { root, currentAgent } = await setup(t)
+  const projectsStore = new SpokenVideoProjectStore()
+  let clock = '2026-08-31T08:00:00.000Z'
+  const executor = async ({ prompt }) => {
+    const signalId = /id=([a-f0-9-]{36})/u.exec(prompt)?.[1]
+    return { candidates: [{ title: '推荐候选', signalIds: signalId ? [signalId] : [] }] }
+  }
+  const store = new SpokenVideoContentStore({
+    workspacePath: currentAgent.session.header.cwd,
+    fetch: async () => new Response(rss('带热度数值的信号'), { status: 200, headers: { 'content-type': 'application/rss+xml' } }),
+    resolveHostname: resolver,
+    now: () => clock,
+    topicExecutor: executor,
+    projectsStore,
+  })
+  // 给这条信号补上热度数值与榜单位次（RSS 来源本身不带这两个字段）。
+  await store.collectSources(currentAgent, { sourceIds: ['36kr'] })
+  const signalsPath = join(currentAgent.session.header.cwd, 'data', 'signals.json')
+  const data = JSON.parse(await readFile(signalsPath, 'utf8'))
+  data.signals[0].hotValue = 2088
+  data.signals[0].rank = 1
+  await writeFile(signalsPath, `${JSON.stringify(data)}\n`, 'utf8')
+
+  const started = await store.startTopicGeneration(currentAgent, { sourceIds: ['36kr'] })
+  const record = await settled(store, currentAgent, started.id)
+  assert.equal(record.materialSnapshot[0].hotValue, 2088, '快照必须带热度数值')
+  assert.equal(record.materialSnapshot[0].rank, 1, '快照必须带榜单位次')
+
+  const selected = await store.topicGenerationStatus(currentAgent, { id: record.id })
+  const project = await projectsStore.get(currentAgent, { projectId: selected.candidates[0].selection.projectId })
+  const item = project.artifacts.signals.data.items[0]
+  assert.match(item.text, /热度数值：2088/u)
+  assert.match(item.text, /榜单位次：第 1 名/u)
+  assert.match(item.text, /带热度数值的信号/u)
+})
+
+test('a signal without hot values tells the writing layer not to invent numbers', async (t) => {
+  const { currentAgent } = await setup(t)
+  const projectsStore = new SpokenVideoProjectStore()
+  const executor = async ({ prompt }) => {
+    const signalId = /id=([a-f0-9-]{36})/u.exec(prompt)?.[1]
+    return { candidates: [{ title: '推荐候选', signalIds: signalId ? [signalId] : [] }] }
+  }
+  const store = new SpokenVideoContentStore({
+    workspacePath: currentAgent.session.header.cwd,
+    fetch: async () => new Response(rss('没有热度数值的信号'), { status: 200, headers: { 'content-type': 'application/rss+xml' } }),
+    resolveHostname: resolver,
+    now,
+    topicExecutor: executor,
+    projectsStore,
+  })
+  await store.collectSources(currentAgent, { sourceIds: ['36kr'] })
+  // 这条信号没有热度数值（榜单位次还在）：写稿层必须明确被告知禁止编造数字。
+  // 兜底不能挂在「热度与名次同时缺失」的合取上——名次几乎从不缺失，
+  // 那样这条兜底在真实数据上永远不触发。
+  const signalsPath = join(currentAgent.session.header.cwd, 'data', 'signals.json')
+  const data = JSON.parse(await readFile(signalsPath, 'utf8'))
+  data.signals[0].hotValue = null
+  data.signals[0].rank = 1
+  await writeFile(signalsPath, `${JSON.stringify(data)}\n`, 'utf8')
+
+  const started = await store.startTopicGeneration(currentAgent, { sourceIds: ['36kr'] })
+  const record = await settled(store, currentAgent, started.id)
+  const selected = await store.topicGenerationStatus(currentAgent, { id: record.id })
+  const project = await projectsStore.get(currentAgent, { projectId: selected.candidates[0].selection.projectId })
+  const item = project.artifacts.signals.data.items[0]
+  assert.match(item.text, /该来源未提供热度数值，禁止编造数字/u)
+  assert.doesNotMatch(item.text, /热度数值：/u)
+  assert.match(item.text, /榜单位次：第 1 名/u)
+})
+
+test('the counters survive the material snapshot even when the description is long', async (t) => {
+  const { currentAgent } = await setup(t)
+  const projectsStore = new SpokenVideoProjectStore()
+  const executor = async ({ prompt }) => {
+    const signalId = /id=([a-f0-9-]{36})/u.exec(prompt)?.[1]
+    return { candidates: [{ title: '推荐候选', signalIds: signalId ? [signalId] : [] }] }
+  }
+  const store = new SpokenVideoContentStore({
+    workspacePath: currentAgent.session.header.cwd,
+    fetch: async () => new Response(rss('长描述信号'), { status: 200, headers: { 'content-type': 'application/rss+xml' } }),
+    resolveHostname: resolver,
+    now,
+    topicExecutor: executor,
+    projectsStore,
+  })
+  await store.collectSources(currentAgent, { sourceIds: ['36kr'] })
+  const signalsPath = join(currentAgent.session.header.cwd, 'data', 'signals.json')
+  const data = JSON.parse(await readFile(signalsPath, 'utf8'))
+  // 描述长过 300 字时，从尾部截断会把追加在末尾的计数器切掉。
+  data.signals[0].summary = `${'很长的项目描述'.repeat(40)} · Rust · 65,243 star · 4,236 fork · 今日 +2,088`
+  data.signals[0].hotValue = 2088
+  await writeFile(signalsPath, `${JSON.stringify(data)}\n`, 'utf8')
+
+  const started = await store.startTopicGeneration(currentAgent, { sourceIds: ['36kr'] })
+  const record = await settled(store, currentAgent, started.id)
+  assert.equal(record.materialSnapshot[0].counters, '65,243 star · 4,236 fork · 今日 +2,088', '计数器必须单独保留')
+  assert.equal(record.materialSnapshot[0].summary.includes('star'), false, '描述里不该混进计数器')
+
+  const selected = await store.topicGenerationStatus(currentAgent, { id: record.id })
+  const project = await projectsStore.get(currentAgent, { projectId: selected.candidates[0].selection.projectId })
+  const item = project.artifacts.signals.data.items[0]
+  assert.match(item.text, /65,243 star/u, '写稿层必须拿到总 star')
+  assert.match(item.text, /4,236 fork/u)
+  assert.match(item.text, /今日 \+2,088/u)
+})
+
 test('a candidate uses its durable material snapshot after the seven-day signal cleanup', async (t) => {
   const { root, currentAgent } = await setup(t)
   const projectsStore = new SpokenVideoProjectStore()
@@ -581,6 +689,78 @@ test('a candidate uses its durable material snapshot after the seven-day signal 
   const selected = await store.topicGenerationStatus(currentAgent, { id: record.id })
   const project = await projectsStore.get(currentAgent, { projectId: selected.candidates[1].selection.projectId })
   assert.ok(project.artifacts.signals.data.items.some((item) => item.text.includes('可追溯的原始信号')))
+})
+
+test('a candidate takes hot values from the live signal when its own snapshot has none', async (t) => {
+  const { workspace, currentAgent } = await setup(t)
+  const projectsStore = new SpokenVideoProjectStore()
+  const executor = async ({ prompt }) => {
+    const signalId = /id=([a-f0-9-]{36})/u.exec(prompt)?.[1]
+    return { candidates: [{ title: '推荐候选', signalIds: [] }, { title: '延后候选', signalIds: signalId ? [signalId] : [] }] }
+  }
+  const store = new SpokenVideoContentStore({
+    workspacePath: currentAgent.session.header.cwd,
+    fetch: async () => new Response(rss('旧快照信号'), { status: 200, headers: { 'content-type': 'application/rss+xml' } }),
+    resolveHostname: resolver,
+    now,
+    topicExecutor: executor,
+    projectsStore,
+  })
+  await store.collectSources(currentAgent, { sourceIds: ['36kr'] })
+  const started = await store.startTopicGeneration(currentAgent, { sourceIds: ['36kr'] })
+  const record = await settled(store, currentAgent, started.id)
+  assert.equal(record.materialSnapshot[0].hotValue, null, '这条快照本身没有热度数值')
+
+  // 采集之后活信号补上了热度数值（快照是旧的，没有它）。
+  const signalsPath = join(workspace, 'data', 'signals.json')
+  const data = JSON.parse(await readFile(signalsPath, 'utf8'))
+  data.signals[0].hotValue = 2088
+  data.signals[0].rank = 3
+  await writeFile(signalsPath, `${JSON.stringify(data)}\n`, 'utf8')
+
+  await store.setTopicCandidateSelection(currentAgent, { id: record.id, candidateId: record.candidates[1].id, selected: true })
+  const selected = await store.topicGenerationStatus(currentAgent, { id: record.id })
+  const project = await projectsStore.get(currentAgent, { projectId: selected.candidates[1].selection.projectId })
+  const item = project.artifacts.signals.data.items[0]
+  assert.match(item.text, /旧快照信号/u, '素材语义仍然来自快照')
+  assert.match(item.text, /热度数值：2088/u, '热度数值必须取自活信号')
+  assert.match(item.text, /榜单位次：第 3 名/u)
+})
+
+test('the quality report flags a number that no cited signal can back', async (t) => {
+  const { workspace, currentAgent } = await setup(t)
+  const projectsStore = new SpokenVideoProjectStore()
+  const executor = async ({ prompt }) => {
+    const signalId = /id=([a-f0-9-]{36})/u.exec(prompt)?.[1]
+    return { candidates: [{ title: '推荐候选', signalIds: signalId ? [signalId] : [] }] }
+  }
+  const store = new SpokenVideoContentStore({
+    workspacePath: currentAgent.session.header.cwd,
+    fetch: async () => new Response(rss('带热度数值的信号'), { status: 200, headers: { 'content-type': 'application/rss+xml' } }),
+    resolveHostname: resolver,
+    now,
+    topicExecutor: executor,
+    projectsStore,
+  })
+  await store.collectSources(currentAgent, { sourceIds: ['36kr'] })
+  const signalsPath = join(workspace, 'data', 'signals.json')
+  const data = JSON.parse(await readFile(signalsPath, 'utf8'))
+  data.signals[0].hotValue = 2088
+  await writeFile(signalsPath, `${JSON.stringify(data)}\n`, 'utf8')
+
+  const started = await store.startTopicGeneration(currentAgent, { sourceIds: ['36kr'] })
+  const record = await settled(store, currentAgent, started.id)
+  const projectId = record.candidates[0].selection.projectId
+
+  const cited = await store.analyzeScript(currentAgent, { projectId, body: '这个项目今天涨了 2088 个星，是真的火。' })
+  assert.equal(cited.checks.numberConsistency.consistent, true)
+  assert.deepEqual(cited.checks.numberConsistency.cited, [2088])
+
+  const invented = await store.analyzeScript(currentAgent, { projectId, body: '这个项目已经有 999999 个星了。' })
+  assert.equal(invented.checks.numberConsistency.consistent, false)
+  assert.deepEqual(invented.checks.numberConsistency.unsupported, [999999])
+  assert.ok(invented.recommendations.some((item) => item.includes('999999')))
+  assert.ok(invented.recommendations.every((item) => !item.includes('编造')), '措辞不能直接判定用户编造')
 })
 
 test('a second topic run receives recent same-account candidates as a duplicate-avoidance boundary', async (t) => {

@@ -149,6 +149,29 @@ function fail(code, message) {
   throw new SpokenVideoMediaError(code, message)
 }
 
+/**
+ * 把预检报告里的 warnings 摊平成技术质检报告能收的字符串行。
+ *
+ * 预检的 warning 是 {code,file,line,column,message} 结构，技术质检报告的
+ * warnings 是字符串数组（store 的 qc 校验器只收字符串，最多 40 条）。
+ * 这里统一带上 code 与定位信息——少了 code 的裸 message 在报告里就是
+ * 一句没有出处的抱怨，排查时不知道它来自哪道检查。
+ *
+ * 条数上限取 40，与 store 的校验上限一致：超出的部分丢掉而不是让整份
+ * 质检报告被 store 拒收（那会让一条警告把整轮成片卡在提交环节）。
+ */
+function preflightWarningLines(preflight) {
+  const warnings = Array.isArray(preflight?.warnings) ? preflight.warnings : []
+  return warnings
+    .filter((item) => item && typeof item.message === 'string' && item.message.trim())
+    .map((item) => {
+      const code = typeof item.code === 'string' && item.code.trim() ? `[${item.code.trim()}] ` : ''
+      const where = typeof item.file === 'string' && item.file.trim() ? `${item.file}${Number.isInteger(item.line) ? `:${item.line}` : ''} ` : ''
+      return `${code}${where}${item.message.trim()}`
+    })
+    .slice(0, 40)
+}
+
 function mediaErrorMessage(error) {
   return String(error instanceof Error ? error.message : error).replace(/^Error \[[A-Z0-9_]+\]\s*/u, '')
 }
@@ -5034,7 +5057,7 @@ async #mimoReferenceDataUrl(root, input) {
               }
             } catch { /* 场景表读不出来时不拦截 */ }
           }
-          await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: report.passed, failures: report.failures, findings: report.findings, creativeBytes: report.creativeBytes } })
+          await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: report.passed, failures: report.failures, findings: report.findings, warnings: report.warnings, creativeBytes: report.creativeBytes } })
           return report
         },
         repairPrompt: (input) => buildVideoCreatorRepairPrompt({ runDir: workspace.projectDir, ...input }),
@@ -5052,7 +5075,7 @@ async #mimoReferenceDataUrl(root, input) {
 
       await this.#setVideoPhase(root, run.id, 'preflight')
       const inspected = await inspectSpokenVideoAgentProject(workspace)
-      preflight = { passed: inspected.passed, failures: inspected.failures, findings: inspected.findings, creativeBytes: inspected.creativeBytes }
+      preflight = { passed: inspected.passed, failures: inspected.failures, findings: inspected.findings, warnings: inspected.warnings, creativeBytes: inspected.creativeBytes }
       await this.#setVideoPhase(root, run.id, 'preflight', { preflight })
       if (!inspected.passed) fail('SPOKEN_VIDEO_VIDEO_AGENT_INVALID', `视频 Agent 产物未通过渲染前检查：${inspected.failures.join(' ')}`)
     } else {
@@ -5060,10 +5083,10 @@ async #mimoReferenceDataUrl(root, input) {
       await this.#runEvent(root, run.id, '续跑：跳过视觉导演', '上一轮已通过预检，直接进入渲染阶段。')
       const inspected = await inspectSpokenVideoAgentProject(workspace)
       if (!inspected.passed) {
-        await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: false, failures: inspected.failures, findings: inspected.findings, creativeBytes: inspected.creativeBytes } })
+        await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: false, failures: inspected.failures, findings: inspected.findings, warnings: inspected.warnings, creativeBytes: inspected.creativeBytes } })
         fail('SPOKEN_VIDEO_VIDEO_AGENT_INVALID', `续跑前的工程复查未通过：${inspected.failures.join(' ')}。请重新提交任务让视觉导演重写。`)
       }
-      preflight = { passed: inspected.passed, failures: inspected.failures, findings: inspected.findings, creativeBytes: inspected.creativeBytes }
+      preflight = { passed: inspected.passed, failures: inspected.failures, findings: inspected.findings, warnings: inspected.warnings, creativeBytes: inspected.creativeBytes }
     }
 
     const subtitleDisplayLimit = orientation === 'landscape' ? 56 : 44
@@ -5162,7 +5185,13 @@ async #mimoReferenceDataUrl(root, input) {
         ...topology,
         passed: topology.passed && subtitleIssues.length === 0 && content.passed && localQc.passed,
         issues: [...topology.issues, ...subtitleIssues, ...contentIssues, ...localQc.issues],
-        warnings: [...(topology.warnings || []), ...variationWarnings, ...localQc.warnings],
+        // 预检警告必须并入技术质检报告：预检产出的 scene-table-unused、
+        // subtitle-audio-suspicion、sfx-missing 这类线索此前被宿主直接丢弃，
+        // 只留在 pipeline.preflight 里没人看。实测一条 278 秒成片整片零音效，
+        // 预检报了 sfx-absent、技术质检报 pass、审片 82 分通过——三道门都放过，
+        // 用户拿到的成片听感发干却看不到任何线索。并进来之后，这些线索会随
+        // technical-qc.json 一起进产物、进审片证据、进工作台的问题列表。
+        warnings: [...(topology.warnings || []), ...variationWarnings, ...localQc.warnings, ...preflightWarningLines(preflight)],
         subtitles: { ...topology.subtitles, maxTextChars: maxSubtitleChars, displayLimit: subtitleDisplayLimit, longCueCount: longSubtitleCount },
         variation,
         localQc,
@@ -5276,7 +5305,7 @@ async #mimoReferenceDataUrl(root, input) {
               }
             } catch { /* 场景表读不出来时不拦截 */ }
           }
-          await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: report.passed, failures: report.failures, findings: report.findings, creativeBytes: report.creativeBytes } })
+          await this.#setVideoPhase(root, run.id, 'preflight', { preflight: { passed: report.passed, failures: report.failures, findings: report.findings, warnings: report.warnings, creativeBytes: report.creativeBytes } })
           return report
         },
         repairPrompt: (input) => buildVideoCreatorRepairPrompt({ runDir: workspace.projectDir, ...input }),
@@ -5293,6 +5322,7 @@ async #mimoReferenceDataUrl(root, input) {
       preflight.passed = repaired.passed
       preflight.failures = repaired.failures
       preflight.findings = repaired.findings
+      preflight.warnings = repaired.warnings
       preflight.creativeBytes = repaired.creativeBytes
       reviewed = await renderAndReview(attempt)
     }

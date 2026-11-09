@@ -109,16 +109,45 @@ export function snapshotAccount(account) { return parseAccountSnapshot(account) 
 
 function byScore(left, right) { return right.score - left.score || right.capturedAt.localeCompare(left.capturedAt) }
 
+/**
+ * 把信号摘要拆成「描述」与「计数器」两段。
+ *
+ * GitHub Trending 的三个计数（总 star / fork / 今日新增）是追加在摘要**末尾**的
+ * （见 spoken-video-signal-adapters.mjs 的 parseGithubTrending），所以原来那句
+ * `summary.slice(0, 300)` 是从尾部截断——描述一长，三个计数就被切掉了
+ * （本机 50 条 github-trending 信号里有 5 条丢了计数）。
+ *
+ * 同时这两个数不该出现在**选题**提示词里：选题阶段要被具体星数锚定，
+ * 候选会挑「星最多的那个」而不是「最值得讲的那个」。所以计数单独存一个
+ * 字段，只给写稿层用。
+ */
+const COUNTER_TAIL = /(?:^|·)\s*(?:[\d,.]+\s*star|[\d,.]+\s*fork|今日\s*\+[\d,.]+)(?:\s*(?:·\s*(?:[\d,.]+\s*star|[\d,.]+\s*fork|今日\s*\+[\d,.]+))*)*\s*$/u
+
+export function splitSummary(summary) {
+  const text = String(summary || '')
+  const match = COUNTER_TAIL.exec(text)
+  if (!match) return { description: text, counters: '' }
+  const tail = text.slice(match.index).replace(/^[·\s]+/u, '').trim()
+  return { description: text.slice(0, match.index).replace(/[·\s]+$/u, '').trim(), counters: tail }
+}
+
 function compact(signal) {
+  const { description, counters } = splitSummary(signal.summary)
   return {
     id: signal.id,
     title: signal.title,
-    summary: signal.summary?.slice(0, 300) || '',
+    // 只截描述，计数另行保留（见 splitSummary 的说明）。
+    summary: description.slice(0, 300) || '',
+    counters,
     url: signal.url || null,
     sourceId: signal.sourceId,
     score: signal.score,
     capturedAt: signal.capturedAt,
     platform: signal.platform || null,
+    // 2026-11-08：快照路径的信号要带热度数值与榜单位次，否则写稿层拿到的
+    // 只是标题+摘要+链接，真实数字在这一步就丢了（存量稿 0 篇出现真实 star 数）。
+    hotValue: signal.hotValue == null || !Number.isFinite(Number(signal.hotValue)) ? null : Number(signal.hotValue),
+    rank: signal.rank == null || !Number.isFinite(Number(signal.rank)) ? null : Number(signal.rank),
   }
 }
 
@@ -214,6 +243,7 @@ export function buildTopicPrompt({ input, material, profile, sourceLabels, platf
   }
   if (material.signals.length) {
     sections.push(`本轮渠道最新信号（${material.signals.length} 条，signalIds 必须从中选择）：`)
+    // 只渲染标题与描述：热度数值与榜单位次不进选题提示词（选题不该被星数锚定）。
     sections.push(material.signals.map((signal) => `- id=${signal.id} [${signal.sourceId}${signal.platform ? ` · ${signal.platform}` : ''}] ${signal.title}${signal.summary ? `：${signal.summary}` : ''}`).join('\n'))
   } else {
     sections.push('本轮渠道最新信号：无。候选依据用户输入与账号定位生成，signalIds 留空。')

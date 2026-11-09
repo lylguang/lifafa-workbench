@@ -54,9 +54,39 @@ test('checkStructure reports paragraphs, average length and opening', () => {
   assert.equal(structure.paragraphCount, 9)
   assert.ok(structure.averageParagraphLength > 20)
   assert.ok(structure.openingLength >= 12)
-  assert.deepEqual(structure.warnings, [])
+  // 2026-11-08：钩子改成按「正文第一句」量长度，12 字以内为合格。
+  // MEDIUM_BODY 的首句超过 12 字，所以必须报「钩子太长」。
+  assert.ok(structure.hookLength > 12, `样例首句必须超过 12 字，实际 ${structure.hookLength}`)
+  assert.ok(structure.warnings.some((item) => item.includes('钩子太长')), '超长首句必须提示钩子太长')
   const weak = checkStructure('短。\n短。')
   assert.ok(weak.warnings.includes('段落过少，口播稿建议至少 3 段推进'))
+})
+
+test('checkStructure warns when the opening hook is too long to read in three seconds', () => {
+  const longHook = `${'这个工具真的非常非常有意思真的很值得说'.repeat(3)}。\n\n第二段。\n\n第三段。`
+  const structure = checkStructure(longHook)
+  assert.ok(structure.hookLength > 12, `样例首句必须超过 12 字，实际 ${structure.hookLength}`)
+  assert.ok(structure.warnings.some((item) => item.includes('钩子太长')), '必须指出是钩子太长')
+  assert.ok(structure.warnings.some((item) => item.includes('12 字')), '要给出可执行的压到 12 字以内的口径')
+  // 首句在 12 字以内：只可能报段落数（不足 3 段），不报钩子太长。
+  const fineHook = checkStructure('这个工具今天省了我两小时。\n\n第二段内容在这里。\n\n第三段内容在这里。')
+  assert.equal(fineHook.warnings.some((item) => item.includes('钩子太长')), false)
+  assert.equal(fineHook.hookLength, 12)
+  // 首句合格、段落数 ≥3：完全无警告。
+  const clean = checkStructure('这个工具一天能省下两小时。\n\n第二段内容在这里。\n\n第三段内容在这里。')
+  assert.deepEqual(clean.warnings, [])
+})
+
+test('checkStructure measures the hook as the first sentence, not the first paragraph', () => {
+  // 首段里有三句话，钩子只是第一句——上限只按第一句算。
+  const body = '这个工具一天能省下两小时。第二句在这里继续讲。第三句再补一句。\n\n第二段内容在这里。\n\n第三段内容在这里。'
+  const structure = checkStructure(body)
+  assert.equal(structure.hookLength, 12)
+  assert.equal(structure.warnings.some((item) => item.includes('钩子太长')), false)
+  // 但首句本身超长时必须报。
+  const long = checkStructure('这个工具真的非常非常有意思真的很值得说大家快来看。后面还有一句。\n\n第二段内容在这里。\n\n第三段内容在这里。')
+  assert.ok(long.hookLength > 12)
+  assert.ok(long.warnings.some((item) => item.includes('钩子太长')))
 })
 
 test('checkSpokenDelivery counts written-language signals without blocking', () => {
@@ -164,6 +194,23 @@ test('buildScriptPrompt carries contract, discipline and material', () => {
   assert.ok(polish.includes('润色'))
   assert.ok(polish.includes('当前稿件正文'))
   assert.ok(polish.includes('信号素材：无'))
+})
+
+test('写稿提示词带钩子硬约束、四段式结构与收尾三件事', async () => {
+  const { buildScriptPrompt } = await import('../spoken-video-script.mjs')
+  const prompt = buildScriptPrompt({ input: { mode: 'new', tier: 'medium' }, topic: { title: '测试' }, signals: [], profile: null })
+  assert.match(prompt, /钩子长度（硬性）/u)
+  assert.match(prompt, /不超过 12 个字/u)
+  assert.match(prompt, /钩子必须自带具体事实/u)
+  assert.match(prompt, /钩子和正文第一句必须逐字一致/u)
+  assert.match(prompt, /结构（四段式，缺一段就是没讲完）/u)
+  for (const part of ['1) 钩子', '2) 旧问题', '3) 新解法', '4) 收口']) {
+    assert.ok(prompt.includes(part), `四段式结构缺 ${part}`)
+  }
+  assert.match(prompt, /收尾（三件事，一件都不能少，顺序固定）/u)
+  assert.match(prompt, /适合谁 \+ 谁先别碰/u)
+  assert.match(prompt, /禁止：把"未能核实""以官方文档为准"当结尾/u)
+  assert.doesNotMatch(prompt, /结构：强钩子开场/u, '旧的结构规则已被四段式替换')
 })
 
 test('normalizeDraft trims fields and reports usability', () => {
@@ -274,7 +321,7 @@ test('写稿提示词带「说人话」硬规则与禁用词表，润色时注�
   const { buildScriptPrompt } = await import('../spoken-video-script.mjs')
   const fresh = buildScriptPrompt({ input: { mode: 'new', tier: 'medium' }, topic: { title: '测试' }, signals: [], profile: null })
   assert.match(fresh, /说人话（硬性）/u)
-  assert.match(fresh, /不懂技术、想搞副业的普通上班族/u, '必须写清读者画像')
+  assert.match(fresh, /一个平时用工具、但不想研究技术细节的普通人/u, '没有账号定位时用兜底画像')
   assert.match(fresh, /「架构门禁」→/u, '必须给出禁用词与替换示例')
 
   const polish = buildScriptPrompt({
@@ -283,6 +330,16 @@ test('写稿提示词带「说人话」硬规则与禁用词表，润色时注�
   })
   assert.match(polish, /检测到行业黑话/u)
   assert.match(polish, /「架构门禁」→ 先把代码的架子管住（原句：那套复盘的第一层，是架构门禁。）/u, '润色要拿到原句才能就地改')
+})
+
+test('读者画像取自账号定位，不再硬编码成「不懂技术、想搞副业的普通上班族」', async () => {
+  const { buildScriptPrompt } = await import('../spoken-video-script.mjs')
+  const prompt = buildScriptPrompt({
+    input: { mode: 'new', tier: 'medium' }, topic: { title: '测试' }, signals: [],
+    profile: { audience: '程序员与想提效的职场人' },
+  })
+  assert.match(prompt, /程序员与想提效的职场人/u, '画像必须来自 profile.audience')
+  assert.doesNotMatch(prompt, /不懂技术、想搞副业的普通上班族/u, '旧的硬编码画像必须消失')
 })
 
 test('质量报告把黑话计入口播分并进建议列表', async () => {

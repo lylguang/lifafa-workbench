@@ -101,6 +101,25 @@ window.__ModuleLoader__.load({
     }
     const notify = { play: notifyPlay, playOnce: notifyOnce, unlock: notifyUnlock, notifyDesktop, requestDesktop: notifyRequestDesktop, settings: notifySettings };
     let connection; let executionRemote; let executionStreams;
+    // 执行会话请求的入参边界校验。
+    //
+    // DSH alpha.2 起，Gateway 的 client 面不再执行入参 parse：
+    // packages/api/gateway/src/client/index.ts 删掉了 parseInput()，prepareInvocation
+    // 里 `args[parameter.wire] = value` 直接赋值（alpha.1 是 parseInput(...)）。
+    // 也就是说这份 strict codec 在浏览器侧不再有上游替我们校验的等价物。
+    //
+    // 但 strict 模式本身必须保留：注册端 packages/api/gateway/src/client/index.ts 的
+    // requireStrictInputs() 只放行 mode:'strict'（mode:'src-json' 会在 $mount 时被
+    // 拒），registry 的 validateCodec() 又要求 strict codec 带 create() 工厂。
+    // 所以这里按 alpha.2 的契约写成惰性工厂，并在调用点显式跑同一份 schema，
+    // 保持 alpha.1 下「入参非法时调用前就失败」的业务行为不变。
+    let executionRequestSchemaValue = null;
+    function executionRequestSchema() {
+      if (executionRequestSchemaValue === null) {
+        executionRequestSchemaValue = { parse(value) { if (!value || typeof value.id !== 'string' || typeof value.kind !== 'string' || typeof value.role !== 'string') throw new Error('执行会话请求无效。'); return value; } };
+      }
+      return executionRequestSchemaValue;
+    }
     let audioCaptionsHandoff = null;
     // 选题页 → 写稿页：把刚加入待写稿的项目带过去，让写稿页直接选中并打开抽屉。
     // 此前选题抽屉底部只有「生成新一批 / 完成」，用户选完只能自己去切页，
@@ -1665,6 +1684,8 @@ window.__ModuleLoader__.load({
           setLoading(true); setError(null);
           try {
             if (!executionRemote) throw new Error('会话连接正在准备，请稍后重试。');
+            // alpha.2 的 Gateway client 面不再 parse 入参，这里自己守住边界。
+            executionRequestSchema().parse(sessionRequest);
             subscription = executionStreams.$stream({ name: 'manual-script-video execution', open: (signal) => executionRemote.followExecution(sessionRequest, signal), ended: () => new Error('会话订阅已结束，可重新连接读取记录。'), carrierFailed: () => { if (!stopped) setError('连接中断，正在恢复会话…'); } });
             for await (const delivery of subscription) {
               const frame = delivery.value;
@@ -2488,7 +2509,10 @@ window.__ModuleLoader__.load({
         .reduce((latest, event) => {
           const at = Date.parse(event?.at || '');
           return Number.isFinite(at) && at > latest ? at : latest;
-        }, NaN);
+        // 初值必须是 -Infinity 而不是 NaN：`at > NaN` 恒为 false，会让整条事件
+        // 心跳被吞掉（只有渲染心跳生效）。无事件时 -Infinity 会被下面的
+        // Number.isFinite 过滤掉，语义仍是「没有这个心跳源」。
+        }, -Infinity);
       const heartbeatCandidates = [typeof render?.updatedAt === 'string' ? Date.parse(render.updatedAt) : NaN, lastDshAtMs]
         .filter((value) => Number.isFinite(value));
       const heartbeatMs = heartbeatCandidates.length ? Math.max(...heartbeatCandidates) : NaN;
@@ -4753,7 +4777,7 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
       // Mount the pack's dynamic contract on the same native mux used by ordinary conversations.
       await executionStreams.$mount({ package: '@scitiger-ai/lwb-manual-script-video', descriptors: [{
         id: '@scitiger-ai/lwb-manual-script-video#manualScriptVideo/followExecution', service: 'manualScriptVideo', namespace: 'manualScriptVideo', method: 'followExecution', mode: 'stream', invocation: { kind: 'direct' },
-        parameters: [{ name: 'request', wire: 'request', source: 'json', codec: { mode: 'strict', typeSymbol: '@scitiger-ai/lwb-manual-script-video#ExecutionRequest', schema: { parse(value) { if (!value || typeof value.id !== 'string' || typeof value.kind !== 'string' || typeof value.role !== 'string') throw new Error('执行会话请求无效。'); return value; } } } }],
+        parameters: [{ name: 'request', wire: 'request', source: 'json', codec: { mode: 'strict', typeSymbol: '@scitiger-ai/lwb-manual-script-video#ExecutionRequest', create: () => executionRequestSchema() } }],
         cancellation: { parameter: 'signal' }, result: { mode: 'src-json' },
       }] });
       await ctx.plugin({ name: 'manual-script-video-execution-client', inject: ['remote.manualScriptVideo'], apply(scope) { executionRemote = scope.get('remote.manualScriptVideo'); scope.effect(() => () => { executionRemote = null; }); } });

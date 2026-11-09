@@ -275,7 +275,9 @@ function candidate(value, fallback = {}) {
     url: signalUrl(value?.url, fallback.url),
     publishedAt: dateIso(value?.publishedAt),
     rank: Number.isSafeInteger(value?.rank) && value.rank > 0 ? value.rank : null,
-    hotValue: Number.isFinite(Number(value?.hotValue)) ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.round(Number(value.hotValue)))) : null,
+    // `Number(null)` is 0 and 0 is finite, so a missing counter used to become
+    // a real "热度数值：0" — a fabricated zero. Missing must stay missing.
+    hotValue: value?.hotValue == null ? null : (Number.isFinite(Number(value.hotValue)) ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.round(Number(value.hotValue)))) : null),
     tags: cleanList(value?.tags, 8, 32),
     platform: cleanText(value?.platform, 32) || null,
   }
@@ -407,6 +409,46 @@ export function parsePublicHotList(value) {
   })))
 }
 
+/**
+ * Read a counter that sits inside a GitHub Trending anchor (stargazers / forks).
+ *
+ * The anchor looks like:
+ *   <a href="/owner/repo/stargazers"><svg …><path d="M8 .25a.75.75 …"/></svg> 65,243</a>
+ * The number cannot be taken from "the first number after the anchor": the
+ * inline SVG path data is full of digits (`M8 .25a.75.75`), which produced
+ * `fork=3` / `total stars=3` in earlier attempts.
+ *
+ * Two boundaries matter and both were wrong in the first implementation:
+ *
+ * 1. The href must be EXACTLY `/<owner>/<repo>/<counter>`. Matching on "the
+ *    href contains /forks" also matched the title link of a repo that is
+ *    itself named `forks` (`href="/owner/forks"`), which handed back the star
+ *    count as the fork count.
+ * 2. Everything must be read INSIDE that one anchor element. Searching for the
+ *    next `</svg>` without an upper bound crossed into the following anchor
+ *    when the target one had no inline SVG.
+ */
+function githubCounterAfter(article, anchorPath, repoPath) {
+  const expectedHref = `/${repoPath}${anchorPath}`
+  const anchorPattern = new RegExp(`<a\\b[^>]*href=["']${expectedHref.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}["'][^>]*>`, 'iu')
+  const anchor = anchorPattern.exec(article)
+  if (!anchor) return null
+  const elementStart = anchor.index + anchor[0].length
+  const elementEnd = article.indexOf('</a>', elementStart)
+  if (elementEnd < 0) return null
+  const element = article.slice(elementStart, elementEnd)
+  // The number sits AFTER the icon, so the icon has to come first.
+  const svgEnd = /<\/svg\s*>/iu.exec(element)
+  const text = svgEnd ? stripHtml(element.slice(svgEnd.index + svgEnd[0].length)) : stripHtml(element)
+  const digits = /[\d][\d,.]*/u.exec(text)
+  return digits ? digits[0] : null
+}
+
+/** Thousands-separated display form of an already normalized counter. */
+function displayCounter(value) {
+  return Number.isFinite(value) ? value.toLocaleString('en-US') : null
+}
+
 export function parseGithubTrending(html) {
   const entries = []
   for (const match of String(html).matchAll(/<article\b[\s\S]*?<\/article>/giu)) {
@@ -416,7 +458,20 @@ export function parseGithubTrending(html) {
     const description = /<p[^>]*>([\s\S]*?)<\/p>/iu.exec(article)?.[1] || ''
     const language = /itemprop=["']programmingLanguage["'][^>]*>([\s\S]*?)<\/span>/iu.exec(article)?.[1] || ''
     const stars = /([\d,.]+[kKmM]?)\s+stars today/iu.exec(stripHtml(article))?.[1] || ''
-    entries.push(candidate({ title: link.replace(/\s+/gu, ''), summary: [stripHtml(description), stripHtml(language)].filter(Boolean).join(' · '), url: `https://github.com/${link}`, rank: entries.length + 1, hotValue: normalizeNumber(stars), tags: [stripHtml(language) || '开源'] }))
+    // Three different facts, three different jobs: total stars = size, stars
+    // today = growth trend, forks = how widely it is actually used. Writing
+    // layer needs all three; a missing counter is dropped, never zeroed.
+    const totalStars = normalizeNumber(githubCounterAfter(article, '/stargazers', link))
+    const forks = normalizeNumber(githubCounterAfter(article, '/forks', link))
+    const starsToday = normalizeNumber(stars)
+    const parts = [stripHtml(description), stripHtml(language)]
+    const totalStarsText = displayCounter(totalStars)
+    if (totalStarsText) parts.push(`${totalStarsText} star`)
+    const forksText = displayCounter(forks)
+    if (forksText) parts.push(`${forksText} fork`)
+    const starsTodayText = displayCounter(starsToday)
+    if (starsTodayText) parts.push(`今日 +${starsTodayText}`)
+    entries.push(candidate({ title: link.replace(/\s+/gu, ''), summary: parts.filter(Boolean).join(' · '), url: `https://github.com/${link}`, rank: entries.length + 1, hotValue: starsToday, tags: [stripHtml(language) || '开源'] }))
   }
   return dedupeCandidates(entries)
 }

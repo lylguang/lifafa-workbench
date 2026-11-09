@@ -24,6 +24,7 @@
 | [工作区与执行作用域](29-pack-owned-workspaces.md) | 生命周期、默认模型复用、任务及凭据隔离 |
 | [统一执行详情](32-execution-details.md) | 业务任务与 DSH 原生会话展示 |
 | [上游锁定](08-base-lock.md) | 运行时版本、构建和回滚边界 |
+| [alpha.2 升级记录](37-dsh-016-alpha2-upgrade.md) | DSH 0.1.6-alpha.2 的破坏性变更、LWB 适配与验收证据 |
 | [升级流程](../lwb/upgrade/README.md) | 更新 DSH 的步骤 |
 | [产品层目录](../lwb/README.md) | 源码结构与宿主实现 |
 | [本地增强说明](36-local-enhancements.md) | 本分支相对上游的改动清单、根因与实测结论 |
@@ -55,3 +56,5 @@
 - [34 账号 Tab 一致性（2026-09-17）](34-account-tabs-consistency.md)
 - [口播视频：配音、发布与内容安排交互细节](35-spoken-video-workflow-details.md)
 - [配音、字幕与视频的衔接](audio-video-handoff.md)
+- [client.js 拆分勘察报告](client-js-split-survey.md) — 2026-10-21 的实测勘察：单文件 `client.js` 的结构、测试锚点清单、拆分方案与分步回滚计划（结论为暂缓拆分）
+- [「每天一个GitHub热榜项目」文案结构优化方案](39-github-trending-account-script-optimization.md) — 2026-11-08 的实测诊断与改造方案：写稿层拿不到 GitHub 星数的根因、钩子与结构缺陷、对标爆款结构证据、提示词改造清单

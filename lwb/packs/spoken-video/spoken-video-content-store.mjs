@@ -41,6 +41,7 @@ import {
   SCRIPT_DRAFT_SCHEMA,
   summarizeScriptInput,
 } from './spoken-video-script.mjs'
+import { checkNumberConsistency } from './spoken-video-number-consistency.mjs'
 import {
   appendDshTrace,
   dshChildStarted,
@@ -525,7 +526,57 @@ function localDayBounds(date) {
   const end = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1)
   return { date: `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`, startIso: start.toISOString(), endIso: end.toISOString() }
 }
+/**
+ * Signal text handed to the writing layer.
+ *
+ * 2026-11-08：只给 `title + summary + url` 时，写稿层拿不到任何真实数字，
+ * 只能用形容词凑（10 篇存量稿 0 篇出现真实 star 数）。所以把热度数值与
+ * 榜单位次一并带过去。
+ *
+ * 「禁止编造数字」只挂在**热度数值**上，不能挂在两个字段的合取上：
+ * 榜单位次几乎从不缺失（RSS 来源给的是条目序号，不是榜单名次），
+ * 按合取判断会让这条兜底永远不触发——本机 2315 条真实信号里
+ * hotValue 缺失 552 条，但 hotValue 与 rank 同时缺失的是 0 条。
+ */
+function signalPayloadText(signal) {
+  // 快照里的摘要被拆成「描述」与「计数器」两段（见 spoken-video-topic.mjs 的
+  // splitSummary），这里要拼回去——写稿层要看到真实的 star / fork / 今日新增。
+  const summary = [signal.summary, signal.counters].filter(Boolean).join(' · ')
+  const head = `${signal.title}\n${summary}${signal.url ? `\n${signal.url}` : ''}`
+  const meta = []
+  if (Number.isFinite(signal.hotValue)) meta.push(`热度数值：${signal.hotValue}`)
+  if (Number.isFinite(signal.rank)) meta.push(`榜单位次：第 ${signal.rank} 名`)
+  // 热度数值缺失时必须明说「禁止编造数字」，哪怕名次还在——
+  // 名次几乎从不缺失，所以这条兜底不能挂在两个字段的合取上。
+  if (!Number.isFinite(signal.hotValue)) meta.push('该来源未提供热度数值，禁止编造数字')
+  return `${head}\n${meta.join('｜')}`
+}
+
 function projectSignal(item) { return { id: item.id, title: item.title, url: item.url, rank: item.rank, hotValue: item.hotValue, score: item.score, capturedAt: signalObservedAt(item), state: item.state, platform: item.platform, tags: [...item.tags] } }
+/**
+ * 快照优先、但数值取活信号。
+ *
+ * 2026-11-08：`materializeCandidateProject` 原来直接用快照信号（或活信号），
+ * 快照里的旧 github-trending 记录多数没有 hotValue，于是「热度数值：…」
+ * 那一段整段缺失，写稿层仍然拿不到真实数字。快照代表的是「当时看到的
+ * 那条素材」，语义要保留；但热度/名次这类会随时间刷新的数值，以活信号为准
+ * 更准确。两者都不存在才返回 null。
+ *
+ * **不能跨时刻拼接 summary 与 hotValue**：快照 summary 里写着「今日 +2,088」，
+ * 活信号 hotValue 是另一时刻的 3,500，拼起来同一段文本里就有两个互相矛盾的
+ * 热度数——那正是本次改造要消灭的「体量与趋势混着说」。所以：
+ * 快照缺数值时，用**活信号整体**替换（summary 与 hotValue 同源）；
+ * 两者都有数值时取快照（同一时刻、彼此一致）。
+ */
+function mergeSignalNumbers(snapshotSignal, liveSignal) {
+  if (!snapshotSignal && !liveSignal) return null
+  if (!snapshotSignal) return liveSignal
+  if (!liveSignal) return snapshotSignal
+  const snapshotHasNumbers = Number.isFinite(snapshotSignal.hotValue)
+  if (snapshotHasNumbers) return snapshotSignal
+  // 快照没有数值：整体换成活信号，保证 summary 与热度值同源。
+  return { ...snapshotSignal, summary: liveSignal.summary || snapshotSignal.summary, hotValue: liveSignal.hotValue, rank: liveSignal.rank }
+}
 function freshnessFor(lastIso, clock) {
   const ageHours = (clock.getTime() - Date.parse(lastIso)) / 3_600_000
   if (!Number.isFinite(ageHours)) return 'unknown'
@@ -965,13 +1016,15 @@ export class SpokenVideoContentStore {
     const live = refs.length ? await this.listSignals(agent, { ids: refs }) : []
     const liveById = new Map(live.map((item) => [item.id, item]))
     for (let index = 0; index < refs.length; index += 1) {
-      const signal = snapshotById.get(refs[index]) || liveById.get(refs[index])
+      const snapshotSignal = snapshotById.get(refs[index])
+      const liveSignal = liveById.get(refs[index])
+      const signal = mergeSignalNumbers(snapshotSignal, liveSignal)
       if (!signal) continue
       const result = await this.projectsStore.commit(agent, {
         projectId,
         expectedRevision: current.revision,
         stage: 'signals',
-        payload: { source: signal.sourceId, text: `${signal.title}\n${signal.summary}${signal.url ? `\n${signal.url}` : ''}` },
+        payload: { source: signal.sourceId, text: signalPayloadText(signal) },
         idempotencyKey: `candidate-${candidate.id}-signal-${index}`,
       })
       current = result.project
@@ -1221,6 +1274,39 @@ export class SpokenVideoContentStore {
     if (!queue.length) this.scriptQueues.delete(workspace)
   }
 
+  /**
+   * 稿件里的「看起来像热度/星数」的大数字，必须能在该稿引用的信号里找到。
+   * 这是纯建议性的：查出来只提示，不阻断生成。
+   */
+  async numberConsistency(agent, projectId, body) {
+    if (!this.projectsStore || typeof projectId !== 'string' || !projectId) return null
+    let detail
+    try { detail = await this.projectsStore.get(agent, { projectId }) } catch (_) { return null }
+    const signals = detail?.artifacts?.signals?.data?.items || []
+    if (!signals.length) return null
+    return checkNumberConsistency(body, signals)
+  }
+
+  /**
+   * 把数字一致性结果挂到质检报告上。
+   *
+   * 措辞刻意用「素材里对不上」而不是「编造」：素材本身可能不完整
+   * （信号快照是选题那一刻的素材，正文可能引用了别处的公开数据），
+   * 这时把它判成编造是误伤。提示只说「对不上，请核对」，
+   * 让人去核，不下结论。
+   */
+  annotateNumberConsistency(report, consistency) {
+    if (!report || !consistency) return report
+    report.checks.numberConsistency = consistency
+    if (!consistency.consistent) {
+      report.recommendations = [
+        `正文里的数字 ${consistency.unsupported.join('、')} 在本稿引用的素材里对不上，保存前请核对来源。`,
+        ...(report.recommendations || []),
+      ]
+    }
+    return report
+  }
+
   /** On-demand deterministic quality analysis for the current editor body. */
   async analyzeScript(agent, request) {
     const input = object(request, '稿件质检请求')
@@ -1229,7 +1315,9 @@ export class SpokenVideoContentStore {
     await this.paths(agent)
     const corpus = this.projectsStore ? await this.projectsStore.listScriptCorpus(agent, { excludeProjectId: typeof input.projectId === 'string' ? input.projectId.toLowerCase() : undefined }) : []
     const title = typeof input.title === 'string' && input.title.trim() ? input.title.trim() : ''
-    return analyzeScriptQuality({ title, body, tier, corpus })
+    const report = analyzeScriptQuality({ title, body, tier, corpus })
+    const consistency = await this.numberConsistency(agent, typeof input.projectId === 'string' ? input.projectId.toLowerCase() : null, body)
+    return this.annotateNumberConsistency(report, consistency)
   }
 
   async startScriptGeneration(agent, request) {
@@ -1306,6 +1394,8 @@ export class SpokenVideoContentStore {
     try {
       const corpus = this.projectsStore ? await this.projectsStore.listScriptCorpus(agent, { excludeProjectId: projectId }).catch(() => []) : []
       report = analyzeScriptQuality({ title: normalized.draft.title || topicData?.title || '', body: normalized.draft.script, tier: input.tier, corpus })
+      const consistency = await this.numberConsistency(agent, projectId, normalized.draft.script)
+      this.annotateNumberConsistency(report, consistency)
     } catch (_) { /* quality is advisory; a failure must not fail the generation */ }
     await this.mutateScriptGeneration(workspace, generationsPath, id, (record) => {
       record.steps[3].status = report ? 'done' : 'error'; record.steps[3].detail = report ? `质检 ${report.qualityScore} 分（${report.verdict}）` : '质检不可用'

@@ -101,6 +101,25 @@ window.__ModuleLoader__.load({
     }
     const notify = { play: notifyPlay, playOnce: notifyOnce, unlock: notifyUnlock, notifyDesktop, requestDesktop: notifyRequestDesktop, settings: notifySettings };
     let connection; let executionRemote; let executionStreams;
+    // 执行会话请求的入参边界校验。
+    //
+    // DSH alpha.2 起，Gateway 的 client 面不再执行入参 parse：
+    // packages/api/gateway/src/client/index.ts 删掉了 parseInput()，prepareInvocation
+    // 里 `args[parameter.wire] = value` 直接赋值（alpha.1 是 parseInput(...)）。
+    // 也就是说这份 strict codec 在浏览器侧不再有上游替我们校验的等价物。
+    //
+    // 但 strict 模式本身必须保留：注册端 packages/api/gateway/src/client/index.ts 的
+    // requireStrictInputs() 只放行 mode:'strict'（mode:'src-json' 会在 $mount 时被
+    // 拒），registry 的 validateCodec() 又要求 strict codec 带 create() 工厂。
+    // 所以这里按 alpha.2 的契约写成惰性工厂，并在调用点显式跑同一份 schema，
+    // 保持 alpha.1 下「入参非法时调用前就失败」的业务行为不变。
+    let executionRequestSchemaValue = null;
+    function executionRequestSchema() {
+      if (executionRequestSchemaValue === null) {
+        executionRequestSchemaValue = { parse(value) { if (!value || typeof value.id !== 'string' || typeof value.kind !== 'string' || typeof value.role !== 'string') throw new Error('执行会话请求无效。'); return value; } };
+      }
+      return executionRequestSchemaValue;
+    }
     let audioCaptionsHandoff = null;
     // 选题页 → 写稿页：把刚加入待写稿的项目带过去，让写稿页直接选中并打开抽屉。
     // 此前选题抽屉底部只有「生成新一批 / 完成」，用户选完只能自己去切页，
@@ -779,6 +798,20 @@ window.__ModuleLoader__.load({
         .sv-vprogress-step[data-status="done"] i { transform:none; opacity:1; }
       }
       .sv-vprogress-repair { margin:0; padding:6px 8px; border-radius:6px; color:#b45309; background:rgba(245,158,11,.12); font-size:var(--lwb-text-sm,13px); line-height:1.6; }
+      /* AI 导演环节的细进度：统计徽章 + 可展开的动作时间线。
+         与渲染进度条视觉区分：这里没有百分比（事件计数不是完成度），
+         用中性的行内徽章而不是进度条，避免把「干了 12 件事」误读成「完成 60%」。 */
+      .sv-vprogress-director { display:grid; gap:6px; }
+      .sv-vprogress-director-stats { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+      .sv-vprogress-director-stat { padding:2px 9px; border:1px solid var(--lwb-line); border-radius:999px; color:var(--lwb-ink); background:var(--lwb-page); font-size:var(--lwb-text-xs,12px); line-height:1.6; font-variant-numeric:tabular-nums; }
+      .sv-vprogress-director-timeline { display:grid; gap:4px; padding:8px 9px; border:1px solid var(--lwb-line); border-radius:7px; background:var(--lwb-page); }
+      .sv-vprogress-director-row { display:grid; grid-template-columns:8px minmax(0,1fr) auto; align-items:baseline; gap:7px; font-size:var(--lwb-text-xs,12px); line-height:1.6; }
+      .sv-vprogress-director-row i { width:6px; height:6px; border-radius:50%; background:#f59e0b; align-self:center; }
+      .sv-vprogress-director-row[data-status="done"] i { background:#16865f; }
+      .sv-vprogress-director-row[data-status="error"] i { background:#d85f6d; }
+      .sv-vprogress-director-row[data-status="waiting"] i { background:#b0b9c5; }
+      .sv-vprogress-director-label { overflow:hidden; color:var(--lwb-ink); text-overflow:ellipsis; white-space:nowrap; }
+      .sv-vprogress-director-row time { color:var(--lwb-muted); font-variant-numeric:tabular-nums; }
       .sv-vprogress-bar { display:grid; gap:4px; }
       .sv-vprogress-bar-head { display:flex; align-items:baseline; justify-content:space-between; gap:8px; font-size:var(--lwb-text-sm,13px); font-weight:700; }
       .sv-vprogress-bar progress { width:100%; height:7px; border:0; border-radius:999px; appearance:none; overflow:hidden; }
@@ -1689,7 +1722,16 @@ window.__ModuleLoader__.load({
     }
     function ExecutionReport({ label, value }) {
       if (!value) return null;
-      const issues = value.issues || value.failures || value.rewriteReasons || value.warnings || [];
+      // 问题与警告要**都**列出来。此前是 `value.issues || value.failures || value.rewriteReasons || value.warnings`：
+      // 空数组在 JS 里是真值，所以一条 issues 为空、只有 warnings 的技术质检报告
+      // （正是「预检报了线索但成片通过」这种形态）永远只显示 issues 一条都拿不到，
+      // 警告被整段吞掉。改成拼接而不是取首个真值。
+      const issues = [
+        ...(Array.isArray(value.issues) ? value.issues : []),
+        ...(Array.isArray(value.failures) ? value.failures : []),
+        ...(Array.isArray(value.rewriteReasons) ? value.rewriteReasons : []),
+        ...(Array.isArray(value.warnings) ? value.warnings : []),
+      ];
       return h('article', { className: 'sv-ex-paper' }, h('div', { className: 'sv-ex-message-head' }, h('strong', null, label), Number.isFinite(value.qualityScore) ? h('span', { className: 'sv-ex-state', 'data-status': value.rewriteRequired ? 'failed' : 'succeeded' }, `${value.qualityScore} 分`) : typeof value.passed === 'boolean' ? h('span', { className: 'sv-ex-state', 'data-status': value.passed ? 'succeeded' : 'failed' }, value.passed ? '通过' : '未通过') : null), value.summary ? h(ExecutionText, { text: value.summary }) : null, issues.length ? h('ul', { className: 'sv-ex-issues' }, issues.map((item, index) => h('li', { key: index }, typeof item === 'string' ? item : item.message || item.description || exText(item)))) : null, h(ExecutionData, { label: '指标与完整证据', value }));
     }
     function executionChunks(blocks, chunk) {
@@ -1825,6 +1867,8 @@ window.__ModuleLoader__.load({
           setLoading(true); setError(null);
           try {
             if (!executionRemote) throw new Error('会话连接正在准备，请稍后重试。');
+            // alpha.2 的 Gateway client 面不再 parse 入参，这里自己守住边界。
+            executionRequestSchema().parse(sessionRequest);
             subscription = executionStreams.$stream({ name: 'spoken-video execution', open: (signal) => executionRemote.followExecution(sessionRequest, signal), ended: () => new Error('会话订阅已结束，可重新连接读取记录。'), carrierFailed: () => { if (!stopped) setError('连接中断，正在恢复会话…'); } });
             for await (const delivery of subscription) {
               const frame = delivery.value;
@@ -5022,6 +5066,7 @@ window.__ModuleLoader__.load({
     function videoTaskProgress(task, now) {
       const pipeline = task?.pipeline;
       if (!pipeline || typeof pipeline !== 'object') return null;
+      const dsh = task.dsh && typeof task.dsh === 'object' ? task.dsh : null;
       const stages = pipeline.stages && typeof pipeline.stages === 'object' ? pipeline.stages : {};
       const phase = task.phase || pipeline.phase || null;
       const activeIndex = VIDEO_PIPELINE_STAGES.findIndex((item) => item.id === phase);
@@ -5071,14 +5116,50 @@ window.__ModuleLoader__.load({
       // 而 `#setVideoPhase` 对其它阶段只在**阶段开始那一刻**写一次 `startedAt`，
       // 整个 AI 导演 / 预检 / 审片跑完都不再落任何记录（见 media-host.mjs:3924）。
       //
-      // 所以：
-      //  · 只有 `render.updatedAt` 能回答「后端还活着吗」——它是心跳。
-      //  · `stages[phase].startedAt` 只是**出生时间**。拿它算沉默，会把每个本来就要
-      //    跑十几分钟的导演/审片阶段误判成「卡住」，狼来了两次之后真卡住也没人信。
+      // 所以原本只有 `render.updatedAt` 能回答「后端还活着吗」——AI 阶段没有心跳，
+      // 导演跑十几分钟期间卡死了界面也只会说「还在进行」。
+      //
+      // 补上的第二个心跳源：DSH 子会话事件流（`dsh.sessions[*].events[*].at`）。
+      // 导演/审片的每个模型往返、每次工具调用都会实时落一条带时间戳的事件，
+      // 它就是 AI 阶段的心跳。两个心跳源取更晚的那条。
       //
       // 「没有证据说明它活着」和「有证据说明它死了」是两回事。只有后者才配报警。
-      const heartbeatMs = typeof render?.updatedAt === 'string' ? Date.parse(render.updatedAt) : NaN;
+      const lastDshAtMs = (dsh?.sessions || [])
+        .flatMap((session) => Array.isArray(session.events) ? session.events : [])
+        .reduce((latest, event) => {
+          const at = Date.parse(event?.at || '');
+          return Number.isFinite(at) && at > latest ? at : latest;
+        // 初值必须是 -Infinity 而不是 NaN：`at > NaN` 恒为 false，会让整条事件
+        // 心跳被吞掉（只有渲染心跳生效）。无事件时 -Infinity 会被下面的
+        // Number.isFinite 过滤掉，语义仍是「没有这个心跳源」。
+        }, -Infinity);
+      const heartbeatCandidates = [typeof render?.updatedAt === 'string' ? Date.parse(render.updatedAt) : NaN, lastDshAtMs]
+        .filter((value) => Number.isFinite(value));
+      const heartbeatMs = heartbeatCandidates.length ? Math.max(...heartbeatCandidates) : NaN;
       const hasHeartbeat = Number.isFinite(heartbeatMs);
+      // AI 导演的实时活动摘要：从导演子会话的事件流里取「最近在干什么」和
+      // 「已经干了多少」。这些是后端真实记录的事件，不是估算。
+      const creatorSession = (dsh?.sessions || []).find((session) => session.role === 'creator');
+      const director = creatorSession && Array.isArray(creatorSession.events) && creatorSession.events.length ? (() => {
+        const events = creatorSession.events;
+        const last = events.at(-1);
+        const lastAtMs = Date.parse(last?.at || '');
+        // 工具调用的判定与后端投影一致：detail 是工具名的就是 tool/call。
+        const toolCalls = events.filter((event) => event.status === 'running' && typeof event.detail === 'string' && event.detail).length;
+        const modelTurns = events.filter((event) => event.label === 'DSH 正在请求模型生成').length;
+        return {
+          label: typeof last?.label === 'string' ? last.label : null,
+          detail: typeof last?.detail === 'string' && last.detail ? last.detail : null,
+          // 距导演上一次动作过了多久（秒）。导演阶段专属的心跳读数。
+          idleSeconds: Number.isFinite(lastAtMs) ? Math.max(0, (now - lastAtMs) / 1000) : null,
+          toolCalls,
+          modelTurns,
+          // 最近几条动作，给时间线用。倒序，最新在上。
+          recent: events.slice(-5).reverse().map((event) => ({
+            id: event.id, label: event.label, detail: event.detail || null, at: event.at, status: event.status,
+          })),
+        };
+      })() : null;
       return {
         steps,
         phase,
@@ -5088,6 +5169,7 @@ window.__ModuleLoader__.load({
         // 距上一次**后端心跳**过了多久（秒）。没有心跳源就是 null——此时界面
         // 只说「已持续多久」，不推断死活。
         silentSeconds: hasHeartbeat ? Math.max(0, (now - heartbeatMs) / 1000) : null,
+        director,
         render,
         // 修复重试：后端记录 attempts/maxAttempts，重试期间必须让用户看见，
         // 否则长耗时的修复看起来就像卡死。
@@ -6159,10 +6241,12 @@ window.__ModuleLoader__.load({
      */
     function VideoTaskProgress({ progress, status, eta }) {
       const [open, setOpen] = React.useState(false);
+      const [directorOpen, setDirectorOpen] = React.useState(false);
       if (!progress) return null;
       const running = status === 'running';
       const repair = progress.repair;
       const render = progress.render;
+      const director = running && progress.phase === 'directing' ? progress.director : null;
       const summary = [];
       if (progress.activeSeconds != null) summary.push(`${running ? '当前阶段已用' : '本阶段用时'} ${formatElapsed(progress.activeSeconds)}`);
       if (progress.totalSeconds != null) summary.push(`总计 ${formatElapsed(progress.totalSeconds)}`);
@@ -6171,7 +6255,12 @@ window.__ModuleLoader__.load({
       else if (running && eta?.range) summary.push(`参考历史 ${eta.range}`);
       const doneCount = progress.steps.filter((step) => step.status === 'done').length;
       // 当前阶段的人话说明：告诉用户「这一步在干嘛」，而不只是阶段名。
-      const activeHint = running ? VIDEO_PHASE_HINT[progress.phase] || null : null;
+      // 导演环节有实时动作时用人话模板说「正在做哪件事」，没有动作时退回静态提示。
+      const activeHint = running
+        ? (director?.label
+          ? (director.detail ? `AI 导演：${director.label}（${director.detail}）` : `AI 导演：${director.label}`)
+          : VIDEO_PHASE_HINT[progress.phase] || null)
+        : null;
       // 长时间没有新阶段事件时的「还活着」证据：秒数本身在跳，配上明确措辞，
       // 避免用户把「卡住」和「还在跑」混为一谈。渲染阶段本身有帧进度，不重复喊。
       const stalledSeconds = running && progress.activeSeconds != null && progress.activeSeconds >= VIDEO_STALL_SECONDS
@@ -6221,6 +6310,21 @@ window.__ModuleLoader__.load({
         showStall ? h('p', { className: 'sv-vprogress-alive', role: 'status', 'data-silent': progress.silentSeconds != null && progress.silentSeconds >= VIDEO_SILENT_ALARM_SECONDS ? 'true' : 'false' },
           h('span', { className: 'sv-vprogress-alive-dot', 'aria-hidden': 'true' }),
           stallCopy) : null,
+        // AI 导演环节的细进度：模型往返与工具调用计数 + 可展开的最近动作时间线。
+        // 这些是后端真实记录的 DSH 会话事件（1.8 秒轮询刷新），不是估算的假百分比。
+        director ? h('div', { className: 'sv-vprogress-director' },
+          h('div', { className: 'sv-vprogress-director-stats' },
+            h('span', { className: 'sv-vprogress-director-stat' }, `模型往返 ${director.modelTurns}`),
+            h('span', { className: 'sv-vprogress-director-stat' }, `工具调用 ${director.toolCalls}`),
+            director.idleSeconds != null ? h('span', { className: 'sv-vprogress-director-stat' }, `上次动作 ${formatElapsed(director.idleSeconds)}前`) : null,
+            h('button', { type: 'button', className: 'sv-vprogress-toggle', 'aria-expanded': directorOpen ? 'true' : 'false', onClick: () => setDirectorOpen((value) => !value) }, directorOpen ? '收起动作' : '最近动作'),
+          ),
+          directorOpen ? h('div', { className: 'sv-vprogress-director-timeline' }, director.recent.map((event) => h('div', { key: event.id, className: 'sv-vprogress-director-row', 'data-status': event.status },
+            h('i', { 'aria-hidden': 'true' }),
+            h('span', { className: 'sv-vprogress-director-label' }, event.detail ? `${event.label} · ${event.detail}` : event.label),
+            h('time', null, formatTime(event.at)),
+          ))) : null,
+        ) : null,
         // 修复提示同理：结束后它记录的是「做过第几次修复」，不是「正在」。
         repair ? h('p', { className: 'sv-vprogress-repair', role: 'status' }, running
           ? `审片触发修复：第 ${repair.attempts}${repair.maxAttempts ? `/${repair.maxAttempts}` : ''} 次尝试，正在按审片意见重做。`
@@ -7242,7 +7346,7 @@ const label = kind === 'landscape' ? '横屏封面 16:9' : '竖屏封面 3:4';
       // Mount the pack's dynamic contract on the same native mux used by ordinary conversations.
       await executionStreams.$mount({ package: '@scitiger-ai/lwb-spoken-video', descriptors: [{
         id: '@scitiger-ai/lwb-spoken-video#spokenVideo/followExecution', service: 'spokenVideo', namespace: 'spokenVideo', method: 'followExecution', mode: 'stream', invocation: { kind: 'direct' },
-        parameters: [{ name: 'request', wire: 'request', source: 'json', codec: { mode: 'strict', typeSymbol: '@scitiger-ai/lwb-spoken-video#ExecutionRequest', schema: { parse(value) { if (!value || typeof value.id !== 'string' || typeof value.kind !== 'string' || typeof value.role !== 'string') throw new Error('执行会话请求无效。'); return value; } } } }],
+        parameters: [{ name: 'request', wire: 'request', source: 'json', codec: { mode: 'strict', typeSymbol: '@scitiger-ai/lwb-spoken-video#ExecutionRequest', create: () => executionRequestSchema() } }],
         cancellation: { parameter: 'signal' }, result: { mode: 'src-json' },
       }] });
       await ctx.plugin({ name: 'spoken-video-execution-client', inject: ['remote.spokenVideo'], apply(scope) { executionRemote = scope.get('remote.spokenVideo'); scope.effect(() => () => { executionRemote = null; }); } });

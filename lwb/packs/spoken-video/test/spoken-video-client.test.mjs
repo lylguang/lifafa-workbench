@@ -500,6 +500,55 @@ test('video task progress surfaces Remotion frame progress and repair attempts',
   assert.deepEqual(helpers.plain(progress.repair), { attempts: 2, maxAttempts: 2 })
 })
 
+test('video task progress reports precise AI director activity from DSH session events', async () => {
+  const helpers = await loadVideoProgressHelpers()
+  const now = Date.parse('2026-09-27T09:04:09.506Z')
+  const at = (secondsAgo) => new Date(now - secondsAgo * 1000).toISOString()
+  // 事件形状与 spoken-video-dsh-trace.mjs #projectDshSessionEvent 的输出一致。
+  const creatorEvents = [
+    { id: 'e1', at: at(300), status: 'running', label: 'DSH 子任务已启动', detail: null },
+    { id: 'e2', at: at(280), status: 'running', label: 'DSH 正在请求模型生成', detail: null },
+    { id: 'e3', at: at(240), status: 'running', label: 'DSH 正在调用工具', detail: 'write_file' },
+    { id: 'e4', at: at(180), status: 'done', label: '一个工具步骤已完成', detail: null },
+    { id: 'e5', at: at(120), status: 'running', label: 'DSH 正在请求模型生成', detail: null },
+    { id: 'e6', at: at(60), status: 'running', label: 'DSH 正在调用工具', detail: 'read_file' },
+  ]
+  const progress = helpers.videoTaskProgress({
+    status: 'running',
+    phase: 'directing',
+    startedAt: at(400),
+    pipeline: {
+      stages: { directing: { status: 'running', startedAt: at(300) } },
+      // 渲染心跳比导演最后一次动作更早，双心跳必须取更晚的导演事件。
+      render: { percent: 3, updatedAt: at(300) },
+    },
+    dsh: { sessions: [
+      // 审片会话不该混进「AI 导演」的统计，但它的事件仍是合法心跳来源。
+      { role: 'reviewer', events: [{ id: 'r1', at: at(500), status: 'running', label: 'DSH 正在请求模型生成', detail: null }] },
+      { role: 'creator', label: '视觉导演', events: creatorEvents },
+    ] },
+  }, now)
+  assert.equal(progress.director.modelTurns, 2, '模型往返只数导演会话里的 step/start 事件')
+  assert.equal(progress.director.toolCalls, 2, '工具调用只数带工具名且仍在运行的事件')
+  assert.equal(progress.director.label, 'DSH 正在调用工具')
+  assert.equal(progress.director.detail, 'read_file')
+  assert.equal(Math.round(progress.director.idleSeconds), 60)
+  assert.equal(progress.director.recent.length, 5, '时间线只留最近 5 条')
+  assert.equal(progress.director.recent[0].id, 'e6', '时间线最新的排在最上')
+  assert.equal(Math.round(progress.silentSeconds), 60, '双心跳取更晚的导演事件，而不是更早的渲染心跳')
+  // 事件计数不是完成度：导演阶段仍然不编造百分比。
+  assert.ok(!('percent' in progress))
+  assert.equal(progress.render.percent, 3)
+
+  // 没有任何后端心跳时，不推断死活，也不编造导演活动。
+  const quiet = helpers.videoTaskProgress({
+    status: 'running', phase: 'directing',
+    pipeline: { stages: { directing: { status: 'running', startedAt: at(600) } } },
+  }, now)
+  assert.equal(quiet.silentSeconds, null)
+  assert.equal(quiet.director, null)
+})
+
 test('video task progress marks the failing stage and freezes finished durations', async () => {
   const helpers = await loadVideoProgressHelpers()
   const task = {
@@ -566,6 +615,27 @@ test('video task card renders the progress surface instead of a bare phase label
   assert.match(page, /setInterval\(\(\) => setNow\(Date\.now\(\)\), 1000\)/u)
   assert.match(page, /videoTaskProgress\(task, now\)/u)
   assert.match(page, /videoEtaFromHistory\(taskFeed\.items/u)
+})
+
+test('video task card renders precise director activity without a fabricated percentage', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function VideoTaskProgress(')
+  const end = source.indexOf('\n    function VideoPreviewPageV2(', start)
+  assert.ok(start >= 0 && end > start, 'VideoTaskProgress must remain a standalone component')
+  const component = source.slice(start, end)
+  // 细进度只在 AI 导演阶段、且确实有 DSH 事件时出现。
+  assert.match(component, /progress\.phase === 'directing' \? progress\.director : null/u)
+  assert.match(component, /sv-vprogress-director/u)
+  assert.match(component, /`模型往返 \$\{director\.modelTurns\}`/u)
+  assert.match(component, /`工具调用 \$\{director\.toolCalls\}`/u)
+  assert.match(component, /最近动作/u)
+  // 当前动作要进主提示行，不能只显示一句静态的「AI 正在设计分镜和画面」。
+  assert.match(component, /AI 导演：\$\{director\.label\}/u)
+  // 事件计数不是完成度：导演块内不画进度条、不写百分比（假精度比没有进度更伤人）。
+  const directorBlock = component.slice(component.indexOf("director ? h('div'"), component.indexOf('// 修复提示同理'))
+  assert.ok(directorBlock.length > 0)
+  assert.doesNotMatch(directorBlock, /percent|h\('progress'/u)
+  assert.match(source, /\.sv-vprogress-director \{ display:grid; gap:6px; \}/u, '导演细进度需要配套样式')
 })
 
 test('video progress keeps ticking when a running task is off the current page', async () => {
@@ -1021,9 +1091,19 @@ test('a finished render reports completion instead of still claiming to render',
   // 沉默时长必须从**后端心跳**算，不能从本地 now 减本地 now，也不能拿阶段出生时间冒充。
   const progressFn = source.slice(source.indexOf('function videoTaskProgress('), source.indexOf('function videoTaskDurationSeconds('))
   assert.match(progressFn, /updatedAt: typeof rawRender\.updatedAt === 'string'/u, '渲染进度要带上后端的 updatedAt')
-  // 心跳只认 render.updatedAt：别的阶段只在开始时写一次 startedAt，拿它算沉默
-  // 会把每个正常跑十几分钟的导演/审片阶段误报成「卡住」。
-  assert.match(progressFn, /const heartbeatMs = typeof render\?\.updatedAt === 'string' \? Date\.parse\(render\.updatedAt\) : NaN;/u, '心跳源只能是渲染进度的 updatedAt')
+  // 心跳只认「会持续更新的后端时间戳」：渲染进度的 render.updatedAt + DSH 会话
+  // 事件时间，两者取更晚。其它阶段只在开始时写一次 startedAt，拿它算沉默会把
+  // 每个正常跑十几分钟的导演/审片阶段误报成「卡住」——这条不变量不变，只是
+  // 导演/审片现在有了自己的心跳源（每个模型往返、每次工具调用都落一条事件）。
+  assert.match(progressFn, /heartbeatCandidates/u, '沉默判定必须合并渲染心跳与 DSH 事件心跳')
+  assert.match(progressFn, /Math\.max\(\.\.\.heartbeatCandidates\)/u, '双心跳必须取更晚的一条')
+  assert.match(progressFn, /dsh\?\.sessions \|\| \[\]/u, 'DSH 事件心跳必须来自会话事件流')
+  // 光有「候选集」这个名字不够：必须能证明两个源都是**后端时间戳**。少了下面
+  // 三条，把 render.updatedAt 换成 Date.now()、或拿本地时钟冒充事件时间，上面
+  // 三条断言照样全过，而界面又会在后端已死时假装活着。
+  assert.match(progressFn, /typeof render\?\.updatedAt === 'string' \? Date\.parse\(render\.updatedAt\) : NaN/u, '渲染心跳必须来自后端 updatedAt，不能是本地时钟')
+  assert.match(progressFn, /Date\.parse\(event\?\.at \|\| ''\)/u, '事件心跳必须解析后端写入的 at，不能是本地时钟')
+  assert.match(progressFn, /\.filter\(\(value\) => Number\.isFinite\(value\)\)/u, '无效时间戳必须被过滤，不能让 NaN 混进 Math.max')
   assert.doesNotMatch(progressFn, /stages\[phase\]\?\.startedAt/u, '阶段出生时间不能当心跳用')
   assert.match(progressFn, /silentSeconds: hasHeartbeat \? Math\.max\(0, \(now - heartbeatMs\) \/ 1000\) : null/u, '没有心跳源时必须是 null，不推断死活')
   assert.doesNotMatch(progressFn, /silentSeconds.*?Date\.now\(\)/u, '不能拿本地时钟冒充后端心跳')
@@ -1184,3 +1264,22 @@ test('publish shelf tags a manually-released cut so the user sees it from the ot
 
 
 
+
+test('followExecution keeps the strict codec contract and guards the payload before dispatch', async () => {
+  const source = await readFile(clientPath, 'utf8')
+
+  // DSH alpha.2 起 Typert strict codec 的契约是 `create: () => TypertSchema`：
+  // registry 的 validateCodec() 与 loader 的 requireStrictCodec() 都会拒绝
+  // 只带 `schema` 的 strict codec，client entry 直接 failed（web boot: N entries did not activate）。
+  assert.match(source, /codec: \{ mode: 'strict', typeSymbol: '@scitiger-ai\/lwb-spoken-video#ExecutionRequest', create: \(\) => executionRequestSchema\(\) \}/u)
+  assert.doesNotMatch(source, /codec: \{ mode: 'strict', typeSymbol: '@scitiger-ai\/lwb-spoken-video#ExecutionRequest', schema:/u)
+
+  // alpha.2 的 Gateway client 面删掉了 parseInput()，浏览器侧不再有上游替我们校验入参。
+  // 因此调用点必须自己跑同一份 schema，保持「入参非法时调用前就失败」的业务行为。
+  assert.match(source, /executionRequestSchema\(\)\.parse\(sessionRequest\);/u)
+  assert.match(source, /executionRemote\.followExecution\(sessionRequest, signal\)/u)
+
+  // schema 工厂必须惰性物化并缓存：create() 契约要的是工厂，重复物化会得到不同对象。
+  assert.match(source, /let executionRequestSchemaValue = null/u)
+  assert.match(source, /if \(executionRequestSchemaValue === null\)/u)
+})

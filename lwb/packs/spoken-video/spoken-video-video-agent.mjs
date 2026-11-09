@@ -149,6 +149,9 @@ export function buildVideoCreatorRepairPrompt({ runDir, report, attempt, maximum
     // 场景时长守卫（scene-pacing）打回的问题根因在 SCENES 表：改组件改不了节奏。
     // 必须拆分超长/雷同的幕并按字幕真实时间戳校准新边界，然后重跑预检确认。
     '若上述问题以 scene-pacing 开头：那是场景节奏守卫的判定，必须通过调整 SCENES 表解决——拆分超长或版式雷同的幕、让每幕只讲一件事，新边界回 inputs/subtitles.srt 按真实 cue 起止校准；只改画面组件无法通过下一轮检查。',
+    // 零音效是硬拦截项：它必须真被修好，否则整轮判死。修复方式有明确约束，
+    // 不能自己编音效名（Remotion 会静默跳过缺失的 <Audio>），也不能引入外部音频。
+    '若上述问题提到「全片没有任何音效」：必须真的补上音效，不能只改说明文字。先用文件工具列出 public/sfx/ 下实际存在的 .wav 文件名（不要凭记忆猜名字），再在 src/CreativeVideo.tsx 里用 <Sequence from={帧} durationInFrames={24} layout="none" premountFor={30}><Audio src={staticFile("sfx/<实际文件名>.wav")} volume={0.35}/></Sequence> 的写法，把音效铺到场景切换与关键结论落点上，密度按每分钟 6–10 处。只引用真实存在的文件；音效目录里没有的文件一律不要写。',
     '使用帧驱动动画；不需要 CSS 过渡时删除属性或明确使用 none。完成后运行 node scripts/preflight.mjs，确认检查通过。不要重建整个工程或重新生成上游素材。',
   ].join('\n\n')
 }

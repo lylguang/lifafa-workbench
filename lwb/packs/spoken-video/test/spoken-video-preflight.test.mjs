@@ -3,7 +3,7 @@ import test from 'node:test'
 import { mkdtemp, mkdir, readFile, readdir, writeFile, rm, realpath, lstat, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { inspectCreativeSource, inspectSceneBoundaryCoverage, inspectSfxUsage, inspectTimelineAlignment } from '../spoken-video-preflight.mjs'
 import { inspectContentSafety } from '../spoken-video-content-safety.mjs'
@@ -706,16 +706,13 @@ test('音效包是 10 枚本地合成音，且每一枚都够响（不会被旁�
   const workspace = await prepareSpokenVideoAgentProject({ projectRoot: dir, runId: 'sfx', audioPath, title: 't', script: 's', durationSeconds: 2, subtitles: [], subtitleEnabled: false })
   const expected = ['whoosh', 'pop', 'ding', 'riser', 'impact', 'tick', 'swoosh-up', 'paper', 'blip', 'swell']
   const sfxDir = join(workspace.projectDir, 'public', 'sfx')
+  // 逐枚量峰值：ffmpeg 把 volumedetect 打在 stderr（直接调用，不依赖 Unix shell / grep 管道）
+  const peaks = {}
   for (const name of expected) {
     const file = join(sfxDir, `${name}.wav`)
     assert.ok(existsSync(file), `${name}.wav 必须生成`)
-    const peak = execFileSync('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8', stdio: 'pipe', stderr: 'pipe' }).toString()
-    void peak
-  }
-  // 逐枚量峰值：ffmpeg 把 volumedetect 打在 stderr
-  const peaks = {}
-  for (const name of expected) {
-    const out = execFileSync('sh', ['-c', `ffmpeg -hide_banner -nostats -i "${join(sfxDir, name + '.wav')}" -af volumedetect -f null - 2>&1 | grep max_volume`], { encoding: 'utf8' })
+    const r = spawnSync('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-af', 'volumedetect', '-f', 'null', '-'], { encoding: 'utf8', stdio: 'pipe' })
+    const out = (r.stdout || '') + (r.stderr || '')
     peaks[name] = Number(/max_volume: (-?[\d.]+) dB/u.exec(out)?.[1])
   }
   for (const [name, peak] of Object.entries(peaks)) {
@@ -727,23 +724,43 @@ test('音效包是 10 枚本地合成音，且每一枚都够响（不会被旁�
 test('音效审计：不存在的音效名、整片无声、密度过高都要报出来', () => {
   const kit = ['whoosh.wav', 'pop.wav', 'ding.wav', 'riser.wav', 'impact.wav']
   const audio = (name) => `const Sfx=()=>(<Sequence from={0} durationInFrames={24} layout="none"><Audio src={staticFile("sfx/${name}.wav")} volume={0.34}/></Sequence>);`
-  // 引用了目录里没有的文件：Remotion 会静默跳过，音效凭空消失
+  // 引用了目录里没有的文件：Remotion 会静默跳过，音效凭空消失。只是警告（修复轮能顺手改）。
   const missing = inspectSfxUsage(audio('whoosh2'), { available: kit })
-  assert.equal(missing.length, 1)
-  assert.equal(missing[0].code, 'sfx-missing')
-  assert.match(missing[0].message, /whoosh2\.wav/u)
+  assert.equal(missing.findings.length, 0)
+  assert.equal(missing.warnings.length, 1)
+  assert.equal(missing.warnings[0].code, 'sfx-missing')
+  assert.match(missing.warnings[0].message, /whoosh2\.wav/u)
   // 正常引用不报
-  assert.deepEqual(inspectSfxUsage(audio('whoosh'), { available: kit, durationSeconds: 240 }), [])
-  // 长片一个音效都没有
+  assert.deepEqual(inspectSfxUsage(audio('whoosh'), { available: kit, durationSeconds: 240 }), { findings: [], warnings: [] })
+  // 长片一个音效都没有：2026-11-08 起是阻断项（走 findings）。
   const silent = inspectSfxUsage('export const X=()=>null', { available: kit, durationSeconds: 240 })
-  assert.equal(silent[0]?.code, 'sfx-absent')
-  // 短片不因没有音效而警告（几十秒的片子可以不铺）
-  assert.deepEqual(inspectSfxUsage('export const X=()=>null', { available: kit, durationSeconds: 40 }), [])
-  // 密度过高：60 秒里 15 处 = 15 处/分钟 > 12
+  assert.equal(silent.findings.length, 1)
+  assert.equal(silent.findings[0].code, 'sfx-absent')
+  assert.equal(silent.warnings.length, 0)
+  // 短片不因没有音效而报（几十秒的片子可以不铺）
+  assert.deepEqual(inspectSfxUsage('export const X=()=>null', { available: kit, durationSeconds: 40 }), { findings: [], warnings: [] })
+  // 密度过高：60 秒里 15 处 = 15 处/分钟 > 12。只是警告。
   const dense = inspectSfxUsage(Array.from({ length: 15 }, () => audio('pop')).join('\n'), { available: kit, durationSeconds: 60 })
-  assert.equal(dense[0]?.code, 'sfx-density')
+  assert.equal(dense.findings.length, 0)
+  assert.equal(dense.warnings[0]?.code, 'sfx-density')
   // 不知道时长时不判断密度（不猜）
-  assert.deepEqual(inspectSfxUsage(Array.from({ length: 15 }, () => audio('pop')).join('\n'), { available: kit }), [])
+  assert.deepEqual(inspectSfxUsage(Array.from({ length: 15 }, () => audio('pop')).join('\n'), { available: kit }), { findings: [], warnings: [] })
+})
+
+test('音效包本身没生成时，零音效只警告不判死', () => {
+  // ffmpeg 缺失导致 public/sfx/ 是空目录时，模型根本无从引用音效。
+  // 这时判死等于让整轮白跑——预检会让修复轮反复尝试引用不存在的文件。
+  const audio = 'const Sfx=()=>(<Sequence from={0} durationInFrames={24} layout="none"><Audio src={staticFile("sfx/whoosh.wav")} volume={0.34}/></Sequence>);'
+  const noKit = inspectSfxUsage(audio, { available: [], durationSeconds: 240 })
+  assert.equal(noKit.findings.length, 0)
+  // 目录存在但为空：available=[] → 不判死
+  const emptyKit = inspectSfxUsage('export const X=()=>null', { available: [], durationSeconds: 240 })
+  assert.equal(emptyKit.findings.length, 0)
+  assert.equal(emptyKit.warnings[0]?.code, 'sfx-absent')
+  // 目录读不出来（available=null）：同样不判死
+  const unknownKit = inspectSfxUsage('export const X=()=>null', { available: null, durationSeconds: 240 })
+  assert.equal(unknownKit.findings.length, 0)
+  assert.equal(unknownKit.warnings[0]?.code, 'sfx-absent')
 })
 
 test('动效基元文件随任务下发：过渡与入场分层不需要 Agent 自己重写', async (t) => {

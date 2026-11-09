@@ -18,7 +18,7 @@
 
 本仓库源自「老傅工作台」（[ScarecrowFu/dsh-laofu-workbench](https://github.com/ScarecrowFu/dsh-laofu-workbench)），并在能力包与运行层做了系统性生产增强——音画同步、云端配音、定时任务音色预设、稳定性与 Windows 适配等，逐项根因分析与改动清单见[本地增强说明](docs/36-local-enhancements.md)，要点速览见[下文](#相对上游的升级点)。
 
-> 当前为开发预览版，面向本机单用户使用。主要验证环境为 macOS；Linux / Windows 的完整安装与媒体制作流程尚未在本文中提供验证承诺。运行时锁定 DSH `dsh-v0.1.6-alpha.1`，具体版本以 [UPSTREAM.lock.json](lwb/UPSTREAM.lock.json) 为准。
+> 当前为开发预览版，面向本机单用户使用。主要验证环境为 macOS；Linux / Windows 的完整安装与媒体制作流程尚未在本文中提供验证承诺。运行时锁定 DSH `dsh-v0.1.6-alpha.2`，具体版本以 [UPSTREAM.lock.json](lwb/UPSTREAM.lock.json) 为准。
 
 ## 工作台与场景能力包
 

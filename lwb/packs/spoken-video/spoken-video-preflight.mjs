@@ -173,32 +173,51 @@ export async function inspectSubtitleAudioAlignment(projectDir, srt) {
 }
 
 /**
- * 音效使用审计——只产警告，不阻塞渲染。
+ * 音效使用审计。
  *
  * 背景（2026-11-01）：音效包从 3 枚扩到 10 枚，并放宽到「每分钟 6–10 处」。
  * 但提示词只是建议，Agent 实际可能：① 引用不存在的音效名（自己编个 whoosh2.wav），
  * Remotion 会静默跳过 → 音效凭空消失；② 整片一个音效都不用（实测旧片 233 秒
- * 仅 17 处）；③ 反过来堆得太密，变成噪音。三种都只警告：
- * 前两种影响观感但不破坏产物，第三种属于风格判断。
+ * 仅 17 处）；③ 反过来堆得太密，变成噪音。
+ *
+ * 2026-11-08：②从「警告」升为「阻断」。实测一次 278 秒的成片整片零音效，
+ * 而当轮预检报 pass、技术质检报 pass、审片 82 分通过——三道门都没拦住，
+ * 用户拿到的成片听感发干却没有任何线索。原因是提示词给了逃生口
+ * （「若目录里没有这些文件，就不要虚构音效」），Agent 用裸 glob
+ * `public/sfx/*.wav` 搜索、搜索工具按会话 cwd 解析 glob 而非按搜索根解析，
+ * 于是返回「No files found」，模型就合法地写了零音效。
+ * 零音效是**产物级缺陷**（观感明显受损），不是风格偏好，所以必须硬拦截：
+ * 走 findings 通道 → passed=false → 进修复轮 → 修复不了就判死，
+ * 而不是像现在这样只留一条谁也看不见的警告。
+ *
+ * ① 与 ③ 仍是警告：引用错名字可以在修复轮里顺手改掉，密度过高属于风格判断，
+ * 两者都不该让整轮报废。
+ *
+ * @returns 阻断性 findings 与非阻断性 warnings
  */
 export function inspectSfxUsage(source, { durationSeconds = null, available = null } = {}) {
+  const findings = []
   const warnings = []
-  const report = (code, message) => warnings.push({ code, file: 'src/CreativeVideo.tsx', line: 1, column: 1, message })
+  const report = (code, message) => ({ code, file: 'src/CreativeVideo.tsx', line: 1, column: 1, message })
   const names = [...source.matchAll(/sfx\/([\w.-]+)\.wav/gu)].map((match) => `${match[1]}.wav`)
   const unique = [...new Set(names)]
   if (available) {
     const unknown = unique.filter((name) => !available.includes(name))
-    if (unknown.length) report('sfx-missing', `引用了音效目录里不存在的文件：${unknown.join('、')}。Remotion 遇到缺失的 <Audio> 会静默跳过，音效不会响。请只用 public/sfx/ 里实际存在的文件（当前：${available.join('、')}）。`)
+    if (unknown.length) warnings.push(report('sfx-missing', `引用了音效目录里不存在的文件：${unknown.join('、')}。Remotion 遇到缺失的 <Audio> 会静默跳过，音效不会响。请只用 public/sfx/ 里实际存在的文件（当前：${available.join('、')}）。`))
   }
   // 计数按 <Audio src={staticFile("sfx/...")}> 出现次数，而不是去重后的文件名。
   const uses = (source.match(/sfx\/[\w.-]+\.wav/gu) ?? []).length
   const seconds = Number(durationSeconds)
   if (Number.isFinite(seconds) && seconds > 0) {
     const perMinute = uses / (seconds / 60)
-    if (seconds >= 90 && uses === 0) report('sfx-absent', `全片 ${Math.round(seconds)} 秒没有任何音效。没有声音设计的成片听感发干——至少给场景切换与关键结论铺音效。`)
-    else if (perMinute > 12) report('sfx-density', `音效密度 ${perMinute.toFixed(1)} 处/分钟，超过建议上限 10 处/分钟：音效会从「强调」变成「噪音」。`)
+    if (seconds >= 90 && uses === 0) {
+      const message = `全片 ${Math.round(seconds)} 秒没有任何音效。没有声音设计的成片听感发干——至少给场景切换与关键结论铺音效。请在 CreativeVideo.tsx 里用 staticFile("sfx/<文件名>.wav") 引用 public/sfx/ 下实际存在的音效（当前：${available && available.length ? available.join('、') : '目录未生成'}）。`
+      // 音效包本身没生成（ffmpeg 缺失等）时不能判死：模型无从引用，硬拦只会白跑一轮。
+      if (available && available.length) findings.push(report('sfx-absent', message))
+      else warnings.push(report('sfx-absent', message))
+    } else if (perMinute > 12) warnings.push(report('sfx-density', `音效密度 ${perMinute.toFixed(1)} 处/分钟，超过建议上限 10 处/分钟：音效会从「强调」变成「噪音」。`))
   }
-  return warnings
+  return { findings, warnings }
 }
 
 export async function inspectAgentProject(workspace) {
@@ -230,11 +249,14 @@ export async function inspectAgentProject(workspace) {
       warnings.push(...await inspectSubtitleAudioAlignment(workspace.projectDir, srt))
     }
     // 音效审计：引用了不存在的音效 / 整片没有音效 / 堆得太密。
+    // 只有「整片零音效」是阻断项（走 findings），其余仍是警告。
     const sfxAvailable = await readdir(join(workspace.projectDir, 'public', 'sfx')).catch(() => null)
-    warnings.push(...inspectSfxUsage(creativeSource, {
+    const sfxAudit = inspectSfxUsage(creativeSource, {
       durationSeconds: workspace.durationSeconds ?? null,
       available: sfxAvailable ? sfxAvailable.filter((name) => name.endsWith('.wav')) : null,
-    }))
+    })
+    findings.push(...sfxAudit.findings)
+    warnings.push(...sfxAudit.warnings)
   }
   return {
     passed: findings.length === 0,

@@ -1,16 +1,41 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { linkDirectoryForTest } from './fs-link-helper.mjs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import test from 'node:test'
 import { WebSocketServer } from 'ws'
 import { buildTechnicalReport, DEFAULT_VIDEO_VISUAL_BRIEF, DEFAULT_VOICE_PROFILE, mediaServiceConfig, normalizeProbe, normalizeRenderRequest, normalizeVoiceoverRequest, subtitleResult } from '../spoken-video-media.mjs'
 import { SpokenVideoProjectStore, SpokenVideoStoreError } from '../spoken-video-store.mjs'
 import { SpokenVideoMediaHost, groupRunsByCharWeight, parseRemotionRenderProgress, parseSceneSpans, reviewTimestamps, REVIEW_FRAME_LIMIT, REVIEW_FRAME_HARD_LIMIT, REVIEW_MAX_GAP_SECONDS, analyzeFrameContent } from '../spoken-video-media-host.mjs'
 import { remotionEncodingSettings, remotionRendererAvailable } from '../spoken-video-remotion.mjs'
+import { fileURLToPath } from 'node:url'
+
+// 渲染测试需要一个能用的浏览器。优先用外部环境变量（LWB_REMOTION_BROWSER_EXECUTABLE /
+// LWB_REMOTION_HEADLESS_SHELL）；否则回退到 Remotion 自带的 chrome-headless-shell，
+// 让测试不依赖运行机器是否预先配好浏览器，也不受其它测试对 process.env 的改动影响。
+if (!process.env.LWB_REMOTION_BROWSER_EXECUTABLE && !process.env.LWB_REMOTION_HEADLESS_SHELL) {
+  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..')
+  const base = join(repoRoot, 'node_modules', '.remotion', 'chrome-headless-shell')
+  const findShell = (dir, depth) => {
+    if (depth <= 0 || !existsSync(dir)) return null
+    let entries
+    try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return null }
+    for (const ent of entries) {
+      const p = join(dir, ent.name)
+      if (/^chrome-headless-shell(\.exe)?$/u.test(ent.name)) return p
+      if (ent.isDirectory()) {
+        const nested = findShell(p, depth - 1)
+        if (nested) return nested
+      }
+    }
+    return null
+  }
+  const shell = findShell(base, 4)
+  if (shell) process.env.LWB_REMOTION_BROWSER_EXECUTABLE = shell
+}
 
 function agent(cwd) { return { session: { header: { cwd } } } }
 

@@ -765,7 +765,11 @@ export function browserExecutableArgs() {
  * 作用是在跑完整片（几分钟）之前，拦住「浏览器能启动、但整页画不出任何东西」
  * 这种最坑的情况——2026-10-21 用户连续三次视频失败：渲染退出码 0、成片却全是
  * 透明/纯色，还被技术质检误判成「内容问题」。这种失败等 3 分钟毫无意义，
- * 探测用 15 秒预算即可判定。
+ * 探测预算本是 15 秒即可判定——但 2026-11-09 复核发现：在资源紧张的进程里
+ * （例如完整测试套件连跑几百个用例后，node 进程已占用大量内存/CPU，
+ * chrome-headless-shell 冷启动 + 渲染首帧会明显变慢），15 秒会被探针超时误判成
+ * 「探测帧只有一种颜色」，导致本可成功的渲染直接失败、需重跑。放宽到 60 秒给
+ * 慢启动留足余量；正常机器仍远快于此上限，只是放宽天花板，不拖慢正常探测。
  *
  * 用 rgb24 而非带 alpha 的格式：透明整页在 rgb24 下会塌成单一黑色，与 Edge 正常
  * 渲染出的多样画面可区分。阈值取「≥ 2 种颜色」——只要能画出哪怕一个元素即可，
@@ -775,7 +779,7 @@ export function browserExecutableArgs() {
  * @param {string} projectDir 已写好的 Remotion 工程目录（含 src/index.ts 与 props）
  * @returns {Promise<boolean>} 管线能画出内容则为 true
  */
-const RENDER_PROBE_TIMEOUT_MS = 15_000
+const RENDER_PROBE_TIMEOUT_MS = 60_000
 async function probeRenderPipeline(executable, projectDir, signal) {
   const out = join(projectDir, 'outputs', '.preflight-probe.png')
   await mkdir(dirname(out), { recursive: true, mode: 0o700 })

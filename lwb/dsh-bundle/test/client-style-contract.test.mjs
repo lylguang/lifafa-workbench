@@ -161,6 +161,76 @@ test('capability pages use the available workbench canvas', async () => {
   assert.match(source, /state\.page === 'capability' \? 'lwb-page lwb-page-capability' : 'lwb-page'/u)
 })
 
+test('session switching navigates through the DSH view owner instead of the retired ISessions.open', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function showConversation(sessionId)')
+  const end = source.indexOf('\n    async function refreshRuntime', start)
+  assert.ok(start >= 0 && end > start, 'client must define showConversation')
+
+  const action = source.slice(start, end)
+  assert.match(action, /services\?\.uiWorkspace\?\.openSession\?\.\(sessionId\)/u)
+  assert.doesNotMatch(action, /sessions\?\.open/u)
+})
+
+test('the sidebar derives the current session from the mainView retention instead of the removed sessions.current', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('function ConversationOverlay({ renderSlot })')
+  const end = source.indexOf('\n    function ', start + 1)
+  assert.ok(start >= 0 && end > start, 'client must define the conversation overlay')
+  const overlay = source.slice(start, end)
+
+  assert.match(overlay, /useObservable\(services\?\.sessions\?\.list, \{ ids: \[\], byId: \{\}, phase: 'pending' \}\)/u)
+  assert.match(overlay, /const currentSessionId = Object\.values\(sessions\.byId \|\| \{\}\)[\s\S]*?\.find\(\(item\) => \(item\?\.retainedBy\?\.mainView \?\? 0\) > 0\)\?\.id;/u)
+  assert.match(overlay, /\(!item\.blank \|\| currentSessionId === id\)/u)
+  assert.match(overlay, /'data-active': currentSessionId === id \? 'true' : 'false'/u)
+  assert.match(overlay, /workspaceGroups\.find\(\(workspace\) => workspace\.sessionIds\.includes\(currentSessionId\)\)/u)
+  assert.doesNotMatch(overlay, /sessions\.current/u)
+})
+
+test('renaming a session borrows a retained generation through sessions.using', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf("dialog.kind === 'rename-session'")
+  const end = source.indexOf("dialog.kind === 'archive-session'", start)
+  assert.ok(start >= 0 && end > start, 'client must define the session rename action')
+
+  const action = source.slice(start, end)
+  assert.match(action, /await services\.sessions\.using\([\s\S]*?dialog\.sessionId,[\s\S]*?\{ source: 'workspaceOperation' \},[\s\S]*?\(reference\) => reference\.binding\.session\.rename\(title\),[\s\S]*?\)/u)
+  assert.doesNotMatch(action, /sessions\?\.binding/u)
+})
+
+test('forking a session opens the child through the DSH navigation service', async () => {
+  const source = await readFile(clientPath, 'utf8')
+  const start = source.indexOf('const forkSession = async (sessionId) =>')
+  const end = source.indexOf('\n      const repairSessionWorkspace', start)
+  assert.ok(start >= 0 && end > start, 'client must define the session fork action')
+
+  const action = source.slice(start, end)
+  assert.match(action, /await services\.uiWorkspace\.forkSession\(sessionId\)/u)
+  assert.match(action, /services\?\.uiWorkspace\?\.openSession\?\.\(childSessionId\)/u)
+  assert.doesNotMatch(action, /sessions\.open/u)
+})
+
+test('no retired alpha.1 session API survives in the LWB client bundles', async () => {
+  const sources = await Promise.all([
+    readFile(clientPath, 'utf8'),
+    readFile(new URL('../../packs/publisher/client.js', import.meta.url), 'utf8'),
+    readFile(new URL('../../packs/analytics/client.js', import.meta.url), 'utf8'),
+    readFile(new URL('../../packs/manual-script-video/client.js', import.meta.url), 'utf8'),
+    readFile(new URL('../../packs/spoken-video/client.js', import.meta.url), 'utf8'),
+    readFile(new URL('../../packs/benchmark/client.js', import.meta.url), 'utf8'),
+  ])
+
+  for (const source of sources) {
+    assert.doesNotMatch(source, /sessions\.open\(/u)
+    assert.doesNotMatch(source, /sessions\?\.open/u)
+    assert.doesNotMatch(source, /sessions\.clear\(/u)
+    assert.doesNotMatch(source, /sessions\.current\b/u)
+    assert.doesNotMatch(source, /sessions\.binding\(/u)
+    assert.doesNotMatch(source, /sessions\.scope\(/u)
+    assert.doesNotMatch(source, /sessions\.close\(/u)
+  }
+})
+
 test('new conversation delegates workspace selection to the DSH navigation service', async () => {
   const source = await readFile(clientPath, 'utf8')
   const start = source.indexOf('function createConversation(workspaceId)')
